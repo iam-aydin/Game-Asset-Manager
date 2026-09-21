@@ -1,5 +1,5 @@
 # Game Asset Manager
-![meshFlask screenshot](docs/screenshot.jpg)
+![Game Asset Manager screenshot](docs/screenshot.jpg)
 > Forked from [mthorson](https://github.com/mthorson) by [iam-aydin](https://github.com/iam-aydin) and restructured as **Game Asset Manager** to focus specifically on game asset organization and workflow management.
 
 A desktop browser and organizer for game assets and 3D model files.
