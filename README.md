@@ -4,41 +4,111 @@
 
 A desktop browser and organizer for game assets and 3D model files.
 
-### Supported File Formats
+---
 
-Currently supported 3D model formats:
-**fbx, gltf, glb, obj, stl, ply, 3mf**
+## 📋 What's New in v0.7.5
 
-> ⚠️ **Current Limitations & Future Roadmap:**
-> Support for **audio files** (e.g., `.wav`, `.mp3`), **standalone image files** (e.g., `.png`, `.jpg`), and **text note files** (e.g., `.txt`) is planned for a future update. At present, these file types will not appear in the asset browser.
-
-Is your collection of FBX models, GLTF assets, and 3D environment files a dumpster fire? Well then, this app is for you!
+* 📦 **Media Support:** Added full format support for Audio (`.wav`, `.mp3`, `.flac`), Image (`.png`, `.jpg`, `.jpeg`, `.bmp`), and Text (`.txt`, `.md`) assets.
+* 🎵 **Audio DSP:** Interactive player with pitch shifting, 3-band EQ (Sub Bass, Bass, Treble), and support for up to 200 files.
+* 🖼️ **Image & Text Viewer:** Native preview support for images and built-in viewing for text files.
+* 🎮 **Viewport Navigation:** Added WASD controls (`W`/`S` to zoom, `A`/`D` to pan left/right, `Shift + W`/`S` to move up/down).
+* 🖼️ **Thumbnail Fixes:** Resolved thumbnail loading and rendering issues.
+* 📁 **Side Panel Fixes:** Fixed "Show in Folder" and file "Rename" functions in the left sidebar.
 
 ---
 
-## What's in it
+## 📦 Supported File Formats
 
-Open one or more folders as "libraries". Each library gets its own SQLite database (`.meshFlask.db` at the library root) tagged with a UUID; the per-machine mount path lives in your user app data. Move the library between machines and the app reconnects by UUID — you just edit one line in `libraries.json`.
-
-Once a library is attached, you get:
-
-* **Virtualized thumbnail grid** (scales gracefully to libraries with thousands of files) plus a dense list view.
-* **Hierarchical tags**. Tag something `characters/heroes/Aragorn` and it shows up under all three tags.
-* **1–5 star ratings and 5 color labels**. Keyboard shortcuts: `1`–`5` for stars, `Cmd+1`..`Cmd+5` for color labels, `Cmd+0` to clear.
-* **Free-text notes per file** with debounced auto-save.
-* **Manual collections & smart collections** (saved filter queries).
-* **Per-file orientation override** (models that import sideways stay fixed across sessions).
-* **Interactive 3D preview** with five lighting presets, four render quality tiers, and a "capture current view as thumbnail" button that remembers camera angle settings.
-* **Fast search** across filename + tags + parsed metadata using SQLite FTS5.
-* **Fullscreen preview (`Space`)**, 2-up compare with synced cameras, batch rename, ZIP, and contact-sheet export.
-* **File operations**: Drag a file onto a folder to move it, `Cmd+D` to duplicate, `Delete` to send to trash (with confirmation).
-* **External-app launcher** with CLI template support (`{file}`, `{profile}`) so external tools or DCC engines can be invoked from the right-click menu.
-
-Built with Electron, runs on macOS, Windows, and Linux. See [Packaging a release](https://www.google.com/search?q=%2523packaging-a-release&utm_source=gemini) for installer scripts.
+* **3D Models:** `.fbx`, `.gltf`, `.glb`, `.obj`, `.stl`, `.ply`, `.3mf`
+* **Audio Assets:** `.wav`, `.mp3`, `.flac`
+* **Image Assets:** `.png`, `.jpg`, `.jpeg`, `.bmp`
+* **Text & Notes:** `.txt`, `.md`
 
 ---
 
-## Running it locally
+## ✨ Key Features
+
+### 🎮 Interactive 3D Viewport
+
+* **WASD Navigation:** Move around models effortlessly (`W`/`S` to zoom, `A`/`D` to pan left/right, `Shift + W`/`S` to pan up/down).
+* **Lighting & Render Control:** Choose from 5 lighting presets and 4 quality tiers.
+* **Custom Thumbnail Snapshots:** Capture any camera angle as the permanent asset thumbnail with one click.
+* **Orientation Overrides:** Set per-file rotation corrections for assets that import sideways.
+
+### 🎵 Built-In Audio DSP Studio
+
+* **Interactive Equalizer:** Real-time 3-band EQ control over **Sub Bass**, **Bass**, and **Treble**.
+* **Pitch Shifting:** Adjust pitch on the fly ($\pm 12$ semitones) for sound design testing.
+* **Waveform Visualization:** Integrated waveform overlays on the audio seekbar.
+* **Large Library Support:** Smoothly browse and play collections with over 200+ audio files.
+
+### 🖼️ Image & Text Viewers
+
+* **Native Texture Preview:** Inspect 2D image files directly in the viewport.
+* **Text & Markdown Reader:** View project notes, license files, and documentation alongside your models.
+
+### 🏷️ Organization & Smart Search
+
+* **Hierarchical Tagging:** Tag assets like `characters/heroes/hero_01` to automatically organize them under parent categories.
+* **Ratings & Labels:** Assign 1–5 star ratings (`1`–`5`) and color codes (`Cmd/Ctrl+1`–`5`) with instant keyboard shortcuts.
+* **Smart Collections:** Save custom search queries and filter combinations.
+* **SQLite FTS5 Fast Search:** Instant search across file names, tags, and metadata.
+
+### ⚡ Workflow & File Operations
+
+* **Drag-and-Drop Management:** Drag files directly into folders to move them, duplicate with `Cmd/Ctrl+D`, or send to trash.
+* **Batch Operations:** Batch rename, compress into ZIP archives, or generate contact-sheet exports.
+* **External App Integration:** Configure right-click "Open With..." menu shortcuts for DCC tools (Blender, Unreal Engine, Photoshop, etc.).
+
+---
+
+## 🚀 Future Roadmap
+
+* 🎬 **Video Player Support:** For previewing game trailers, UI animations, cutscenes, and transparency overlays.
+* ⚙️ **Extended Config Files:** Native `.ini` file viewing support.
+* 🎹 **Media Hotkeys & Looping:** `J` (-5s), `K` (play/pause), `L` (+5s) hotkeys with indefinite audio repeat loops.
+* 🎮 **Navigation Refinements:** Control adjustments to set `W`/`S` for vertical panning and `Shift + W`/`S` for zooming.
+* 🛠️ **Preferences Overhaul:** Removing outdated 3D-printing tabs ("Print beds" & "Print costs") and expanding the "External apps" extension list to include new 2D/Audio formats.
+
+### 🐛 Known Issues
+
+* **Mesh Camera Bug:** Keyboard zooming can fly the camera directly inside certain 3D geometries.
+* **Render Glitch:** Thumbnails occasionally display instead of waveforms when switching between asset types.
+
+---
+
+# 🛠️ Developer Guide
+
+## Architecture Overview
+
+Game Asset Manager is built on **Electron**, **React**, **Mantine UI**, and **Three.js**. It runs across three main process layers:
+
+1. **Main Process:** Manages the SQLite database via `better-sqlite3`, filesystem watching via `chokidar`, external app execution, and the thumbnail worker queue.
+2. **Renderer Process:** Manages the React UI, state, sound engine, and Three.js 3D viewport.
+3. **Thumbnail Workers:** Off-screen `BrowserWindow` instances that render 3D models into PNG tile thumbnails in the background.
+
+The renderer communicates through custom protocols:
+
+* `wh3d-thumb://` — Handles thumbnail cache delivery.
+* `wh3d-file://` — Streams raw 3D, audio, and image asset bytes directly from disk.
+
+---
+
+## How Libraries Work
+
+Opening a folder as a "Library" creates a `.meshFlask.db` SQLite database at the folder's root (tagged with a unique UUID). Per-machine mount paths live in user app data:
+
+* **macOS:** `~/Library/Application Support/meshFlask/`
+* **Windows:** `%APPDATA%/meshFlask/`
+
+Key configuration files:
+
+* `libraries.json`: UUID-to-path registry. Moving a library to another machine requires editing one line in this file to reconnect it.
+* `preferences.json`: Global app settings (units, external application routes, NAS polling intervals, render quality).
+
+---
+
+## Running Locally
 
 ```sh
 npm install
@@ -46,109 +116,63 @@ npm run dev
 
 ```
 
-`npm install` automatically rebuilds `better-sqlite3` against Electron's Node ABI (via the `postinstall` script). That's good for running the app and bad for the test suite, because vitest runs in system Node. If you want to run tests, use:
+> **Note on Native Modules:** `npm install` automatically rebuilds `better-sqlite3` against Electron's Node ABI via a `postinstall` script.
+
+### Running Tests
+
+Because `vitest` runs in system Node rather than Electron, use the full test script to handle ABI rebuilding automatically:
 
 ```sh
 npm run test:full
 
 ```
 
-which rebuilds `better-sqlite3` for system Node, runs vitest, then rebuilds back for Electron. Plain `npm test` will fail with an ABI mismatch error if you haven't manually rebuilt first.
+Other utility commands:
 
-`npm run typecheck` and `npm run build` don't touch the native module and are always safe.
+* `npm run typecheck` — Runs TypeScript type verification.
+* `npm run build` — Compiles renderer and main bundles without modifying native modules.
 
-### Packaging a release
+---
+
+## Packaging & Releases
+
+Build standalone platform installers using `electron-builder`:
 
 ```sh
-npm run dist        # builds for the current platform
-npm run dist:mac    # macOS DMG + zip, arm64 + x64
-npm run dist:win    # Windows NSIS installer, x64 (cross-builds from Mac)
-npm run dist:linux  # Linux AppImage, x64
+npm run dist        # Build for current OS
+npm run dist:mac    # macOS DMG + ZIP (arm64 & x64)
+npm run dist:win    # Windows NSIS Installer (x64)
+npm run dist:linux  # Linux AppImage (x64)
 
 ```
 
-Output lands in `release/`. Binaries are **unsigned** — macOS Gatekeeper will block the DMG on first open until you right-click → Open, and Windows SmartScreen will warn users.
-
-The app icon is generated from `build/icon.svg` (matches the in-app logo). `npm run build:icon` re-renders the PNG at 1024×1024 via `sharp`; electron-builder converts that into the platform-specific `.icns` / `.ico` at packaging time.
-
-### Sandbox shells
-
-Some environments (CI runners, certain sandboxed terminals) set `ELECTRON_RUN_AS_NODE=1`. If that's in your env, Electron refuses to launch as a GUI and the dev server dies with a `Cannot read properties of undefined (reading 'isPackaged')` error. Unset it:
+Binaries are placed in `release/`. To regenerate app icon PNGs from source SVG:
 
 ```sh
-unset ELECTRON_RUN_AS_NODE
-npm run dev
+npm run build:icon
 
 ```
 
 ---
 
-## Adding a library
-
-Click the **+** in the sidebar, pick a folder. The app writes `<folder>/.meshFlask.db` and records the folder's mount path in your user app data:
-
-* **macOS:** `~/Library/Application Support/meshFlask/`
-* **Windows:** `%APPDATA%/meshFlask/`
-
-Two files live there:
-
-* `libraries.json` is a UUID → mount-path map. If you move a library to a different machine, edit this file to reconnect.
-* `preferences.json` holds global settings — units, external apps, NAS poll interval, render quality, and profiles.
-
-Quit and relaunch reopens every library you had attached. Libraries remember per-machine UI state via `localStorage` keyed on the library UUID.
-
----
-
-## Architecture
-
-Three Electron processes:
-
-1. **Main** — owns the SQLite connection (`better-sqlite3`), filesystem watcher (`chokidar`), thumbnail worker pool, and external-app launching.
-2. **Renderer** — the visible UI (React + Mantine with a Three.js viewer).
-3. **Thumbnail workers** — off-screen `BrowserWindow` instances that render models to PNGs in the background.
-
-The renderer uses custom Electron protocols: `wh3d-thumb://` for tile images and `wh3d-file://` for raw model bytes.
-
----
-
-## Known rough edges
-
-* **Background thumbnail rendering is pinned to "Low" quality** regardless of the render-quality preference. Capturing a thumbnail manually from the preview pane uses current quality settings.
-* **Packaged builds are unsigned.** Code signing certificates must be configured separately for distributed builds.
-* **No cross-library view.** Queries are currently scoped to one library at a time.
-
----
-
-## Layout
+## Project Structure
 
 ```text
 src/
   main/             Electron main process
-    db/             better-sqlite3 wrapper, migrations, repos
-    libraries/      Open/close/rename/remove libraries; the registry
-    scanner/        Initial walker + chokidar watcher
-    thumb-pool/     Hidden BrowserWindow pool + queue runner
-    preferences/    preferences.json read/write
-    cache/          Thumbnail cache rebuild + purge
+    db/             better-sqlite3 wrapper, migrations, repositories
+    libraries/      Library registry and attachment lifecycle
+    scanner/        Filesystem walker + chokidar watcher
+    thumb-pool/     Hidden BrowserWindow background render queue
+    preferences/    preferences.json read/write handlers
+    cache/          Thumbnail cache management
     ipc/            Typed IPC handlers
-    protocol/       wh3d-thumb:// + wh3d-file:// handlers
-  renderer/         React UI + Three.js viewer
-    components/     Sidebars, modals, panels, widgets
-    three/          ModelViewer, lighting rig, loaders, validation
-    util/           usePreferences hook, formatters
-  preload/          contextBridge → typed IpcApi
-  shared/           Pure modules used by every process: paths, types,
-                    sort, ratings, smart-query, rename-template, ...
+    protocol/       wh3d-thumb:// and wh3d-file:// custom protocols
+  renderer/         React UI + Three.js & Audio engines
+    components/     Panels, modals, viewports, media widgets
+    three/          ModelViewer, lighting rig, model loaders
+    util/           Custom React hooks, formatters
+  preload/          contextBridge IPC API layer
+  shared/           Shared utilities (paths, types, sorting, smart-queries)
 
 ```
-
----
-
-## Tests
-
-```sh
-npm run test:full
-
-```
-
-Coverage targets core utilities: path resolution, SQLite queries, folder-tree construction, FTS triggers, rename detection, smart-collection validation, ratings, and orientation mapping.
