@@ -46,18 +46,18 @@ async function reverseRename(
   toRelPath: string
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const lib = getOpenLibrary(libraryId);
-  if (!lib) return { ok: false as const, error: 'Library no longer open' };
+  if (!lib) return { ok: false, error: 'Library no longer open' };
   const absCurrent = lib.resolver.toAbsolute(toRelPath);
   const absOriginal = lib.resolver.toAbsolute(fromRelPath);
   try {
     if (!existsSync(absCurrent)) {
-      return { ok: false as const, error: `File no longer at ${toRelPath}` };
+      return { ok: false, error: `File no longer at ${toRelPath}` };
     }
     if (existsSync(absOriginal)) {
-      return { ok: false as const, error: `Original path is occupied: ${fromRelPath}` };
+      return { ok: false, error: `Original path is occupied: ${fromRelPath}` };
     }
   } catch (err) {
-    return { ok: false as const, error: (err as Error).message };
+    return { ok: false, error: (err as Error).message };
   }
   const moved = await moveOnDisk(absCurrent, absOriginal);
   if (!moved.ok) return moved;
@@ -109,7 +109,7 @@ export function registerFilesIpc(): void {
     async (_e, req: RenameFolderRequest): Promise<RenameFolderResult> => {
       const { libraryId, folderPath, newName } = req;
       const lib = getOpenLibrary(libraryId);
-      if (!lib) return { ok: false as const, error: `Library ${libraryId} not open` };
+      if (!lib) return { ok: false, error: `Library ${libraryId} not open` };
       if (!folderPath) {
         return {
           ok: false,
@@ -117,9 +117,9 @@ export function registerFilesIpc(): void {
         };
       }
       const trimmedName = newName.trim();
-      if (!trimmedName) return { ok: false as const, error: 'Folder name cannot be empty' };
+      if (!trimmedName) return { ok: false, error: 'Folder name cannot be empty' };
       if (trimmedName.includes('/') || trimmedName.includes('\\')) {
-        return { ok: false as const, error: 'Folder name cannot contain a path separator' };
+        return { ok: false, error: 'Folder name cannot contain a path separator' };
       }
 
       const segments = folderPath.split('/');
@@ -131,16 +131,16 @@ export function registerFilesIpc(): void {
       const absNew = lib.resolver.toAbsolute(newFolderPath);
 
       if (!existsSync(absOld)) {
-        return { ok: false as const, error: `Folder not found on disk: ${folderPath}` };
+        return { ok: false, error: `Folder not found on disk: ${folderPath}` };
       }
       if (existsSync(absNew)) {
-        return { ok: false as const, error: `A folder already exists at ${newFolderPath}` };
+        return { ok: false, error: `A folder already exists at ${newFolderPath}` };
       }
 
       try {
         await rename(absOld, absNew);
       } catch (err) {
-        return { ok: false as const, error: (err as Error).message };
+        return { ok: false, error: (err as Error).message };
       }
 
       // Update every DB row whose relPath falls under the old folder path so
@@ -162,13 +162,13 @@ export function registerFilesIpc(): void {
     IPC.revealFolder,
     async (_e, libraryId: string, folderPath: string): Promise<RevealFolderResult> => {
       const lib = getOpenLibrary(libraryId);
-      if (!lib) return { ok: false as const, error: `Library ${libraryId} not open` };
+      if (!lib) return { ok: false, error: `Library ${libraryId} not open` };
       const abs = lib.resolver.toAbsolute(folderPath);
       if (!existsSync(abs)) {
-        return { ok: false as const, error: `Folder not found: ${folderPath || '(library root)'}` };
+        return { ok: false, error: `Folder not found: ${folderPath || '(library root)'}` };
       }
       const err = await shell.openPath(abs);
-      if (err) return { ok: false as const, error: err };
+      if (err) return { ok: false, error: err };
       return { ok: true };
     }
   );
@@ -321,7 +321,7 @@ export function registerFilesIpc(): void {
     IPC.batchRename,
     async (_e, libraryId: string, plan: BatchRenameItem[]): Promise<BatchRenameResult> => {
       const lib = getOpenLibrary(libraryId);
-      if (!lib) return { ok: false as const, error: `Library ${libraryId} not open` };
+      if (!lib) return { ok: false, error: `Library ${libraryId} not open` };
       if (plan.length === 0) return { ok: true, renamed: 0 };
 
       // Pre-flight collision detection. A new path collides if:
@@ -346,7 +346,7 @@ export function registerFilesIpc(): void {
         seenFrom.add(p.fromRelPath);
       }
       if (collisions.length > 0) {
-        return { ok: false as const, collisions: [...new Set(collisions)] };
+        return { ok: false, collisions: [...new Set(collisions)] };
       }
 
       // Execute FS renames sequentially. On failure, rolling back what's
@@ -374,7 +374,7 @@ export function registerFilesIpc(): void {
         for (let i = done.length - 1; i >= 0; i--) {
           await moveOnDisk(done[i].absTo, done[i].absFrom);
         }
-        return { ok: false as const, error: (err as Error).message };
+        return { ok: false, error: (err as Error).message };
       }
 
       // Apply the rename to the DB. The scanner's `applyRenames` does the
@@ -399,7 +399,7 @@ export function registerFilesIpc(): void {
             if (!r.ok) errors.push(`${item.toRelPath}: ${r.error}`);
           }
           if (errors.length > 0) {
-            return { ok: false as const, error: errors.join('; ') };
+            return { ok: false, error: errors.join('; ') };
           }
           return { ok: true };
         }
@@ -413,15 +413,15 @@ export function registerFilesIpc(): void {
     IPC.moveFile,
     async (_e, libraryId: string, fileId: number, toParentDir: string): Promise<MoveFileResult> => {
       const lib = getOpenLibrary(libraryId);
-      if (!lib) return { ok: false as const, error: `Library ${libraryId} not open` };
+      if (!lib) return { ok: false, error: `Library ${libraryId} not open` };
       const file = lib.files.getById(fileId);
-      if (!file) return { ok: false as const, error: 'File not found' };
+      if (!file) return { ok: false, error: 'File not found' };
       const cleanedParent = toParentDir.replace(/^\/+|\/+$/g, '');
       const toRelPath = cleanedParent ? `${cleanedParent}/${file.filename}` : file.filename;
       if (toRelPath === file.relPath) return { ok: true, toRelPath };
 
       const existing = lib.files.getByRelPath(toRelPath);
-      if (existing) return { ok: false as const, error: `A file already exists at ${toRelPath}` };
+      if (existing) return { ok: false, error: `A file already exists at ${toRelPath}` };
 
       const absFrom = lib.resolver.toAbsolute(file.relPath);
       const absTo = lib.resolver.toAbsolute(toRelPath);
@@ -445,9 +445,9 @@ export function registerFilesIpc(): void {
     IPC.duplicateFile,
     async (_e, libraryId: string, fileId: number): Promise<DuplicateFileResult> => {
       const lib = getOpenLibrary(libraryId);
-      if (!lib) return { ok: false as const, error: `Library ${libraryId} not open` };
+      if (!lib) return { ok: false, error: `Library ${libraryId} not open` };
       const file = lib.files.getById(fileId);
-      if (!file) return { ok: false as const, error: 'File not found' };
+      if (!file) return { ok: false, error: 'File not found' };
 
       // Generate "<name> copy[.N].<ext>" — increments N until free on disk + DB.
       const dot = file.filename.lastIndexOf('.');
@@ -463,7 +463,7 @@ export function registerFilesIpc(): void {
       ) {
         candidate = `${base} copy ${n}${ext}`;
         n++;
-        if (n > 1000) return { ok: false as const, error: 'Could not find an available name' };
+        if (n > 1000) return { ok: false, error: 'Could not find an available name' };
       }
       const toRelPath = toRel(candidate);
       const absFrom = lib.resolver.toAbsolute(file.relPath);
@@ -471,7 +471,7 @@ export function registerFilesIpc(): void {
       try {
         await copyFile(absFrom, absTo);
       } catch (err) {
-        return { ok: false as const, error: (err as Error).message };
+        return { ok: false, error: (err as Error).message };
       }
       // The watcher will eventually pick up the new file, but proactively
       // upsert + broadcast for snappier UI.
@@ -497,7 +497,7 @@ export function registerFilesIpc(): void {
     IPC.deleteFile,
     async (_e, libraryId: string, fileId: number): Promise<DeleteFileResult> => {
       const lib = getOpenLibrary(libraryId);
-      if (!lib) return { ok: false as const, error: `Library ${libraryId} not open` };
+      if (!lib) return { ok: false, error: `Library ${libraryId} not open` };
       const file = lib.files.getById(fileId);
       if (!file) return { ok: true }; // already gone
       const absPath = lib.resolver.toAbsolute(file.relPath);
@@ -506,7 +506,7 @@ export function registerFilesIpc(): void {
           await shell.trashItem(absPath);
         }
       } catch (err) {
-        return { ok: false as const, error: (err as Error).message };
+        return { ok: false, error: (err as Error).message };
       }
       lib.files.deleteByRelPath(file.relPath);
       broadcast({ kind: 'files-changed', libraryId });
