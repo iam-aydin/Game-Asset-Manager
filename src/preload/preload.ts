@@ -25,8 +25,12 @@ import type {
   PickFolderResult,
   RemoveLibraryRequest,
   RemoveLibraryResult,
+  RenameFolderRequest,
+  RenameFolderResult,
   RenameLibraryRequest,
   RenameLibraryResult,
+  RescanFolderResult,
+  RevealFolderResult,
   RevealLibraryResult,
   ScanProgress,
   TagRecord,
@@ -50,6 +54,13 @@ const api: IpcApi = {
     ipcRenderer.invoke(IPC.renameLibrary, req) as Promise<RenameLibraryResult>,
   revealLibrary: (id: string) =>
     ipcRenderer.invoke(IPC.revealLibrary, id) as Promise<RevealLibraryResult>,
+
+  renameFolder: (req: RenameFolderRequest) =>
+    ipcRenderer.invoke(IPC.renameFolder, req) as Promise<RenameFolderResult>,
+  revealFolder: (libraryId: string, folderPath: string) =>
+    ipcRenderer.invoke(IPC.revealFolder, libraryId, folderPath) as Promise<RevealFolderResult>,
+  rescanFolder: (libraryId: string, folderPath: string) =>
+    ipcRenderer.invoke(IPC.rescanFolder, libraryId, folderPath) as Promise<RescanFolderResult>,
 
   listFolders: (req: ListFoldersRequest) =>
     ipcRenderer.invoke(IPC.listFolders, req) as Promise<FolderTreeNode | null>,

@@ -87,16 +87,20 @@ export function FolderTree({
 
   const closeCtxMenu = () => setCtxMenu((prev) => ({ ...prev, opened: false }));
 
-  // Fallback handlers using window.api or electron IPC if props were not passed
+  // Fallback handlers using window.api / electron IPC when the parent
+  // didn't wire up onRenameFolder/onRevealFolder/onRescanFolder. These are
+  // now actually called from the menu below (previously they were defined
+  // but never invoked, so the menu items silently no-op'd whenever the
+  // parent hadn't passed those props).
   const handleRename = (path: string) => {
     if (onRenameFolder) {
       onRenameFolder(path);
     } else {
-      // Trigger prompt/modal or IPC call
       const newName = prompt('Rename folder:', ctxMenu.folderName);
       if (newName && newName !== ctxMenu.folderName) {
-        // Replace with your app's IPC or rename method:
-        // window.api?.renameFolder?.(path, newName);
+        if (typeof window !== 'undefined' && 'api' in window) {
+          (window as any).api?.renameFolder?.(path, newName);
+        }
       }
     }
   };
@@ -187,44 +191,44 @@ export function FolderTree({
           />
         </Menu.Target>
 
-<Menu.Dropdown>
-  <Menu.Label>{ctxMenu.folderName || 'Folder'}</Menu.Label>
+        <Menu.Dropdown>
+          <Menu.Label>{ctxMenu.folderName || 'Folder'}</Menu.Label>
 
-  <Menu.Item
-    leftSection={<IconEdit size={14} />}
-    onClick={() => {
-      const path = ctxMenu.folderPath;
-      closeCtxMenu();
-      onRenameFolder?.(path);
-    }}
-  >
-    Rename…
-  </Menu.Item>
+          <Menu.Item
+            leftSection={<IconEdit size={14} />}
+            onClick={() => {
+              const path = ctxMenu.folderPath;
+              closeCtxMenu();
+              handleRename(path);
+            }}
+          >
+            Rename…
+          </Menu.Item>
 
-  <Menu.Item
-    leftSection={<IconFolderOpen size={14} />}
-    onClick={() => {
-      const path = ctxMenu.folderPath;
-      closeCtxMenu();
-      onRevealFolder?.(path);
-    }}
-  >
-    Show in folder
-  </Menu.Item>
+          <Menu.Item
+            leftSection={<IconFolderOpen size={14} />}
+            onClick={() => {
+              const path = ctxMenu.folderPath;
+              closeCtxMenu();
+              handleReveal(path);
+            }}
+          >
+            Show in folder
+          </Menu.Item>
 
-  <Menu.Divider />
+          <Menu.Divider />
 
-  <Menu.Item
-    leftSection={<IconRefresh size={14} />}
-    onClick={() => {
-      const path = ctxMenu.folderPath;
-      closeCtxMenu();
-      onRescanFolder?.(path);
-    }}
-  >
-    Rescan folder
-  </Menu.Item>
-</Menu.Dropdown>
+          <Menu.Item
+            leftSection={<IconRefresh size={14} />}
+            onClick={() => {
+              const path = ctxMenu.folderPath;
+              closeCtxMenu();
+              handleRescan(path);
+            }}
+          >
+            Rescan folder
+          </Menu.Item>
+        </Menu.Dropdown>
       </Menu>
     </>
   );

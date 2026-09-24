@@ -11,6 +11,7 @@ import type {
 } from '@shared/types';
 import type { FileOrientation } from '@shared/orientation';
 import { formatDimension } from '@shared/units';
+import { isAudioExtension, isImageExtension } from '@shared/formats';
 import { TagEditor } from './TagEditor';
 import { BulkMetadataPanel } from './BulkMetadataPanel';
 import { AddToCollectionMenu } from './AddToCollectionMenu';
@@ -21,9 +22,7 @@ import { ipc } from '../ipc-client';
 
 interface Props {
   libraryId: string | null;
-  /** The most-recently-clicked file. Drives the single-file detail view. */
   primaryFile: FileRecord | null;
-  /** All files in the current selection (>= 1 when primaryFile is non-null). */
   selectedFiles: FileRecord[];
   allTags: TagWithCount[];
   collections: CollectionWithCount[];
@@ -42,9 +41,6 @@ interface Props {
   onCreateCollection: (name: string) => Promise<CollectionRecord | null>;
 }
 
-/**
- * Right-pane metadata tailored for Game Asset Management.
- */
 export function MetadataPanel(props: Props) {
   const {
     libraryId,
@@ -141,6 +137,21 @@ function SingleFilePanel({
     }
   }, [file.metadataJson]);
 
+  const isImage = isImageExtension(file.ext);
+  const isAudio = isAudioExtension(file.ext);
+  
+  // Explicitly check for 3D model status
+  const isModel =
+    metadata?.thumbSource === 'model' ||
+    (metadata &&
+      metadata.thumbSource !== 'document' &&
+      !isImage &&
+      !isAudio &&
+      (metadata.vertexCount > 0 || metadata.meshCount > 0));
+
+  const width = metadata?.image?.width ?? metadata?.imageHeight;
+  const height = metadata?.image?.height ?? metadata?.imageHeight;
+
   const sidecarLicense = useSidecarLicense(libraryId, file.parentDir);
 
   return (
@@ -166,15 +177,33 @@ function SingleFilePanel({
       <Divider />
 
       <Field label="Size" value={formatBytes(file.sizeBytes)} />
+      
       <Field
         label="Modified"
         value={`${formatRelativeTime(file.mtimeMs)} · ${formatDateTime(file.mtimeMs)}`}
       />
 
-      {metadata && (
+      {/* Audio Stats */}
+      {isAudio && (
+        <>
+          <Divider />
+          <AudioStats file={file} metadata={metadata} />
+        </>
+      )}
+
+      {/* 3D Model Stats — Only renders for actual 3D model files */}
+      {isModel && metadata && (
         <>
           <Divider />
           <ModelStats metadata={metadata} />
+        </>
+      )}
+
+      {/* Image Stats */}
+      {isImage && metadata && (
+        <>
+          <Divider />
+          <ImageStats metadata={metadata} width={width} height={height} />
         </>
       )}
 
@@ -263,6 +292,117 @@ function NotesEditor({ libraryId, file }: { libraryId: string; file: FileRecord 
   );
 }
 
+function getBitrateStatusColor(kbps: number): 'green' | 'yellow' | 'red' {
+  if (kbps <= 128) return 'red';
+  if (kbps < 256) return 'yellow';
+  return 'green';
+}
+
+function getSampleRateStatusColor(hz: number): 'green' | 'yellow' | 'red' {
+  if (hz < 44100) return 'red';
+  return 'green';
+}
+
+function formatAudioChannels(channels?: number): string | null {
+  if (channels === undefined || channels === null) return null;
+  if (channels === 1) return '1 (Mono)';
+  if (channels === 2) return '2 (Stereo)';
+  if (channels === 6) return '6 (5.1 Surround)';
+  return `${channels} channels`;
+}
+
+function formatAudioDuration(durationSec?: number): string | null {
+  if (durationSec === undefined || durationSec === null || isNaN(durationSec)) return null;
+  const mins = Math.floor(durationSec / 60);
+  const secs = Math.floor(durationSec % 60);
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
+}
+
+function AudioStats({ file, metadata }: { file: FileRecord; metadata: ExtractedMetadata | null }) {
+  const m = (metadata || {}) as Record<string, any>;
+  const audio = m.audio || m;
+
+  const duration: number | null =
+    audio.duration ??
+    audio.length ??
+    audio.durationSeconds ??
+    audio.durationSec ??
+    m.duration ??
+    m.length ??
+    null;
+
+  const channels: number | null =
+    audio.channels ??
+    audio.numberOfChannels ??
+    audio.channelCount ??
+    m.channels ??
+    null;
+
+  const sampleRateRaw: number | null =
+    audio.sampleRate ??
+    audio.sample_rate ??
+    audio.samplingRate ??
+    m.sampleRate ??
+    null;
+
+  let bitrateRaw: number | null =
+    audio.bitrate ??
+    audio.bitRate ??
+    m.bitrate ??
+    m.bitRate ??
+    m.format?.bitrate ??
+    m.format?.bit_rate ??
+    null;
+
+  const sampleRateHz = sampleRateRaw
+    ? sampleRateRaw < 1000
+      ? sampleRateRaw * 1000
+      : sampleRateRaw
+    : null;
+
+  let bitrateKbps: number | null = null;
+
+  if (bitrateRaw) {
+    bitrateKbps = bitrateRaw > 1000 ? Math.round(bitrateRaw / 1000) : Math.round(bitrateRaw);
+  } else if (duration && duration > 0 && file.sizeBytes > 0) {
+    bitrateKbps = Math.round((file.sizeBytes * 8) / (duration * 1000));
+  }
+
+  const durationStr = formatAudioDuration(duration ?? undefined);
+  const channelsStr = formatAudioChannels(channels ?? undefined);
+
+  return (
+    <Stack gap={4}>
+      <Group justify="space-between">
+        <Text size="xs" tt="uppercase" c="dimmed" fw={700}>
+          Audio
+        </Text>
+      </Group>
+
+      {durationStr && <Field label="Length" value={durationStr} />}
+      {channelsStr && <Field label="Channels" value={channelsStr} />}
+      
+      {bitrateKbps !== null && bitrateKbps > 0 && (
+        <Field
+          label="Bitrate"
+          value={`${bitrateKbps} kbps`}
+          statusColor={getBitrateStatusColor(bitrateKbps)}
+        />
+      )}
+
+      {sampleRateHz !== null && (
+        <Field
+          label="Sample rate"
+          value={`${(sampleRateHz / 1000).toLocaleString('en-US', { maximumFractionDigits: 1 })} kHz`}
+          statusColor={getSampleRateStatusColor(sampleRateHz)}
+        />
+      )}
+
+      {metadata?.format && <SourceMetadata format={metadata.format} />}
+    </Stack>
+  );
+}
+
 function getTriangleStatusColor(count: number): 'green' | 'yellow' | 'red' {
   if (count <= 15000) return 'green';
   if (count <= 50000) return 'yellow';
@@ -272,6 +412,12 @@ function getTriangleStatusColor(count: number): 'green' | 'yellow' | 'red' {
 function getMeshStatusColor(count: number): 'green' | 'yellow' | 'red' {
   if (count === 1) return 'green';
   if (count <= 4) return 'yellow';
+  return 'red';
+}
+
+function getResolutionStatusColor(maxDimension: number): 'green' | 'yellow' | 'red' {
+  if (maxDimension <= 1024) return 'green';
+  if (maxDimension <= 2048) return 'yellow';
   return 'red';
 }
 
@@ -358,6 +504,64 @@ function ModelStats({ metadata }: { metadata: ExtractedMetadata }) {
           </Group>
         </div>
       )}
+
+      {metadata.format && <SourceMetadata format={metadata.format} />}
+    </Stack>
+  );
+}
+
+function ImageStats({
+  metadata,
+  width,
+  height
+}: {
+  metadata: ExtractedMetadata;
+  width?: number;
+  height?: number;
+}) {
+  const maxDimension = width && height ? Math.max(width, height) : 0;
+  const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
+  const divisor = width && height ? gcd(width, height) || 1 : 1;
+  const aspectRatio = width && height ? `${width / divisor}:${height / divisor}` : null;
+  const bitDepth = metadata.image?.bitDepth;
+  const colorType = metadata.image?.colorType;
+
+  return (
+    <Stack gap={4}>
+      <Group justify="space-between">
+        <Text size="xs" tt="uppercase" c="dimmed" fw={700}>
+          Image
+        </Text>
+      </Group>
+
+      {width && height && (
+        <Field
+          label="Resolution"
+          value={`${width} × ${height} px`}
+          statusColor={getResolutionStatusColor(maxDimension)}
+        />
+      )}
+      {width && (
+        <Field
+          label="Width"
+          value={`${width} px`}
+          statusColor={getResolutionStatusColor(width)}
+        />
+      )}
+      {height && (
+        <Field
+          label="Height"
+          value={`${height} px`}
+          statusColor={getResolutionStatusColor(height)}
+        />
+      )}
+      {bitDepth && (
+        <Field
+          label="Bit depth"
+          value={`${bitDepth}-bit${colorType ? ` ${colorType}` : ''}`}
+        />
+      )}
+      {aspectRatio && <Field label="Aspect ratio" value={aspectRatio} />}
 
       {metadata.format && <SourceMetadata format={metadata.format} />}
     </Stack>

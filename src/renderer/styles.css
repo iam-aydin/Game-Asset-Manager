@@ -1,3 +1,34 @@
+/* Desktop-app feel: no accidental text selection when dragging the mouse over
+ * labels or empty space. Selection stays available in text fields, and on
+ * anything marked with the .selectable class (e.g. a file path you want to copy). */
+
+html,
+body {
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+input,
+textarea,
+[contenteditable='true'],
+.selectable {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+input,
+textarea,
+[contenteditable='true'] {
+  cursor: text;
+}
+
+/* Opt-in only: add className="no-drag" to an image that should NOT be draggable.
+ * Not applied to all images, because that would break drag and drop of file thumbnails. */
+.no-drag {
+  -webkit-user-drag: none;
+}
+
 /* Resize-handle styling for react-resizable-panels. The handle's hit area
  * is wider than the visible bar so users can grab it easily; the visible
  * bar highlights on hover and while active. Two modifiers because the

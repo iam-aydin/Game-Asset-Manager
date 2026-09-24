@@ -3,7 +3,6 @@ import {
   Autocomplete,
   Button,
   Group,
-  Paper,
   ScrollArea,
   Menu,
   Modal,
@@ -13,9 +12,7 @@ import {
 } from '@mantine/core';
 import {
   IconAppWindow,
-  IconCircleFilled,
   IconCircleMinus,
-  IconCircleX,
   IconExternalLink,
   IconFolderOpen,
   IconFolderPlus,
@@ -24,9 +21,6 @@ import {
   IconPlus,
   IconEdit,
   IconRefresh,
-  IconRotateClockwise,
-  IconStarFilled,
-  IconStarOff,
   IconTag,
   IconTagOff,
   IconCopy,
@@ -35,27 +29,12 @@ import {
 import type {
   CollectionRecord,
   CollectionWithCount,
-  ColorLabel,
   FileRecord,
   TagRecord,
   TagWithCount
 } from '@shared/types';
-import { UP_AXIS_OPTIONS, type FileOrientation, type UpAxis } from '@shared/orientation';
-import { COLOR_LABELS, COLOR_LABEL_HEX } from '@shared/ratings';
 import type { ExternalAppRegistration } from '@shared/preferences';
 import { ipc } from '../ipc-client';
-
-interface ThumbContextMenuProps {
-  open: boolean;
-  x: number;
-  y: number;
-  selectedCount: number;
-  onClose: () => void;
-  onDelete: () => void;
-  onDuplicate: () => void;
-  onBatchRename: () => void;
-  onCompare: () => void;
-}
 
 interface Props {
   opened: boolean;
@@ -77,9 +56,6 @@ interface Props {
 
   onBulkAddTag: (tagName: string) => Promise<void>;
   onBulkRemoveTag: (tagId: number) => Promise<void>;
-  onBulkSetOrientation: (orientation: FileOrientation | null) => Promise<void>;
-  onBulkSetRating: (rating: number) => Promise<void>;
-  onBulkSetColorLabel: (label: ColorLabel | null) => Promise<void>;
   onBulkRerender: () => Promise<void>;
   onBatchRename: () => void;
   onDuplicate: () => void;
@@ -97,12 +73,7 @@ type SubModal =
 
 /**
  * Right-click context menu over the thumbnail grid. Acts on the current
- * multi-selection (the caller decides whether right-clicking selects the
- * target tile or leaves the selection alone).
- *
- * Positioning: a 1px target div is fixed at the click coordinates and the
- * Mantine Menu anchors to it. Click-outside / Escape close behavior is
- * provided by Mantine; we don't need to wire it ourselves.
+ * multi-selection.
  */
 export function ThumbContextMenu(props: Props) {
   const {
@@ -119,9 +90,6 @@ export function ThumbContextMenu(props: Props) {
     activeCollectionId,
     onBulkAddTag,
     onBulkRemoveTag,
-    onBulkSetOrientation,
-    onBulkSetRating,
-    onBulkSetColorLabel,
     onBulkRerender,
     onBatchRename,
     onDuplicate,
@@ -141,8 +109,8 @@ export function ThumbContextMenu(props: Props) {
   // Aggregate tags applied to the selection so "Remove tag" knows what to offer.
   const [appliedTags, setAppliedTags] = useState<TagRecord[]>([]);
   const refToken = useRef(0);
-  // External apps registered for the primary file's extension. Refreshed each
-  // time the menu opens so newly-added apps appear without reload.
+  
+  // External apps registered for the primary file's extension.
   const [externalApps, setExternalApps] = useState<ExternalAppRegistration[]>([]);
 
   useEffect(() => {
@@ -197,347 +165,239 @@ export function ThumbContextMenu(props: Props) {
     onClose();
   };
 
-return (
-  <>
-    <Menu
-  opened={opened}
-  onChange={(open) => {
-    if (!open) onClose();
-  }}
-  position="right-start"
-  floatingStrategy="fixed"
-  // Negative offset or transform shifts the menu top edge upwards relative to (x, y)
-  offset={0}
-  middlewares={{
-    flip: false,
-    shift: { padding: 8 }
-  }}
-  withinPortal
-  shadow="md"
-  width={240}
-  closeOnItemClick={false}
->
-      <Menu.Target>
-    <div
-      style={{
-        position: 'fixed',
-        top: Math.max(0, y - 250), // Pulls the target point 250px higher
-        left: x,
-        width: 1,
-        height: 1,
-        pointerEvents: 'none'
-      }}
-    />
-</Menu.Target>
-      <Menu.Dropdown p={0}>
-        <ScrollArea.Autosize mah="calc(100vh - 20px)" type="auto" p={4}>
-          <Menu.Label>
-            {selectedFiles.length} file{selectedFiles.length === 1 ? '' : 's'} selected
-          </Menu.Label>
+  return (
+    <>
+      <Menu
+        opened={opened}
+        onChange={(open) => {
+          if (!open) onClose();
+        }}
+        position="right-start"
+        floatingStrategy="fixed"
+        offset={0}
+        middlewares={{
+          flip: false,
+          shift: { padding: 8 }
+        }}
+        withinPortal
+        shadow="md"
+        width={240}
+        closeOnItemClick={false}
+      >
+        <Menu.Target>
+          <div
+            style={{
+              position: 'fixed',
+              top: Math.max(0, y - 250),
+              left: x,
+              width: 1,
+              height: 1,
+              pointerEvents: 'none'
+            }}
+          />
+        </Menu.Target>
+        <Menu.Dropdown p={0}>
+          <ScrollArea.Autosize mah="calc(100vh - 20px)" type="auto" p={4}>
+            <Menu.Label>
+              {selectedFiles.length} file{selectedFiles.length === 1 ? '' : 's'} selected
+            </Menu.Label>
 
-          {isSingleSelection && (
-            <>
-              <Menu.Item
-                leftSection={<IconExternalLink size={14} />}
-                onClick={() => openWith(null)}
-              >
-                Open with default app
-              </Menu.Item>
-              {externalApps.map((app) => {
-                const profiles = app.profiles ?? [];
-                if (profiles.length === 0) {
-                  return (
-                    <Menu.Item
-                      key={app.id}
-                      leftSection={<IconAppWindow size={14} />}
-                      onClick={() => openWith(app.id)}
-                    >
-                      Open in {app.name}
-                    </Menu.Item>
-                  );
-                }
-                return (
-                  <div key={app.id}>
-                    <Menu.Label>Open in {app.name}</Menu.Label>
-                    <Menu.Item
-                      leftSection={<IconAppWindow size={14} />}
-                      onClick={() => openWith(app.id, null)}
-                    >
-                      (no profile)
-                    </Menu.Item>
-                    {profiles.map((p) => (
+            {isSingleSelection && (
+              <>
+                <Menu.Item
+                  leftSection={<IconExternalLink size={14} />}
+                  onClick={() => openWith(null)}
+                >
+                  Open with default app
+                </Menu.Item>
+                {externalApps.map((app) => {
+                  const profiles = app.profiles ?? [];
+                  if (profiles.length === 0) {
+                    return (
                       <Menu.Item
-                        key={p.id}
+                        key={app.id}
                         leftSection={<IconAppWindow size={14} />}
-                        onClick={() => openWith(app.id, p.id)}
+                        onClick={() => openWith(app.id)}
                       >
-                        {p.name}
+                        Open in {app.name}
                       </Menu.Item>
-                    ))}
-                  </div>
-                );
-              })}
-              <Menu.Item
-                leftSection={<IconAppWindow size={14} />}
-                onClick={() => {
-                  onClose();
-                  onOpenPreferences();
-                }}
-              >
-                Configure external apps…
-              </Menu.Item>
-              <Menu.Item
-                leftSection={<IconFolderOpen size={14} />}
-                onClick={reveal}
-              >
-                Show in Folder
-              </Menu.Item>
-              <Menu.Divider />
-            </>
-          )}
-
-          <Menu.Item
-            leftSection={<IconTag size={14} />}
-            onClick={() => setModal({ kind: 'add-tag' })}
-          >
-            Add tag…
-          </Menu.Item>
-          <Menu.Item
-            leftSection={<IconTagOff size={14} />}
-            onClick={() => setModal({ kind: 'remove-tag' })}
-          >
-            Remove tag…
-          </Menu.Item>
-
-          <Menu.Divider />
-          <Menu.Label>Rating</Menu.Label>
-          <div style={{ padding: '2px 8px 6px' }}>
-            <Group gap={4} wrap="nowrap">
-              {[1, 2, 3, 4, 5].map((n) => (
-                <UnstyledButton
-                  key={n}
+                    );
+                  }
+                  return (
+                    <div key={app.id}>
+                      <Menu.Label>Open in {app.name}</Menu.Label>
+                      <Menu.Item
+                        leftSection={<IconAppWindow size={14} />}
+                        onClick={() => openWith(app.id, null)}
+                      >
+                        (no profile)
+                      </Menu.Item>
+                      {profiles.map((p) => (
+                        <Menu.Item
+                          key={p.id}
+                          leftSection={<IconAppWindow size={14} />}
+                          onClick={() => openWith(app.id, p.id)}
+                        >
+                          {p.name}
+                        </Menu.Item>
+                      ))}
+                    </div>
+                  );
+                })}
+                <Menu.Item
+                  leftSection={<IconAppWindow size={14} />}
                   onClick={() => {
-                    void onBulkSetRating(n);
                     onClose();
-                  }}
-                  style={{
-                    padding: '4px 6px',
-                    borderRadius: 4,
-                    border: '1px solid var(--mantine-color-dark-4)',
-                    background: 'var(--mantine-color-dark-6)'
-                  }}
-                  aria-label={`Rate ${n}`}
-                >
-                  <IconStarFilled size={12} color="var(--mantine-color-yellow-5)" />
-                  <Text component="span" size="xs" ml={4}>
-                    {n}
-                  </Text>
-                </UnstyledButton>
-              ))}
-              <UnstyledButton
-                onClick={() => {
-                  void onBulkSetRating(0);
-                  onClose();
-                }}
-                style={{
-                  padding: '4px 6px',
-                  borderRadius: 4,
-                  border: '1px solid var(--mantine-color-dark-4)',
-                  background: 'var(--mantine-color-dark-6)'
-                }}
-                aria-label="Clear rating"
-              >
-                <IconStarOff size={12} />
-              </UnstyledButton>
-            </Group>
-          </div>
-
-          <Menu.Label>Color label</Menu.Label>
-          <div style={{ padding: '2px 8px 6px' }}>
-            <Group gap={6} wrap="nowrap">
-              {COLOR_LABELS.map((c) => (
-                <UnstyledButton
-                  key={c}
-                  onClick={() => {
-                    void onBulkSetColorLabel(c);
-                    onClose();
-                  }}
-                  aria-label={`${c} label`}
-                  style={{ padding: 2 }}
-                >
-                  <IconCircleFilled size={16} color={COLOR_LABEL_HEX[c]} />
-                </UnstyledButton>
-              ))}
-              <UnstyledButton
-                onClick={() => {
-                  void onBulkSetColorLabel(null);
-                  onClose();
-                }}
-                aria-label="Clear color label"
-                style={{ padding: 2 }}
-              >
-                <IconCircleX size={16} color="var(--mantine-color-gray-5)" />
-              </UnstyledButton>
-            </Group>
-          </div>
-
-          <Menu.Divider />
-          <Menu.Label>Up axis</Menu.Label>
-          <div style={{ padding: '2px 8px 6px' }}>
-            <Group gap={4} wrap="wrap">
-              {UP_AXIS_OPTIONS.map((o) => (
-                <UnstyledButton
-                  key={o.value}
-                  onClick={() => {
-                    void onBulkSetOrientation({ upAxis: o.value as UpAxis, yaw: 0 });
-                    onClose();
-                  }}
-                  style={{
-                    padding: '2px 8px',
-                    borderRadius: 4,
-                    fontSize: 12,
-                    fontFamily: 'var(--mantine-font-family-monospace, monospace)',
-                    border: '1px solid var(--mantine-color-dark-4)',
-                    background: 'var(--mantine-color-dark-6)'
+                    onOpenPreferences();
                   }}
                 >
-                  {o.label}
-                </UnstyledButton>
-              ))}
-            </Group>
-          </div>
-          <Menu.Item
-            leftSection={<IconRotateClockwise size={14} />}
-            onClick={() => {
-              void onBulkSetOrientation(null);
-              onClose();
-            }}
-          >
-            Reset orientation to default
-          </Menu.Item>
+                  Configure external apps…
+                </Menu.Item>
+                <Menu.Item
+                  leftSection={<IconFolderOpen size={14} />}
+                  onClick={reveal}
+                >
+                  Show in Folder
+                </Menu.Item>
+                <Menu.Divider />
+              </>
+            )}
 
-          <Menu.Divider />
-          <Menu.Item
-            leftSection={<IconRefresh size={14} />}
-            onClick={() => {
-              void onBulkRerender();
-              onClose();
-            }}
-          >
-            Re-render thumbnails
-          </Menu.Item>
-          <Menu.Item
-            leftSection={<IconEdit size={14} />}
-            onClick={() => {
-              onClose();
-              onBatchRename();
-            }}
-          >
-            Rename…
-          </Menu.Item>
-          {isSingleSelection && (
             <Menu.Item
-              leftSection={<IconCopy size={14} />}
-              onClick={() => {
-                onClose();
-                onDuplicate();
-              }}
+              leftSection={<IconTag size={14} />}
+              onClick={() => setModal({ kind: 'add-tag' })}
             >
-              Duplicate
+              Add tag…
             </Menu.Item>
-          )}
-          <Menu.Divider />
-          <Menu.Item
-            leftSection={<IconTrash size={14} />}
-            color="red"
-            onClick={() => {
-              onClose();
-              onDelete();
-            }}
-          >
-            Move to Trash…
-          </Menu.Item>
-
-          <Menu.Divider />
-          <Menu.Label>Add to collection</Menu.Label>
-          {collections.length === 0 && (
-            <Menu.Item disabled>
-              <Text size="xs" c="dimmed">
-                No collections yet
-              </Text>
-            </Menu.Item>
-          )}
-          {collections.map((c) => (
             <Menu.Item
-              key={c.id}
-              leftSection={<IconFolders size={14} />}
+              leftSection={<IconTagOff size={14} />}
+              onClick={() => setModal({ kind: 'remove-tag' })}
+            >
+              Remove tag…
+            </Menu.Item>
+
+            <Menu.Divider />
+
+            <Menu.Item
+              leftSection={<IconRefresh size={14} />}
               onClick={() => {
-                void onAddToCollection(c.id, fileIds);
+                void onBulkRerender();
                 onClose();
               }}
             >
-              {c.name}
+              Re-render thumbnails
             </Menu.Item>
-          ))}
-          <Menu.Item
-            leftSection={<IconPlus size={14} />}
-            onClick={() => setModal({ kind: 'new-collection' })}
-          >
-            New collection…
-          </Menu.Item>
-
-          {activeCollection && (
-            <>
-              <Menu.Divider />
+            <Menu.Item
+              leftSection={<IconEdit size={14} />}
+              onClick={() => {
+                onClose();
+                onBatchRename();
+              }}
+            >
+              Rename…
+            </Menu.Item>
+            {isSingleSelection && (
               <Menu.Item
-                color="red"
-                leftSection={<IconCircleMinus size={14} />}
+                leftSection={<IconCopy size={14} />}
                 onClick={() => {
-                  void onRemoveFromCollection(activeCollection.id, fileIds);
+                  onClose();
+                  onDuplicate();
+                }}
+              >
+                Duplicate
+              </Menu.Item>
+            )}
+            <Menu.Divider />
+            <Menu.Item
+              leftSection={<IconTrash size={14} />}
+              color="red"
+              onClick={() => {
+                onClose();
+                onDelete();
+              }}
+            >
+              Move to Trash…
+            </Menu.Item>
+
+            <Menu.Divider />
+            <Menu.Label>Add to collection</Menu.Label>
+            {collections.length === 0 && (
+              <Menu.Item disabled>
+                <Text size="xs" c="dimmed">
+                  No collections yet
+                </Text>
+              </Menu.Item>
+            )}
+            {collections.map((c) => (
+              <Menu.Item
+                key={c.id}
+                leftSection={<IconFolders size={14} />}
+                onClick={() => {
+                  void onAddToCollection(c.id, fileIds);
                   onClose();
                 }}
               >
-                Remove from "{activeCollection.name}"
+                {c.name}
               </Menu.Item>
-            </>
-          )}
-        </ScrollArea.Autosize>
-      </Menu.Dropdown>
-    </Menu>
+            ))}
+            <Menu.Item
+              leftSection={<IconPlus size={14} />}
+              onClick={() => setModal({ kind: 'new-collection' })}
+            >
+              New collection…
+            </Menu.Item>
 
-    {/* Modals remain unchanged below */}
-    <AddTagModal
-      opened={modal.kind === 'add-tag'}
-      allTags={allTags}
-      fileCount={selectedFiles.length}
-      onCancel={close}
-      onConfirm={async (name) => {
-        await onBulkAddTag(name);
-        close();
-      }}
-    />
+            {activeCollection && (
+              <>
+                <Menu.Divider />
+                <Menu.Item
+                  color="red"
+                  leftSection={<IconCircleMinus size={14} />}
+                  onClick={() => {
+                    void onRemoveFromCollection(activeCollection.id, fileIds);
+                    onClose();
+                  }}
+                >
+                  Remove from "{activeCollection.name}"
+                </Menu.Item>
+              </>
+            )}
+          </ScrollArea.Autosize>
+        </Menu.Dropdown>
+      </Menu>
 
-    <RemoveTagModal
-      opened={modal.kind === 'remove-tag'}
-      appliedTags={appliedTags}
-      onCancel={close}
-      onConfirm={async (tagId) => {
-        await onBulkRemoveTag(tagId);
-        close();
-      }}
-    />
+      <AddTagModal
+        opened={modal.kind === 'add-tag'}
+        allTags={allTags}
+        fileCount={selectedFiles.length}
+        onCancel={close}
+        onConfirm={async (name) => {
+          await onBulkAddTag(name);
+          close();
+        }}
+      />
 
-    <NewCollectionModal
-      opened={modal.kind === 'new-collection'}
-      onCancel={close}
-      onConfirm={async (name) => {
-        const created = await onCreateCollection(name);
-        if (created) await onAddToCollection(created.id, fileIds);
-        close();
-      }}
-    />
-  </>
-);
+      <RemoveTagModal
+        opened={modal.kind === 'remove-tag'}
+        appliedTags={appliedTags}
+        onCancel={close}
+        onConfirm={async (tagId) => {
+          await onBulkRemoveTag(tagId);
+          close();
+        }}
+      />
+
+      <NewCollectionModal
+        opened={modal.kind === 'new-collection'}
+        onCancel={close}
+        onConfirm={async (name) => {
+          const created = await onCreateCollection(name);
+          if (created) await onAddToCollection(created.id, fileIds);
+          close();
+        }}
+      />
+    </>
+  );
 }
 
 function AddTagModal({

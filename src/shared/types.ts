@@ -163,6 +163,27 @@ export interface FolderTreeNode {
   children: FolderTreeNode[];
 }
 
+/** Request to rename a folder (and everything under it) within a library. */
+export interface RenameFolderRequest {
+  libraryId: string;
+  /** POSIX path relative to library root, e.g. "LOGOs/FMOD". Root ("") is not renameable this way. */
+  folderPath: string;
+  /** New leaf name only — not a full path. */
+  newName: string;
+}
+
+export type RenameFolderResult =
+  | { ok: true; newFolderPath: string }
+  | { ok: false; error: string };
+
+export type RevealFolderResult =
+  | { ok: true }
+  | { ok: false; error: string };
+
+export type RescanFolderResult =
+  | { ok: true }
+  | { ok: false; error: string };
+
 export interface ScanProgress {
   libraryId: string;
   state: 'idle' | 'scanning' | 'watching' | 'error' | 'cancelled';
@@ -384,6 +405,25 @@ export interface FormatMetadata {
   solidName?: string;
 }
 
+export interface ImageMetadata {
+  width: number;
+  height: number;
+  bitDepth?: number;
+  colorType?: string; // e.g. 'RGB', 'RGBA', 'Grayscale'
+}
+
+/**
+ * Duration/sample-rate/channel info extracted from decoding the file with
+ * the Web Audio API. Set when `thumbSource` is 'audio' and the codec was
+ * decodable; absent when decoding failed (the thumbnail worker still emits
+ * a placeholder tile in that case rather than failing the job).
+ */
+export interface AudioMetadata {
+  durationSec: number;
+  sampleRate: number;
+  channels: number;
+}
+
 export interface ExtractedMetadata {
   vertexCount: number;
   triangleCount: number;
@@ -396,7 +436,7 @@ export interface ExtractedMetadata {
     size: [number, number, number];
   };
   /** Source of the rendered thumbnail. */
-  thumbSource: 'gl' | '3mf-embedded';
+  thumbSource: 'gl' | '3mf-embedded' | 'image' | 'audio';
   /** Distinct material names encountered (max 32). */
   materialNames: string[];
   /** Set when mesh validation ran during render. Absent on older rows. */
@@ -412,6 +452,14 @@ export interface ExtractedMetadata {
   /** Format-specific provenance (3MF author/title/license, STL header).
    *  Absent when the file carries none or the format isn't byte-parsed. */
   format?: FormatMetadata;
+  /** Pixel dimensions — set when thumbSource is 'image'. */
+  imageWidth?: number;
+  imageHeight?: number;
+  /** Detailed image metadata block for 2D textures and images. */
+  image?: ImageMetadata;
+  /** Duration/sample-rate/channel block — set when thumbSource is 'audio'
+   *  and the file was successfully decoded. */
+  audio?: AudioMetadata;
 }
 
 export interface IpcApi {
@@ -421,6 +469,18 @@ export interface IpcApi {
   removeLibrary(req: RemoveLibraryRequest): Promise<RemoveLibraryResult>;
   renameLibrary(req: RenameLibraryRequest): Promise<RenameLibraryResult>;
   revealLibrary(id: string): Promise<RevealLibraryResult>;
+
+  /** Rename a folder (and every file beneath it) within a library. */
+  renameFolder(req: RenameFolderRequest): Promise<RenameFolderResult>;
+  /** Show a folder in Finder/Explorer. */
+  revealFolder(libraryId: string, folderPath: string): Promise<RevealFolderResult>;
+  /**
+   * Re-scan for changes under a folder. NOTE: currently re-runs a full
+   * library scan under the hood (the scanner service doesn't yet support
+   * subtree-scoped scans) — kept as a separate IPC method/channel so a
+   * true scoped scan can be dropped in later without touching callers.
+   */
+  rescanFolder(libraryId: string, folderPath: string): Promise<RescanFolderResult>;
 
   listFolders(req: ListFoldersRequest): Promise<FolderTreeNode | null>;
   listFiles(req: ListFilesRequest): Promise<FileRecord[]>;

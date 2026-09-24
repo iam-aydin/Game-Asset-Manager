@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { Center, Loader, Stack, Text } from '@mantine/core';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
@@ -7,6 +7,7 @@ import { frameObject, objectCenter } from './framing';
 import { DEFAULT_LIGHTING_STYLE, LightingRig, type LightingStyle } from './lighting';
 import { applyOrientation } from './orientation';
 import type { CameraState, FileRecord } from '@shared/types';
+import { isImageExtension } from '@shared/formats';
 import {
   DEFAULT_RENDER_QUALITY,
   getRenderQualityPreset,
@@ -14,15 +15,28 @@ import {
   type RenderQualityPreset
 } from '@shared/render-quality';
 
+// --- Image preview zoom tuning ---------------------------------------------
+const IMAGE_ZOOM_MIN = 0.25;
+const IMAGE_ZOOM_MAX = 8;
+const IMAGE_WHEEL_SENSITIVITY = 0.0015;
+const IMAGE_KEY_ZOOM_STEP = 1.15;
+const IMAGE_KEY_PAN_STEP = 40;
+
+function clampZoom(value: number): number {
+  return Math.min(IMAGE_ZOOM_MAX, Math.max(IMAGE_ZOOM_MIN, value));
+}
+
+// --- 3D preview WASD tuning --------------------------------------------
+const MODEL_KEY_ZOOM_STEP = 1.08;
+const MODEL_KEY_ROTATE_STEP = THREE.MathUtils.degToRad(4);
+const MODEL_KEY_PAN_STEP = 0.1;
+const MODEL_MIN_DISTANCE = 0.1;
+const MODEL_MAX_DISTANCE = 500;
+
 interface Props {
-  /** Active library id, or null in "All Libraries" mode. Unused — the model
-   *  fetch and orientation updates key off `file.libraryId` directly. Kept on
-   *  the prop list so call sites can stay structurally identical to the
-   *  pre-cross-library wiring. */
   libraryId: string | null;
   file: FileRecord;
   lightingStyle?: LightingStyle;
-  /** Render quality tier; defaults to Low (no shadows, current historical behavior). */
   renderQuality?: RenderQuality;
 }
 
@@ -38,8 +52,6 @@ function shadowFilterToThree(filter: 'basic' | 'pcf' | 'pcfsoft'): THREE.ShadowM
   }
 }
 
-/** Tag every Mesh in the subtree so it casts + receives shadows when the
- *  rig has shadows enabled. Idempotent and cheap to re-walk. */
 function applyShadowFlags(root: THREE.Object3D, enabled: boolean): void {
   root.traverse((node) => {
     if ((node as THREE.Mesh).isMesh) {
@@ -49,8 +61,6 @@ function applyShadowFlags(root: THREE.Object3D, enabled: boolean): void {
   });
 }
 
-/** Push a texture's anisotropy to the configured value on every material in
- *  the subtree. Quality presets above Low get sharper texture filtering. */
 function applyAnisotropy(root: THREE.Object3D, anisotropy: number, max: number): void {
   if (anisotropy <= 1) return;
   const target = Math.min(anisotropy, max);
@@ -82,15 +92,10 @@ interface ViewerCtx {
 }
 
 export interface ModelViewerHandle {
-  /** True when a model is loaded and visible. */
   hasModel(): boolean;
-  /** Render the current view to a PNG and return the bytes. Null if no model. */
   captureCurrentFrame(): Promise<Uint8Array | null>;
-  /** Snapshot of the camera position/target/zoom — used by compare mode. */
   getCameraState(): CameraState | null;
-  /** Apply a camera snapshot. Skips the change-listener fire to avoid loops. */
   setCameraState(state: CameraState): void;
-  /** Subscribe to OrbitControls 'change' events. Returns unsubscribe. */
   onCameraChange(cb: () => void): () => void;
 }
 
@@ -108,16 +113,52 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
   const ctxRef = useRef<ViewerCtx | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  // For 3MFs we can't render as live 3D (Bambu/Prusa multi-part exports
-  // larger than the inline budget): show the slicer's embedded PNG instead
-  // of an error. Object URL — revoked on swap/unmount.
   const [embeddedPngUrl, setEmbeddedPngUrl] = useState<string | null>(null);
-  // Compare mode wires N viewers together via onCameraChange. We collect the
-  // subscribers in a ref so the cleanup function can remove them precisely.
+  const [plainImageMode, setPlainImageMode] = useState(false);
+  const [imageZoom, setImageZoom] = useState(1);
+  const [imagePanX, setImagePanX] = useState(0);
+  const [imagePanY, setImagePanY] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+  const imageWrapRef = useRef<HTMLDivElement>(null);
+
+  // Store original/default camera state for 3D reset
+  const defaultCameraStateRef = useRef<CameraState | null>(null);
+
+  const dragStateRef = useRef<{
+    pointerId: number;
+    startClientX: number;
+    startClientY: number;
+    startPanX: number;
+    startPanY: number;
+  } | null>(null);
+
+  const panRef = useRef({ x: imagePanX, y: imagePanY });
+  useEffect(() => {
+    panRef.current = { x: imagePanX, y: imagePanY };
+  }, [imagePanX, imagePanY]);
+
   const cameraListenersRef = useRef<Set<() => void>>(new Set());
-  // When the camera is being programmatically synced from a sibling viewer,
-  // skip firing our own change listeners or we'd loop forever.
   const suppressChangeRef = useRef(false);
+
+  // Reset view handler (Works for both Image mode & 3D model mode)
+  const resetView = useCallback(() => {
+    if (plainImageMode) {
+      setImageZoom(1);
+      setImagePanX(0);
+      setImagePanY(0);
+      return;
+    }
+
+    const ctx = ctxRef.current;
+    if (ctx && defaultCameraStateRef.current) {
+      const { position, target, zoom } = defaultCameraStateRef.current;
+      ctx.camera.position.set(position[0], position[1], position[2]);
+      ctx.controls.target.set(target[0], target[1], target[2]);
+      ctx.camera.zoom = zoom;
+      ctx.camera.updateProjectionMatrix();
+      ctx.controls.update();
+    }
+  }, [plainImageMode]);
 
   useImperativeHandle(
     ref,
@@ -128,15 +169,8 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
       async captureCurrentFrame() {
         const ctx = ctxRef.current;
         if (!ctx || !ctx.currentObject) return null;
-        // Force a fresh render right before reading pixels — the rAF loop
-        // composites and clears between frames, so blitting can return blank
-        // unless we've just rendered. preserveDrawingBuffer:true on the
-        // renderer also helps keep the buffer stable for the readback.
         ctx.renderer.render(ctx.scene, ctx.camera);
 
-        // Crop a centered 1:1 square out of the (possibly non-square) canvas.
-        // The CropOverlay in PreviewPane previews exactly this region so the
-        // user knows what'll end up in the thumbnail.
         const src = ctx.renderer.domElement;
         const srcW = src.width;
         const srcH = src.height;
@@ -144,8 +178,6 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
         if (cropPx <= 0) return null;
         const offsetX = Math.floor((srcW - cropPx) / 2);
         const offsetY = Math.floor((srcH - cropPx) / 2);
-        // Cap output at 1024 to keep PNGs reasonably small while still being
-        // crisper than the worker's 512px renders when the viewer is large.
         const outSize = Math.min(cropPx, 1024);
 
         const out = document.createElement('canvas');
@@ -179,9 +211,6 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
         ctx.camera.zoom = state.zoom;
         ctx.camera.updateProjectionMatrix();
         ctx.controls.update();
-        // Release the suppression on the next microtask so the corresponding
-        // OrbitControls 'change' event (fired during controls.update) doesn't
-        // re-broadcast.
         queueMicrotask(() => {
           suppressChangeRef.current = false;
         });
@@ -196,9 +225,6 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     []
   );
 
-  // Renderer / scene / camera live for the lifetime of the component.
-  // Recreating them per file caused the compositor to reference freed GPU
-  // mailboxes (shared_image_manager errors) and was needlessly expensive.
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -210,9 +236,6 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     const renderer = new THREE.WebGLRenderer({
       antialias: true,
       alpha: true,
-      // Required so captureCurrentFrame()'s toBlob() reliably reads pixels —
-      // otherwise the buffer may be cleared by compositing between render()
-      // and the toBlob callback.
       preserveDrawingBuffer: true
     });
     renderer.setPixelRatio(window.devicePixelRatio);
@@ -233,8 +256,6 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
-    // Notify external subscribers (compare mode) on user-driven camera moves
-    // — but skip during programmatic sync to avoid feedback loops.
     controls.addEventListener('change', () => {
       if (suppressChangeRef.current) return;
       for (const cb of cameraListenersRef.current) cb();
@@ -279,35 +300,18 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
       }
       ctx.lighting.dispose();
       scene.clear();
-      // Detach the canvas BEFORE disposing the renderer so Chromium's
-      // compositor stops referencing the GPU mailbox before the texture is
-      // freed. Skipping forceContextLoss() avoids the same race — Three's
-      // dispose() is enough; the GL context is collected when the canvas is
-      // removed from the DOM.
       if (renderer.domElement.parentNode) {
         renderer.domElement.parentNode.removeChild(renderer.domElement);
       }
       renderer.dispose();
       ctxRef.current = null;
     };
-    // Quality is in the dep array because the renderer's shadowMap settings
-    // are immutable post-init in practice (changing shadowMap.type after
-    // first frame doesn't always flush program caches). Recreating the GL
-    // context on tier change is the simplest reliable path; quality changes
-    // are infrequent (user toggling a pref) so the brief flash is acceptable.
   }, [renderQuality]);
 
-  // Hot-swap lighting when the user picks a different preset. No canvas /
-  // model teardown — LightingRig.apply() clears the prior lights/env and
-  // installs the new set. Quality is passed through so the rig keeps env-map
-  // sharpness + shadow caster in sync with the active tier.
   useEffect(() => {
     ctxRef.current?.lighting.apply(lightingStyle, qualityPreset);
   }, [lightingStyle, qualityPreset]);
 
-  // Up-axis change → re-apply orientation AND reframe the camera. Changing
-  // which way is "up" is a fundamental pose correction, so jumping back to
-  // a sensible default 3/4 view is what the user expects.
   useEffect(() => {
     const ctx = ctxRef.current;
     if (!ctx?.currentObject) return;
@@ -317,12 +321,6 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     ctx.controls.update();
   }, [file.orientation.upAxis]);
 
-  // Yaw change → spin the model in place; do NOT reframe the camera. The
-  // lights are world-fixed, so leaving the camera alone makes the lighting
-  // appear stationary while the model rotates under it — the user can pick
-  // which side faces the camera/light. We still nudge controls.target so an
-  // offset model stays in view (OrbitControls keeps camera position fixed
-  // when only the target moves; it just reorients the lookAt).
   useEffect(() => {
     const ctx = ctxRef.current;
     if (!ctx?.currentObject) return;
@@ -330,8 +328,6 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     ctx.controls.target.copy(objectCenter(ctx.currentObject));
   }, [file.orientation.yaw]);
 
-  // Load / swap the model when the selected file changes. The renderer
-  // keeps running through the swap so there's no canvas teardown.
   useEffect(() => {
     const ctx = ctxRef.current;
     if (!ctx) return;
@@ -340,13 +336,16 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     const abort = new AbortController();
     setLoading(true);
     setError(null);
+    setPlainImageMode(false);
+    setImageZoom(1);
+    setImagePanX(0);
+    setImagePanY(0);
+    defaultCameraStateRef.current = null;
     setEmbeddedPngUrl((prev) => {
       if (prev) URL.revokeObjectURL(prev);
       return null;
     });
-    // Hide any leftover scene from the previous file while we load. The
-    // embedded-PNG fallback below paints over the canvas anyway, but
-    // dropping the live object also frees its GPU memory.
+
     if (ctx.currentObject) {
       ctx.scene.remove(ctx.currentObject);
       disposeObject(ctx.currentObject);
@@ -355,9 +354,6 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
 
     const load = async () => {
       try {
-        // Use file.libraryId so cross-library views (the "All Libraries"
-        // sidebar entry) resolve correctly without the parent needing to
-        // pipe a per-tile library prop.
         const res = await fetch(`wh3d-file://${file.libraryId}/${file.id}`, {
           signal: abort.signal
         });
@@ -365,12 +361,24 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
         const buffer = await res.arrayBuffer();
         if (canceled) return;
 
-        // glTF (.gltf, not .glb) can reference sibling resources — a
-        // scene.bin buffer, external textures — by relative URL. The
-        // renderer has no direct filesystem access, so we resolve those
-        // through the wh3d-file://<libraryId>/rel/<relPath> route instead
-        // of a plain OS path (which only works in the thumb-worker's
-        // nodeIntegration context).
+        if (isImageExtension(file.ext)) {
+          const mime =
+            file.ext === 'png' ? 'image/png' :
+            file.ext === 'jpg' || file.ext === 'jpeg' ? 'image/jpeg' :
+            file.ext === 'bmp' ? 'image/bmp' :
+            'application/octet-stream';
+          const blob = new Blob([buffer], { type: mime });
+          const url = URL.createObjectURL(blob);
+          if (canceled) {
+            URL.revokeObjectURL(url);
+            return;
+          }
+          setPlainImageMode(true);
+          setEmbeddedPngUrl(url);
+          setLoading(false);
+          return;
+        }
+
         const obj = await loadModel(
           buffer,
           file.ext,
@@ -389,8 +397,6 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
         ctx.scene.add(obj);
         ctx.currentObject = obj;
 
-        // Apply quality-tier shadow flags + texture anisotropy. Cheap to
-        // do here and means re-loading a file picks up any quality change.
         applyShadowFlags(obj, qualityPreset.shadows.enabled);
         applyAnisotropy(
           obj,
@@ -398,14 +404,9 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
           ctx.renderer.capabilities.getMaxAnisotropy()
         );
 
-        // Size the shadow caster's camera + position to the model's actual
-        // scale so shadows work for tiny STLs and meter-scale glTFs alike.
         const box = new THREE.Box3().setFromObject(obj);
         ctx.lighting.fitToModel(box);
 
-        // Prefer the saved camera (captured when the user composed the
-        // thumbnail) over the default frame-fit, so reopening the file
-        // restarts at the same angle.
         if (file.camera) {
           ctx.camera.position.set(
             file.camera.position[0],
@@ -425,6 +426,13 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
           ctx.controls.target.copy(objectCenter(obj));
           ctx.controls.update();
         }
+
+        // Cache initial camera state for reset
+        defaultCameraStateRef.current = {
+          position: [ctx.camera.position.x, ctx.camera.position.y, ctx.camera.position.z],
+          target: [ctx.controls.target.x, ctx.controls.target.y, ctx.controls.target.z],
+          zoom: ctx.camera.zoom
+        };
 
         setLoading(false);
       } catch (err) {
@@ -448,16 +456,201 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     };
   }, [file.libraryId, file.id, file.ext, renderQuality]);
 
-  // Release the object URL on unmount.
   useEffect(() => {
     return () => {
       if (embeddedPngUrl) URL.revokeObjectURL(embeddedPngUrl);
     };
   }, [embeddedPngUrl]);
 
+  // Global 'R' key listener to reset view position
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) return;
+
+      if (e.key === 'r' || e.key === 'R') {
+        e.preventDefault();
+        resetView();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [resetView]);
+
+  useEffect(() => {
+    const el = imageWrapRef.current;
+    if (!el || !plainImageMode) return;
+
+    const handleWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const factor = Math.exp(-e.deltaY * IMAGE_WHEEL_SENSITIVITY);
+      setImageZoom((z) => clampZoom(z * factor));
+    };
+
+    el.addEventListener('wheel', handleWheel, { passive: false });
+    return () => el.removeEventListener('wheel', handleWheel);
+  }, [plainImageMode]);
+
+  useEffect(() => {
+    const el = imageWrapRef.current;
+    if (!el || !plainImageMode) return;
+
+    const handlePointerDown = (e: PointerEvent) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      el.setPointerCapture(e.pointerId);
+      dragStateRef.current = {
+        pointerId: e.pointerId,
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        startPanX: panRef.current.x,
+        startPanY: panRef.current.y
+      };
+      setIsDragging(true);
+    };
+
+    const handlePointerMove = (e: PointerEvent) => {
+      const drag = dragStateRef.current;
+      if (!drag || drag.pointerId !== e.pointerId) return;
+      const dx = e.clientX - drag.startClientX;
+      const dy = e.clientY - drag.startClientY;
+      setImagePanX(drag.startPanX + dx);
+      setImagePanY(drag.startPanY + dy);
+    };
+
+    const endDrag = (e: PointerEvent) => {
+      const drag = dragStateRef.current;
+      if (!drag || drag.pointerId !== e.pointerId) return;
+      if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
+      dragStateRef.current = null;
+      setIsDragging(false);
+    };
+
+    el.addEventListener('pointerdown', handlePointerDown);
+    el.addEventListener('pointermove', handlePointerMove);
+    el.addEventListener('pointerup', endDrag);
+    el.addEventListener('pointercancel', endDrag);
+    return () => {
+      el.removeEventListener('pointerdown', handlePointerDown);
+      el.removeEventListener('pointermove', handlePointerMove);
+      el.removeEventListener('pointerup', endDrag);
+      el.removeEventListener('pointercancel', endDrag);
+    };
+  }, [plainImageMode]);
+
+  useEffect(() => {
+    if (!plainImageMode) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) return;
+
+      const key = e.key.toLowerCase();
+
+      if (key === 'w') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          setImagePanY((y) => y + IMAGE_KEY_PAN_STEP); // Pan up
+        } else {
+          setImageZoom((z) => clampZoom(z * IMAGE_KEY_ZOOM_STEP)); // Zoom in
+        }
+      } else if (key === 's') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          setImagePanY((y) => y - IMAGE_KEY_PAN_STEP); // Pan down
+        } else {
+          setImageZoom((z) => clampZoom(z / IMAGE_KEY_ZOOM_STEP)); // Zoom out
+        }
+      } else if (key === 'a') {
+        e.preventDefault();
+        setImagePanX((x) => x - IMAGE_KEY_PAN_STEP);
+      } else if (key === 'd') {
+        e.preventDefault();
+        setImagePanX((x) => x + IMAGE_KEY_PAN_STEP);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [plainImageMode]);
+
+  useEffect(() => {
+    const show3D = !plainImageMode && !embeddedPngUrl;
+    if (!show3D) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) return;
+
+      const ctx = ctxRef.current;
+      if (!ctx) return;
+
+      const key = e.key.toLowerCase();
+      if (key === 'w' || key === 's') {
+        e.preventDefault();
+
+        if (e.shiftKey) {
+          // Shift + W / S -> Move camera and target up / down locally
+          const upVector = new THREE.Vector3(0, 1, 0).applyQuaternion(ctx.camera.quaternion);
+          const distance = ctx.camera.position.distanceTo(ctx.controls.target);
+          const panAmount = MODEL_KEY_PAN_STEP * Math.max(1, distance * 0.1);
+          const shiftVector = upVector.multiplyScalar(key === 'w' ? panAmount : -panAmount);
+
+          ctx.camera.position.add(shiftVector);
+          ctx.controls.target.add(shiftVector);
+          ctx.controls.update();
+        } else {
+          // W / S -> Zoom in / out (Dolly)
+          const factor = key === 'w' ? 1 / MODEL_KEY_ZOOM_STEP : MODEL_KEY_ZOOM_STEP;
+          const offset = ctx.camera.position.clone().sub(ctx.controls.target);
+          const newDist = Math.min(
+            MODEL_MAX_DISTANCE,
+            Math.max(MODEL_MIN_DISTANCE, offset.length() * factor)
+          );
+          offset.setLength(newDist);
+          ctx.camera.position.copy(ctx.controls.target).add(offset);
+          ctx.controls.update();
+        }
+      } else if (key === 'a' || key === 'd') {
+        e.preventDefault();
+        const deltaTheta = key === 'a' ? MODEL_KEY_ROTATE_STEP : -MODEL_KEY_ROTATE_STEP;
+        const offset = ctx.camera.position.clone().sub(ctx.controls.target);
+        const spherical = new THREE.Spherical().setFromVector3(offset);
+        spherical.theta += deltaTheta;
+        offset.setFromSpherical(spherical);
+        ctx.camera.position.copy(ctx.controls.target).add(offset);
+        ctx.camera.lookAt(ctx.controls.target);
+        ctx.controls.update();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [plainImageMode, embeddedPngUrl]);
+
+  // Middle-mouse click handler to reset view
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if (e.button === 1) { // Middle click
+      e.preventDefault();
+      resetView();
+    }
+  };
+
+  const handleAuxClick = (e: React.MouseEvent) => {
+    if (e.button === 1) { // Prevent default middle click scroll icon
+      e.preventDefault();
+    }
+  };
+
   return (
     <div
       ref={containerRef}
+      onMouseDown={handleMouseDown}
+      onAuxClick={handleAuxClick}
       style={{
         position: 'absolute',
         inset: 0,
@@ -467,34 +660,66 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     >
       {embeddedPngUrl && (
         <div
+          ref={imageWrapRef}
           style={{
             position: 'absolute',
             inset: 0,
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            background: '#101113'
+            background: '#101113',
+            overflow: 'hidden',
+            cursor: plainImageMode ? (isDragging ? 'grabbing' : 'grab') : undefined,
+            touchAction: plainImageMode ? 'none' : undefined
           }}
         >
           <img
             src={embeddedPngUrl}
-            alt="Embedded slicer preview"
-            style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
-          />
-          <Text
-            size="xs"
-            c="dimmed"
+            alt={plainImageMode ? file.filename : 'Embedded slicer preview'}
             style={{
-              position: 'absolute',
-              left: 8,
-              bottom: 6,
-              background: 'rgba(0,0,0,0.45)',
-              padding: '2px 6px',
-              borderRadius: 3
+              maxWidth: '100%',
+              maxHeight: '100%',
+              objectFit: 'contain',
+              transform: plainImageMode
+                ? `translate(${imagePanX}px, ${imagePanY}px) scale(${imageZoom})`
+                : undefined,
+              transformOrigin: 'center center',
+              userSelect: 'none',
+              pointerEvents: 'none'
             }}
-          >
-            Slicer preview (live 3D unavailable for this multi-part 3MF)
-          </Text>
+          />
+          {plainImageMode && imageZoom !== 1 && (
+            <Text
+              size="xs"
+              c="dimmed"
+              style={{
+                position: 'absolute',
+                right: 8,
+                bottom: 6,
+                background: 'rgba(0,0,0,0.45)',
+                padding: '2px 6px',
+                borderRadius: 3
+              }}
+            >
+              {Math.round(imageZoom * 100)}%
+            </Text>
+          )}
+          {!plainImageMode && (
+            <Text
+              size="xs"
+              c="dimmed"
+              style={{
+                position: 'absolute',
+                left: 8,
+                bottom: 6,
+                background: 'rgba(0,0,0,0.45)',
+                padding: '2px 6px',
+                borderRadius: 3
+              }}
+            >
+              Slicer preview (live 3D unavailable for this multi-part 3MF)
+            </Text>
+          )}
         </div>
       )}
       {loading && (

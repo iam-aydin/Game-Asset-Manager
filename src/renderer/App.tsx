@@ -69,6 +69,7 @@ import { FullscreenPreviewModal } from './components/FullscreenPreviewModal';
 import { DeleteConfirmModal } from './components/DeleteConfirmModal';
 import { MoveConfirmModal } from './components/MoveConfirmModal';
 import { CompareModal } from './components/CompareModal';
+import { FolderRenameModal } from './components/FolderRenameModal';
 import { ipc } from './ipc-client';
 import { SUPPORTED_EXTENSIONS } from '@shared/formats';
 
@@ -220,6 +221,13 @@ export function App() {
     open: boolean;
     existing: CollectionWithCount | null;
   }>({ open: false, existing: null });
+  // Folder rename dialog — Electron has no window.prompt(), so this replaces
+  // what used to be a plain prompt() call in handleRenameFolder below.
+  const [folderRenameModal, setFolderRenameModal] = useState<{
+    open: boolean;
+    folderPath: string;
+    currentName: string;
+  }>({ open: false, folderPath: '', currentName: '' });
   const [scanStatus, setScanStatus] = useState<ScanProgress | null>(null);
   const [cacheStatus, setCacheStatus] = useState<CacheProgress | null>(null);
   const [thumbVersions, setThumbVersions] = useState<Map<number, number>>(() => new Map());
@@ -527,7 +535,11 @@ export function App() {
   }, []);
 
   // Library changed → reset everything per-library.
-  const prevLibraryIdRef = useRef<string | null>(null);
+  //
+  // NOTE: selectedExtensions is intentionally NOT reset here. It's persisted
+  // globally (not per-library) via EXT_FILTER_STORAGE_KEY, so wiping it here
+  // fought the persistence and reset the filter on every library switch even
+  // though the point of that key is for it to survive across switches/restarts.
   useEffect(() => {
     setFolderTree(null);
     setFiles([]);
@@ -539,13 +551,6 @@ export function App() {
     setThumbVersions(new Map());
     setSearchInput('');
     setSearchQuery('');
-    if (prevLibraryIdRef.current !== null) {
-    // Only clear the extension filter on a genuine switch between two
-    // already-loaded libraries — skip it on the initial null→id
-    // assignment at startup, so the persisted filter survives a restart.
-      setSelectedExtensions(new Set());
-  }
-  prevLibraryIdRef.current = selectedLibraryId;
     setSelectedTagIds(new Set());
     setMinRating(0);
     setSelectedColorLabels(new Set());
@@ -1045,6 +1050,62 @@ export function App() {
     [files]
   );
 
+  // Folder-level actions from the FolderTree context menu. Route through the
+  // real `ipc` client (window.meshFlask) rather than a nonexistent
+  // window.api — see the previous fix for revealFolder/rescanFolder/renameFolder.
+  const handleRevealFolder = useCallback(
+    (folderPath: string) => {
+      if (!selectedLibraryId) return;
+      void ipc.revealFolder(selectedLibraryId, folderPath).then((r) => {
+        if (!r.ok) {
+          notifications.show({ color: 'orange', title: 'Reveal failed', message: r.error });
+        }
+      });
+    },
+    [selectedLibraryId]
+  );
+
+  const handleRescanFolder = useCallback(
+    (folderPath: string) => {
+      if (!selectedLibraryId) return;
+      void ipc.rescanFolder(selectedLibraryId, folderPath).then((r) => {
+        if (!r.ok) {
+          notifications.show({ color: 'orange', title: 'Rescan', message: r.error ?? 'failed' });
+        }
+      });
+    },
+    [selectedLibraryId]
+  );
+
+  const handleRenameFolder = useCallback((folderPath: string) => {
+    // Opens FolderRenameModal (rendered below) instead of window.prompt(),
+    // which Electron doesn't implement (it returns null with no dialog).
+    const currentName = folderPath.split('/').pop() ?? folderPath;
+    setFolderRenameModal({ open: true, folderPath, currentName });
+  }, []);
+
+  const confirmFolderRename = useCallback(
+    (newName: string) => {
+      if (!selectedLibraryId) {
+        setFolderRenameModal({ open: false, folderPath: '', currentName: '' });
+        return;
+      }
+      const { folderPath } = folderRenameModal;
+      setFolderRenameModal({ open: false, folderPath: '', currentName: '' });
+      void ipc.renameFolder({ libraryId: selectedLibraryId, folderPath, newName }).then((r) => {
+        if (!r.ok) {
+          notifications.show({ color: 'red', title: 'Rename failed', message: r.error });
+          return;
+        }
+        // If the renamed folder was the active selection, follow it to its
+        // new path so the grid doesn't silently point at a path that no
+        // longer exists.
+        setSelectedFolderPath((prev) => (prev === folderPath ? r.newFolderPath : prev));
+      });
+    },
+    [selectedLibraryId, folderRenameModal]
+  );
+
   // Bulk handlers — wired into the metadata pane's bulk mode.
   const selectedIdsArray = useMemo(() => [...selectedFileIds], [selectedFileIds]);
 
@@ -1474,15 +1535,9 @@ export function App() {
                   }
                   onSelect={selectFolder}
                   onDropFiles={requestMove}
-                  onRevealFolder={(folderPath) => {
-                    (window as any).api?.revealInExplorer?.(folderPath);
-                  }}
-                  onRescanFolder={(folderPath) => {
-                    (window as any).api?.rescanFolder?.(folderPath);
-                  }}
-                  onRenameFolder={(folderPath) => {
-                    (window as any).api?.renameFolder?.(folderPath);
-                  }}
+                  onRevealFolder={handleRevealFolder}
+                  onRescanFolder={handleRescanFolder}
+                  onRenameFolder={handleRenameFolder}
                 />
               </div>
             </ScrollArea>
@@ -1519,15 +1574,6 @@ export function App() {
                 onSelect={selectFolder}
                 onToggleFavorite={toggleFavoriteFolder}
                 isFavorite={isFavoriteFolder}
-              />
-            </CollapsibleSection>
-            <CollapsibleSection title="Triage">
-              <TriageFacets
-                headerless
-                minRating={minRating}
-                colorLabels={selectedColorLabels}
-                onSetMinRating={setMinRating}
-                onToggleLabel={handleToggleColorLabel}
               />
             </CollapsibleSection>
             <CollapsibleSection title="Tags">
@@ -1831,6 +1877,13 @@ export function App() {
         files={deleteConfirm.files}
         onCancel={() => setDeleteConfirm({ open: false, files: [] })}
         onConfirm={() => void performDelete()}
+      />
+
+      <FolderRenameModal
+        opened={folderRenameModal.open}
+        currentName={folderRenameModal.currentName}
+        onCancel={() => setFolderRenameModal({ open: false, folderPath: '', currentName: '' })}
+        onConfirm={confirmFolderRename}
       />
 
       <MoveConfirmModal

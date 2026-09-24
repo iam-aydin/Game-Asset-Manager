@@ -1,6 +1,6 @@
 {
   "name": "game-asset-manager",
-  "version": "0.4.3",
+  "version": "0.7.5",
   "description": "Browser and organizer for 3D models, Images and Audio Files",
   "main": "out/main/index.js",
   "author": "iam-aydin",

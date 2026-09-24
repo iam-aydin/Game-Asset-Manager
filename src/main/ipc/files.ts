@@ -1,6 +1,6 @@
 import { ipcMain, shell } from 'electron';
 import { existsSync, statSync } from 'node:fs';
-import { copyFile } from 'node:fs/promises';
+import { copyFile, rename } from 'node:fs/promises';
 import { IPC } from '@shared/ipc-channels';
 import { broadcastLibraryEvent } from '@main/events';
 import type {
@@ -15,6 +15,10 @@ import type {
   ListFilesRequest,
   ListFoldersRequest,
   MoveFileResult,
+  RenameFolderRequest,
+  RenameFolderResult,
+  RescanFolderResult,
+  RevealFolderResult,
   ScanProgress
 } from '@shared/types';
 import { buildFolderTree } from '@shared/folder-tree';
@@ -100,6 +104,86 @@ export function registerFilesIpc(): void {
     scanner.cancelScan(libraryId);
   });
 
+  ipcMain.handle(
+    IPC.renameFolder,
+    async (_e, req: RenameFolderRequest): Promise<RenameFolderResult> => {
+      const { libraryId, folderPath, newName } = req;
+      const lib = getOpenLibrary(libraryId);
+      if (!lib) return { ok: false, error: `Library ${libraryId} not open` };
+      if (!folderPath) {
+        return {
+          ok: false,
+          error: 'Cannot rename the library root here — use the library rename instead.'
+        };
+      }
+      const trimmedName = newName.trim();
+      if (!trimmedName) return { ok: false, error: 'Folder name cannot be empty' };
+      if (trimmedName.includes('/') || trimmedName.includes('\\')) {
+        return { ok: false, error: 'Folder name cannot contain a path separator' };
+      }
+
+      const segments = folderPath.split('/');
+      const parentSegments = segments.slice(0, -1);
+      const newFolderPath = [...parentSegments, trimmedName].join('/');
+      if (newFolderPath === folderPath) return { ok: true, newFolderPath };
+
+      const absOld = lib.resolver.toAbsolute(folderPath);
+      const absNew = lib.resolver.toAbsolute(newFolderPath);
+
+      if (!existsSync(absOld)) {
+        return { ok: false, error: `Folder not found on disk: ${folderPath}` };
+      }
+      if (existsSync(absNew)) {
+        return { ok: false, error: `A folder already exists at ${newFolderPath}` };
+      }
+
+      try {
+        await rename(absOld, absNew);
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+
+      // Update every DB row whose relPath falls under the old folder path so
+      // the grid/tree reflect the new location without waiting on a rescan.
+      const affected = lib.files.query({ parentDir: folderPath, recursive: true });
+      if (affected.length > 0) {
+        const entries = affected.map((f) =>
+          renameEntryFor(f.id, newFolderPath + f.relPath.slice(folderPath.length))
+        );
+        lib.files.applyRenames(entries);
+      }
+
+      broadcast({ kind: 'files-changed', libraryId });
+      return { ok: true, newFolderPath };
+    }
+  );
+
+  ipcMain.handle(
+    IPC.revealFolder,
+    async (_e, libraryId: string, folderPath: string): Promise<RevealFolderResult> => {
+      const lib = getOpenLibrary(libraryId);
+      if (!lib) return { ok: false, error: `Library ${libraryId} not open` };
+      const abs = lib.resolver.toAbsolute(folderPath);
+      if (!existsSync(abs)) {
+        return { ok: false, error: `Folder not found: ${folderPath || '(library root)'}` };
+      }
+      const err = await shell.openPath(abs);
+      if (err) return { ok: false, error: err };
+      return { ok: true };
+    }
+  );
+
+  ipcMain.handle(
+    IPC.rescanFolder,
+    async (_e, libraryId: string, _folderPath: string): Promise<RescanFolderResult> => {
+      // NOTE: main/scanner/service.ts only supports whole-library scans —
+      // walkLibrary always walks the full mount path, with no subtree param.
+      // Falling back to a full rescan here is correct, just broader than
+      // "just this folder" until the scanner supports a scoped walk.
+      return scanner.rescan(libraryId);
+    }
+  );
+
   ipcMain.handle(IPC.bumpVisibleThumbs, async (_e, libraryId: string, fileIds: number[]) => {
     const lib = getOpenLibrary(libraryId);
     if (lib) queueRunner.bumpVisible(lib, fileIds);
@@ -123,9 +207,8 @@ export function registerFilesIpc(): void {
       if (!lib) return;
       await queueRunner.saveCustomThumbnail(lib, fileId, png);
       // Persist the camera state alongside the thumb so reopening the file
-      // restarts the preview at the same angle the user composed. Caller may
-      // omit it (legacy code path); we then leave any existing saved camera
-      // untouched.
+      // restarts the preview at the same angle. Caller may omit it (legacy
+      // code path); we then leave any existing saved camera untouched.
       if (camera !== undefined) {
         lib.files.setCamera(fileId, isCameraState(camera) ? camera : null);
         broadcast({ kind: 'files-changed', libraryId });
