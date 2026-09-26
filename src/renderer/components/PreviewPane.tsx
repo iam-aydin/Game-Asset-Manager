@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState, type ReactNode } from 'react';
 import { AudioPlayer } from './AudioPlayer';
+import { AudioVisualizer } from './AudioVisualizer';
 import { TextPreview } from './TextPreview';
 import {
   ActionIcon,
@@ -308,45 +309,31 @@ export function PreviewPane({
 }
 
 function AudioPreview({ libraryId, file }: { libraryId: string; file: FileRecord }) {
-  const thumbSrc = file.hasThumb ? `wh3d-thumb://${libraryId}/${file.id}` : null;
+   // Still computed and passed through — AudioPlayer uses it only for a
+   // faint 0.35-opacity backdrop behind its own seek slider, which doesn't
+   // compete with the live hero visualizer for screen space.
+   const thumbSrc = file.hasThumb ? `wh3d-thumb://${libraryId}/${file.id}` : null;
 
   return (
-    <Center h="100%" p="md">
-      <Stack align="center" gap="lg" style={{ width: '100%', maxWidth: 500 }}>
-        {/* Waveform Thumbnail Display (Border & Background Removed) */}
-        {thumbSrc && (
-          <Box
-            style={{
-              width: '100%',
-              height: 280,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center'
-            }}
-          >
-            <img
-              src={thumbSrc}
-              alt={file.filename}
-              style={{
-                maxWidth: '100%',
-                maxHeight: '100%',
-                objectFit: 'contain'
-              }}
-            />
-          </Box>
-        )}
-
-        {/* Player Controls */}
-        <Box style={{ width: '100%' }}>
-          <AudioPlayer
-            libraryId={libraryId}
-            fileId={file.id}
-            filename={file.filename}
-            thumbSrc={thumbSrc}
-          />
-        </Box>
-      </Stack>
-    </Center>
+     // Not Center/vertically-centered on purpose: the visualizer fills
+     // whatever flexible space is available above the player, and the
+     // player itself sits pinned near the bottom, close to the grid
+     // divider below — both stay responsive to the pane resizing since
+     // it's a plain flex column, no fixed pixel heights involved.
+     <Stack h="100%" p="sm" gap="sm" style={{ minHeight: 0 }}>
+       <Box style={{ flex: 1, minHeight: 0 }}>
+         <AudioVisualizer bars={44} height="100%" />
+       </Box>
+       <Box style={{ width: '100%', maxWidth: 640, alignSelf: 'center' }}>
+         <AudioPlayer
+           libraryId={libraryId}
+           fileId={file.id}
+           filename={file.filename}
+           thumbSrc={thumbSrc}
+           showHero={false}
+         />
+       </Box>
+     </Stack>
   );
 }
 

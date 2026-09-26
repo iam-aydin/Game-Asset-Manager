@@ -3,9 +3,11 @@ import {
   ActionIcon,
   Box,
   Button,
+  Loader,
   Card,
   Group,
   Menu,
+  Modal,
   Popover,
   Slider,
   Stack,
@@ -49,6 +51,45 @@ const VOLUME_SNAP_HIGH = 125; // dragging up: has to be pushed past this to go o
 // Analyser resolution used by the visualizers
 const VIZ_FFT = 4096;
 
+// --- Persisted audio effects -----------------------------------------------
+// Plain module-level store (no subscription needed — it's only read once per
+// AudioPlayer mount via a lazy useState initializer, and written on every
+// change). This is what lets pitch/EQ/speed/reverb survive the player being
+// unmounted and remounted as the user clicks between files, folders, and
+// libraries — previously each remount reset back to useState's hardcoded
+// defaults. Volume/mute are intentionally left out: they already have their
+// own dedicated Reset control in the volume popover.
+interface PersistedAudioEffects {
+  speed: number;
+  pitch: number;
+  reverbWet: number;
+  subBass: number;
+  bass: number;
+  treble: number;
+}
+
+const DEFAULT_AUDIO_EFFECTS: PersistedAudioEffects = {
+  speed: 1,
+  pitch: 0,
+  reverbWet: 0,
+  subBass: 0,
+  bass: 0,
+  treble: 0
+};
+
+let persistedEffects: PersistedAudioEffects = { ...DEFAULT_AUDIO_EFFECTS };
+
+const audioEffectsStore = {
+  get: (): PersistedAudioEffects => persistedEffects,
+  set(partial: Partial<PersistedAudioEffects>) {
+    persistedEffects = { ...persistedEffects, ...partial };
+  },
+  reset(): PersistedAudioEffects {
+    persistedEffects = { ...DEFAULT_AUDIO_EFFECTS };
+    return persistedEffects;
+  }
+};
+
 interface AudioGraph {
   preamp: GainNode;
   sub: BiquadFilterNode;
@@ -88,20 +129,29 @@ export function AudioPlayer({
   heroHeight = 260
 }: AudioPlayerProps) {
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  // True once the user clicks Play (or hits space) while still decoding, OR
+  // once a new file starts loading — remembered so playback starts
+  // automatically the instant it's ready. This is also what drives
+  // autoplay-on-select: every fresh load queues a pending play.
+  const [pendingPlay, setPendingPlay] = useState(false);
+  const pendingPlayRef = useRef(false);
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
-  const [speed, setSpeed] = useState(1);
 
-  // Audio Effects state
-  const [pitch, setPitch] = useState(0);
-  const [reverbWet, setReverbWet] = useState(0);
+  // Audio Effects state — seeded from the persisted store, not hardcoded
+  // defaults, so switching files/folders/libraries keeps whatever the user
+  // last dialed in.
+  const [speed, setSpeed] = useState(() => audioEffectsStore.get().speed);
+  const [pitch, setPitch] = useState(() => audioEffectsStore.get().pitch);
+  const [reverbWet, setReverbWet] = useState(() => audioEffectsStore.get().reverbWet);
+  const [subBass, setSubBass] = useState(() => audioEffectsStore.get().subBass);
+  const [bass, setBass] = useState(() => audioEffectsStore.get().bass);
+  const [treble, setTreble] = useState(() => audioEffectsStore.get().treble);
 
-  // EQ state (dB)
-  const [subBass, setSubBass] = useState(0);
-  const [bass, setBass] = useState(0);
-  const [treble, setTreble] = useState(0);
+  const [confirmResetOpen, setConfirmResetOpen] = useState(false);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const audioBufferRef = useRef<AudioBuffer | null>(null);
@@ -218,6 +268,28 @@ export function AudioPlayer({
     let active = true;
     const fileUrl = `wh3d-file://${libraryId}/${fileId}`;
 
+    // Reset synchronously, before the async fetch/decode starts, so
+    // switching files fast doesn't show a stale duration/position/play
+    // state left over from the previous file during the decode window.
+    // Note: effect params (speed/pitch/EQ/reverb) are deliberately NOT
+    // reset here — they carry over from the persisted store.
+    cancelFrame();
+    stopSource();
+    isPlayingRef.current = false;
+    positionRef.current = 0;
+    audioBufferRef.current = null;
+    graphRef.current = null;
+    setDuration(0);
+    setCurrentTime(0);
+    setIsPlaying(false);
+    setIsLoading(true);
+    // Autoplay: every file selection (first click, or switching between
+    // files) queues a pending play, so playback starts the moment decode
+    // finishes rather than requiring a manual Play click.
+    pendingPlayRef.current = true;
+    setPendingPlay(true);
+    audioVizStore.set({ analyser: null, isPlaying: false });
+
     const loadAudio = async () => {
       try {
         const response = await fetch(fileUrl);
@@ -241,8 +313,17 @@ export function AudioPlayer({
         isPlayingRef.current = false;
         setCurrentTime(0);
         setIsPlaying(false);
+        setIsLoading(false);
+        if (pendingPlayRef.current) {
+          pendingPlayRef.current = false;
+          setPendingPlay(false);
+          startPlayback(0);
+        }
       } catch (err) {
         console.error('Failed to load or decode audio file:', err);
+        setIsLoading(false);
+        pendingPlayRef.current = false;
+        setPendingPlay(false);
       }
     };
 
@@ -323,6 +404,14 @@ export function AudioPlayer({
   };
 
   const togglePlay = () => {
+    if (!audioBufferRef.current || !graphRef.current) {
+      // Still decoding — toggle the queued intent; play fires automatically
+      // the moment loadAudio() finishes above.
+      const next = !pendingPlayRef.current;
+      pendingPlayRef.current = next;
+      setPendingPlay(next);
+      return;
+    }
     if (isPlayingRef.current) {
       pausePlayback();
     } else {
@@ -342,9 +431,10 @@ export function AudioPlayer({
     }
   };
 
-  // Volume, mute, reverb and EQ -> audio graph
+  // Volume, mute, reverb and EQ -> audio graph (and persist the effect values)
   useEffect(() => {
     applyParams();
+    audioEffectsStore.set({ reverbWet, subBass, bass, treble });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [volume, isMuted, reverbWet, subBass, bass, treble]);
 
@@ -362,6 +452,8 @@ export function AudioPlayer({
       src.playbackRate.setValueAtTime(speed, ctx.currentTime);
       src.detune.setValueAtTime(pitch * 100, ctx.currentTime);
     }
+
+    audioEffectsStore.set({ speed, pitch });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [speed, pitch]);
 
@@ -400,63 +492,55 @@ export function AudioPlayer({
     return () => window.removeEventListener('keydown', handleKeyDown, true);
   }, []);
 
+  // 'R' key or middle-click on the player prompts to reset pitch/EQ/reverb/speed
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) return;
+
+      if (e.key === 'r' || e.key === 'R') {
+        e.preventDefault();
+        setConfirmResetOpen(true);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if (e.button === 1) {
+      // Middle click
+      e.preventDefault();
+      setConfirmResetOpen(true);
+    }
+  };
+
+  const handleAuxClick = (e: React.MouseEvent) => {
+    if (e.button === 1) e.preventDefault(); // Prevent default middle-click scroll icon
+  };
+
+  const confirmResetEffects = () => {
+    const defaults = audioEffectsStore.reset();
+    setSpeed(defaults.speed);
+    setPitch(defaults.pitch);
+    setReverbWet(defaults.reverbWet);
+    setSubBass(defaults.subBass);
+    setBass(defaults.bass);
+    setTreble(defaults.treble);
+    setConfirmResetOpen(false);
+  };
+
   // Tell every <AudioVisualizer /> on screen whether audio is playing
   useEffect(() => {
     audioVizStore.set({ isPlaying });
   }, [isPlaying]);
 
-  // Hide the big static waveform image the parent draws above the player while the live
-  // visualizer is shown. Restored when the player unmounts.
-  useEffect(() => {
-    if (!showHero) return;
-    const hidden = new Map<HTMLElement, string>();
-    let frame: number | null = null;
-
-    const hideParentThumb = () => {
-      frame = null;
-      const root = rootRef.current;
-      if (!root) return;
-      const player = root.getBoundingClientRect();
-      document.querySelectorAll<HTMLElement>('img, canvas').forEach((el) => {
-        if (hidden.has(el) || root.contains(el)) return;
-        // Only a big image sitting above the player (and lined up with it) is the preview
-        // waveform. Grid thumbnails are below the player and icons are too small.
-        const r = el.getBoundingClientRect();
-        const isAbove = r.bottom <= player.top + 4;
-        const overlapsX = r.right > player.left && r.left < player.right;
-        if (r.height >= 80 && isAbove && overlapsX) {
-          hidden.set(el, el.style.visibility);
-          el.style.visibility = 'hidden';
-        }
-      });
-    };
-
-    const schedule = () => {
-      if (frame === null) frame = requestAnimationFrame(hideParentThumb);
-    };
-
-    schedule();
-    const observer = new MutationObserver((mutations) => {
-      const root = rootRef.current;
-      if (root && mutations.some((m) => !root.contains(m.target))) schedule();
-    });
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ['src']
-    });
-    window.addEventListener('resize', schedule);
-
-    return () => {
-      if (frame !== null) cancelAnimationFrame(frame);
-      observer.disconnect();
-      window.removeEventListener('resize', schedule);
-      hidden.forEach((prev, el) => {
-        el.style.visibility = prev;
-      });
-    };
-  }, [showHero, fileId]);
+  // No longer needed: PreviewPane's AudioPreview no longer renders a
+  // competing static waveform image above the player (removed — the live
+  // hero visualizer below covers that role), so there's nothing left to
+  // find-and-hide via DOM position guessing.
 
   const volumePct = Math.round((isMuted ? 0 : volume) * 100);
   const boosted = !isMuted && volume > 1;
@@ -486,7 +570,12 @@ export function AudioPlayer({
   };
 
   return (
-    <Box ref={rootRef} style={{ position: 'relative', width: '100%' }}>
+    <Box
+      ref={rootRef}
+      onMouseDown={handleMouseDown}
+      onAuxClick={handleAuxClick}
+      style={{ position: 'relative', width: '100%' }}
+    >
       {/* Big live visualizer, sits right above the player where the static waveform image was */}
       {showHero && (
         <Box
@@ -523,12 +612,23 @@ export function AudioPlayer({
             size={42}
             onClick={togglePlay}
             aria-label={isPlaying ? 'Pause' : 'Play'}
+            style={{ flexShrink: 0 }}
           >
-            {isPlaying ? <IconPlayerPause size={20} /> : <IconPlayerPlay size={20} style={{ marginLeft: 2 }} />}
+              {isLoading ? (
+                pendingPlay ? (
+                  <Loader size={16} color="white" />
+                ) : (
+                  <IconPlayerPlay size={20} style={{ marginLeft: 2 }} />
+                )
+              ) : isPlaying ? (
+                <IconPlayerPause size={20} />
+              ) : (
+                <IconPlayerPlay size={20} style={{ marginLeft: 2 }} />
+              )}
           </ActionIcon>
 
-          {/* File Name & Time Counter */}
-          <Box style={{ minWidth: 120, maxWidth: 180 }}>
+          {/* File Name & Time Counter — shrinks first so the seekbar keeps its usable width */}
+          <Box style={{ flexShrink: 1, flexGrow: 0, minWidth: 0, maxWidth: 180, overflow: 'hidden' }}>
             <Text size="xs" fw={700} truncate c="gray.2">
               {filename}
             </Text>
@@ -537,8 +637,17 @@ export function AudioPlayer({
             </Text>
           </Box>
 
-          {/* Center: Waveform + Interactive Seekbar Overlay */}
-          <Box style={{ flex: 1, position: 'relative', height: 40, display: 'flex', alignItems: 'center' }}>
+          {/* Center: Waveform + Interactive Seekbar Overlay — guaranteed a usable minimum width */}
+          <Box
+            style={{
+              flex: '1 1 140px',
+              minWidth: 140,
+              position: 'relative',
+              height: 40,
+              display: 'flex',
+              alignItems: 'center'
+            }}
+          >
             {thumbSrc && (
               <img
                 src={thumbSrc}
@@ -573,8 +682,8 @@ export function AudioPlayer({
             />
           </Box>
 
-          {/* Right Controls: Speed, EQ, Pitch/Reverb, Volume */}
-          <Group gap="xs" wrap="nowrap">
+          {/* Right Controls: Speed, EQ, Pitch/Reverb, Volume — never shrinks, stays clickable */}
+          <Group gap="xs" wrap="nowrap" style={{ flexShrink: 0 }}>
             {/* Speed Selection Menu */}
             <Menu shadow="md" width={100} position="top">
               <Menu.Target>
@@ -768,6 +877,29 @@ export function AudioPlayer({
           </Group>
         </Group>
       </Card>
+
+      {/* Middle-click or 'R' -> confirm before wiping pitch/EQ/reverb/speed */}
+      <Modal
+        opened={confirmResetOpen}
+        onClose={() => setConfirmResetOpen(false)}
+        title="Reset audio effects?"
+        centered
+        size="xs"
+      >
+        <Stack gap="md">
+          <Text size="sm" c="dimmed">
+            This resets pitch, EQ, reverb, and playback speed back to default. Volume is left as-is.
+          </Text>
+          <Group justify="flex-end" gap="xs">
+            <Button variant="default" size="xs" onClick={() => setConfirmResetOpen(false)}>
+              No
+            </Button>
+            <Button color="red" size="xs" onClick={confirmResetEffects}>
+              Yes, reset
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
     </Box>
   );
 }
