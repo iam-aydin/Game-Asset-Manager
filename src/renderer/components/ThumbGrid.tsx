@@ -14,26 +14,18 @@ export interface TileClickModifiers {
   shift: boolean;
   meta: boolean;
   ctrl: boolean;
+  isRightClick?: boolean;
 }
 
 interface Props {
-  /** Active library id, or null in "All Libraries" mode. Unused for tile URLs
-   *  (those come from `file.libraryId`) but still threaded through for any
-   *  future library-scoped tile interactions. */
   libraryId: string | null;
   files: FileRecord[];
-  /** All file ids currently in the multi-selection. */
   selectedIds: ReadonlySet<number>;
-  /** The most-recently-clicked file id — drives the PreviewPane viewer. */
   primaryId: number | null;
-  /** Per-fileId monotonic render counter; bumped when a new thumb is rendered. */
   thumbVersions: ReadonlyMap<number, number>;
   onTileClick: (fileId: number, modifiers: TileClickModifiers) => void;
-  /** Right-click on a tile. Coords are viewport-relative for menu positioning. */
   onTileContextMenu?: (fileId: number, x: number, y: number) => void;
-  /** Optional extra controls rendered in the toolbar (sort, view mode, etc.). */
   headerExtras?: React.ReactNode;
-  /** When registered, files that fit none of these beds get a warning badge. */
   printBeds?: PrintBed[];
 }
 
@@ -71,7 +63,11 @@ const EXT_COLORS: Record<string, string> = {
   obj: '#1c7ed6',
   stl: '#37b24d',
   ply: '#f59f00',
-  '3mf': '#e8590c'
+  '3mf': '#e8590c',
+  mp3: '#4c6ef5',
+  wav: '#4c6ef5',
+  ogg: '#4c6ef5',
+  flac: '#4c6ef5'
 };
 
 export function ThumbGrid({
@@ -85,13 +81,10 @@ export function ThumbGrid({
   headerExtras,
   printBeds = []
 }: Props) {
-  // Mutable so the callback ref below can write to it directly; the virtualizer
-  // reads it via getScrollElement on every layout pass.
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [containerWidth, setContainerWidth] = useState(0);
   const [thumbSize, setThumbSizeState] = useState<number>(() => readStoredThumbSize());
 
-  // Persist size changes. localStorage may be unavailable; failure is fine.
   const setThumbSize = useCallback((next: number) => {
     const clamped = clampThumbSize(next);
     setThumbSizeState(clamped);
@@ -102,9 +95,6 @@ export function ThumbGrid({
     }
   }, []);
 
-  // Track the scroll container's width so we can pack the grid. Callback ref
-  // attaches the observer when the element mounts; survives empty-state
-  // remounts because react re-runs the callback on every change.
   const setScrollRef = useCallback((el: HTMLDivElement | null) => {
     scrollRef.current = el;
     if (!el) {
@@ -115,17 +105,10 @@ export function ThumbGrid({
     recompute();
     const ro = new ResizeObserver(recompute);
     ro.observe(el);
-    // Best-effort cleanup: stash the observer on the element so the next
-    // call disconnects it cleanly when the element changes.
     (el as unknown as { __wh3dRO?: ResizeObserver }).__wh3dRO?.disconnect();
     (el as unknown as { __wh3dRO?: ResizeObserver }).__wh3dRO = ro;
   }, []);
 
-  // Tiles render at the exact `thumbSize` so every +/- step is visually
-  // distinct (the prior "fill the row" approach made consecutive sizes round
-  // to the same tile width). The leftover horizontal slack is distributed as
-  // extra column-gap so the row still spans the pane edge-to-edge instead of
-  // pooling space on the right.
   const innerWidth = Math.max(0, containerWidth - PADDING_X * 2);
   const columns = Math.max(
     1,
@@ -148,7 +131,6 @@ export function ThumbGrid({
     overscan: 4
   });
 
-  // Reset virtualizer measurements when tile geometry changes (zoom or pane resize).
   useEffect(() => {
     virtualizer.measure();
   }, [tileHeight, columns, virtualizer]);
@@ -175,33 +157,33 @@ export function ThumbGrid({
         </Text>
         <Group gap={6} wrap="nowrap">
           {headerExtras}
-        <Group gap={4} wrap="nowrap">
-          <Tooltip label="Smaller thumbnails">
-            <ActionIcon
-              size="sm"
-              variant="default"
-              onClick={() => setThumbSize(thumbSize - THUMB_SIZE_STEP)}
-              disabled={!canDecrease}
-              aria-label="Decrease thumbnail size"
-            >
-              <IconMinus size={12} />
-            </ActionIcon>
-          </Tooltip>
-          <Text size="xs" c="dimmed" style={{ minWidth: 40, textAlign: 'center' }}>
-            {thumbSize}px
-          </Text>
-          <Tooltip label="Larger thumbnails">
-            <ActionIcon
-              size="sm"
-              variant="default"
-              onClick={() => setThumbSize(thumbSize + THUMB_SIZE_STEP)}
-              disabled={!canIncrease}
-              aria-label="Increase thumbnail size"
-            >
-              <IconPlus size={12} />
-            </ActionIcon>
-          </Tooltip>
-        </Group>
+          <Group gap={4} wrap="nowrap">
+            <Tooltip label="Smaller thumbnails">
+              <ActionIcon
+                size="sm"
+                variant="default"
+                onClick={() => setThumbSize(thumbSize - THUMB_SIZE_STEP)}
+                disabled={!canDecrease}
+                aria-label="Decrease thumbnail size"
+              >
+                <IconMinus size={12} />
+              </ActionIcon>
+            </Tooltip>
+            <Text size="xs" c="dimmed" style={{ minWidth: 40, textAlign: 'center' }}>
+              {thumbSize}px
+            </Text>
+            <Tooltip label="Larger thumbnails">
+              <ActionIcon
+                size="sm"
+                variant="default"
+                onClick={() => setThumbSize(thumbSize + THUMB_SIZE_STEP)}
+                disabled={!canIncrease}
+                aria-label="Increase thumbnail size"
+              >
+                <IconPlus size={12} />
+              </ActionIcon>
+            </Tooltip>
+          </Group>
         </Group>
       </Group>
 
@@ -212,7 +194,7 @@ export function ThumbGrid({
         {files.length === 0 ? (
           <Center h="100%">
             <Stack align="center" gap={4}>
-              <Text c="dimmed">This folder has no indexed 3D files.</Text>
+              <Text c="dimmed">This folder has no indexed assets.</Text>
               <Text size="xs" c="dimmed">
                 Try selecting a parent folder or trigger a rescan from the toolbar.
               </Text>
@@ -266,25 +248,27 @@ export function ThumbGrid({
                           onTileClick(file.id, {
                             shift: e.shiftKey,
                             meta: e.metaKey,
-                            ctrl: e.ctrlKey
+                            ctrl: e.ctrlKey,
+                            isRightClick: false
                           });
                         }}
                         onContextMenu={(e) => {
                           if (!onTileContextMenu) return;
                           e.preventDefault();
-                          // Finder-style behavior: right-clicking outside the
-                          // current multi-selection collapses it to just the
-                          // clicked tile, so the menu acts on what's under the
-                          // cursor rather than the prior selection.
                           if (!selectedIds.has(file.id)) {
-                            onTileClick(file.id, { shift: false, meta: false, ctrl: false });
+                            onTileClick(file.id, {
+                              shift: false,
+                              meta: false,
+                              ctrl: false,
+                              isRightClick: true
+                            });
                           }
                           onTileContextMenu(file.id, e.clientX, e.clientY);
                         }}
-                          onDragStart={(e) => {
-                            e.preventDefault();
-                            ipc.startFileDrag(file.libraryId, file.id);
-                          }}
+                        onDragStart={(e) => {
+                          e.preventDefault();
+                          ipc.startFileDrag(file.libraryId, file.id);
+                        }}
                       />
                     );
                   })}
@@ -332,8 +316,6 @@ function Tile({
 }) {
   const color = EXT_COLORS[file.ext] ?? '#868e96';
   const showThumb = file.hasThumb || thumbVersion > 0;
-  // Thumb URL keyed by file.libraryId so "All Libraries" mode works with the
-  // same tile component.
   const thumbUrl = showThumb
     ? `wh3d-thumb://${file.libraryId}/${file.id}?v=${thumbVersion}`
     : null;
@@ -365,9 +347,6 @@ function Tile({
       }}
       title={hasError ? `Render failed: ${file.thumbError}` : file.relPath}
     >
-      {/* Image area is always 1:1 — matches the worker's render aspect and
-          the in-UI capture crop, so the user gets WYSIWYG between viewer
-          and grid. */}
       <div
         style={{
           position: 'relative',

@@ -1,5 +1,5 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
-import { Center, Loader, Stack, Text } from '@mantine/core';
+import { ActionIcon, Button, Group, Center, Loader, Stack, Text } from '@mantine/core';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { disposeObject, loadModel, ThreeMFEmbeddedOnlyError } from './loaders';
@@ -21,6 +21,13 @@ const IMAGE_ZOOM_MAX = 8;
 const IMAGE_WHEEL_SENSITIVITY = 0.0015;
 const IMAGE_KEY_ZOOM_STEP = 1.15;
 const IMAGE_KEY_PAN_STEP = 40;
+
+function readViewportBgColor(): THREE.Color {
+  const raw = getComputedStyle(document.documentElement)
+    .getPropertyValue('--wh3d-viewport-bg')
+    .trim();
+  return new THREE.Color(raw || '#101113');
+}
 
 function clampZoom(value: number): number {
   return Math.min(IMAGE_ZOOM_MAX, Math.max(IMAGE_ZOOM_MIN, value));
@@ -240,7 +247,7 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     });
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(w, h);
-    renderer.setClearColor(0x101113, 1);
+    renderer.setClearColor(readViewportBgColor(), 1);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.shadowMap.enabled = qualityPreset.shadows.enabled;
     renderer.shadowMap.type = shadowFilterToThree(qualityPreset.shadows.filter);
@@ -307,6 +314,14 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
       ctxRef.current = null;
     };
   }, [renderQuality]);
+
+  useEffect(() => {
+  const applyBg = () => {
+    ctxRef.current?.renderer.setClearColor(readViewportBgColor(), 1);
+  };
+  window.addEventListener('wh3d:themechange', applyBg);
+  return () => window.removeEventListener('wh3d:themechange', applyBg);
+}, []);
 
   useEffect(() => {
     ctxRef.current?.lighting.apply(lightingStyle, qualityPreset);
@@ -654,7 +669,7 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
       style={{
         position: 'absolute',
         inset: 0,
-        background: '#101113',
+        background: 'var(--wh3d-viewport-bg)',
         overflow: 'hidden'
       }}
     >
@@ -667,7 +682,7 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            background: '#101113',
+            background: 'var(--wh3d-viewport-bg)',
             overflow: 'hidden',
             cursor: plainImageMode ? (isDragging ? 'grabbing' : 'grab') : undefined,
             touchAction: plainImageMode ? 'none' : undefined
@@ -688,6 +703,7 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
               pointerEvents: 'none'
             }}
           />
+          
           {plainImageMode && imageZoom !== 1 && (
             <Text
               size="xs"
@@ -696,7 +712,7 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
                 position: 'absolute',
                 right: 8,
                 bottom: 6,
-                background: 'rgba(0,0,0,0.45)',
+                background: 'var(--wh3d-overlay-bg, rgba(16, 17, 19, 0.85))',
                 padding: '2px 6px',
                 borderRadius: 3
               }}
@@ -704,22 +720,51 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
               {Math.round(imageZoom * 100)}%
             </Text>
           )}
-          {!plainImageMode && (
-            <Text
-              size="xs"
-              c="dimmed"
-              style={{
-                position: 'absolute',
-                left: 8,
-                bottom: 6,
-                background: 'rgba(0,0,0,0.45)',
-                padding: '2px 6px',
-                borderRadius: 3
-              }}
-            >
-              Slicer preview (live 3D unavailable for this multi-part 3MF)
-            </Text>
-          )}
+          {plainImageMode && (
+  <Group
+    gap={6}
+    style={{
+      position: 'absolute',
+      bottom: 8,
+      right: 8,
+      background: 'var(--wh3d-overlay-bg, rgba(16, 17, 19, 0.85))',
+      padding: '4px 8px',
+      borderRadius: 8,
+      border: '1px solid var(--wh3d-overlay-border, #2C2E33)',
+      backdropFilter: 'blur(4px)',
+      zIndex: 10
+    }}
+  >
+    <ActionIcon
+      variant="subtle"
+      color="gray"
+      size="sm"
+      onClick={() => setImageZoom((z) => clampZoom(z / IMAGE_KEY_ZOOM_STEP))}
+    >
+      −
+    </ActionIcon>
+    <Text size="xs" c="dimmed" style={{ minWidth: 40, textAlign: 'center' }}>
+      {Math.round(imageZoom * 100)}%
+    </Text>
+    <ActionIcon
+      variant="subtle"
+      color="gray"
+      size="sm"
+      onClick={() => setImageZoom((z) => clampZoom(z * IMAGE_KEY_ZOOM_STEP))}
+    >
+      +
+    </ActionIcon>
+    <Button
+      variant="subtle"
+      color="gray"
+      size="xs"
+      onClick={resetView}
+      style={{ fontSize: 11, padding: '0 6px', height: 22 }}
+    >
+      Reset (R)
+    </Button>
+  </Group>
+)}
         </div>
       )}
       {loading && (

@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Menu, useMantineColorScheme } from '@mantine/core';
+import { IconCheck } from '@tabler/icons-react';
+import { THEMES, DEFAULT_THEME_ID, getTheme } from './themes';
 import {
   ActionIcon,
   AppShell,
@@ -15,7 +18,7 @@ import {
   Text,
   Tooltip
 } from '@mantine/core';
-import { IconCoffee, IconCopy, IconRefresh, IconSettings, IconX } from '@tabler/icons-react';
+import { IconCoffee, IconCopy, IconPalette, IconRefresh, IconSettings, IconX } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import {
   Panel,
@@ -78,6 +81,16 @@ const LIGHTING_STORAGE_KEY = 'wh3d:lightingStyle';
 const SORT_STORAGE_KEY = 'wh3d:sort';
 const VIEW_STORAGE_KEY = 'wh3d:viewMode';
 const WORKSPACE_STORAGE_KEY = 'wh3d:workspace';
+const THEME_STORAGE_KEY = 'wh3d:theme';
+
+function readStoredThemeId(): string {
+  try {
+    const raw = localStorage.getItem(THEME_STORAGE_KEY);
+    return raw && THEMES.some((t) => t.id === raw) ? raw : DEFAULT_THEME_ID;
+  } catch {
+    return DEFAULT_THEME_ID;
+  }
+}
 
 const WORKSPACES = {
   triage: { label: 'Triage', outer: [18, 50, 32], inner: [40, 60] },
@@ -194,6 +207,7 @@ export function App() {
   // tile that drives PreviewPane + single-file MetadataPanel. The anchor for
   // shift-range lives in a ref so it doesn't trigger re-renders.
   const [selectedFileIds, setSelectedFileIds] = useState<Set<number>>(() => new Set());
+  const [activeAudio, setActiveAudio] = useState<{ fileId: number; autoPlay: boolean } | null>(null);
   const [primaryFileId, setPrimaryFileId] = useState<number | null>(null);
   const selectionAnchorRef = useRef<number | null>(null);
   // Raised by nav changes (folder/collection/scope), consumed by the
@@ -268,6 +282,44 @@ export function App() {
   const [sort, setSortState] = useState<SortSpec>(() => readStoredSort());
   const [viewMode, setViewModeState] = useState<ViewMode>(() => readStoredViewMode());
   const [workspace, setWorkspaceState] = useState<Workspace | null>(() => readStoredWorkspace());
+
+  // --- Theme switcher state ------------------------------------------------
+  const [themeId, setThemeIdState] = useState<string>(() => readStoredThemeId());
+  const { setColorScheme } = useMantineColorScheme();
+
+  const setThemeId = useCallback((id: string) => {
+    setThemeIdState(id);
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, id);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // Applies the active theme: Mantine's own light/dark contrast via
+  // useMantineColorScheme, plus our custom CSS var overrides at :root. Every
+  // component in the app reads colors through var(--mantine-color-dark-N)
+  // etc., so this is the only place that needs to touch the DOM.
+useEffect(() => {
+  const theme = getTheme(themeId);
+  setColorScheme(theme.colorScheme);
+
+  const root = document.documentElement.style;
+  for (const t of THEMES) {
+    for (const key of Object.keys(t.cssVars)) {
+      root.removeProperty(key);
+    }
+  }
+  for (const [key, value] of Object.entries(theme.cssVars)) {
+    root.setProperty(key, value);
+  }
+
+  // NEW — let non-CSS consumers (Three.js's WebGL clear color, which can't
+  // read CSS custom properties directly) know the theme changed live.
+  window.dispatchEvent(new Event('wh3d:themechange'));
+}, [themeId, setColorScheme]);
+  // --------------------------------------------------------------------------
+
   const outerPanelGroupRef = useRef<ImperativePanelGroupHandle>(null);
   const innerPanelGroupRef = useRef<ImperativePanelGroupHandle>(null);
 
@@ -608,15 +660,21 @@ export function App() {
   // primary so the preview pane updates without an explicit click. The flag
   // ensures this only happens once per navigation — subsequent IPC reloads
   // (scan, watcher) leave the selection alone.
-  useEffect(() => {
-    if (!autoSelectFirstRef.current) return;
-    if (files.length === 0) return;
-    autoSelectFirstRef.current = false;
-    const first = files[0];
-    setSelectedFileIds(new Set([first.id]));
-    setPrimaryFileId(first.id);
-    selectionAnchorRef.current = first.id;
-  }, [files]);
+useEffect(() => {
+  if (!autoSelectFirstRef.current) return;
+  if (files.length === 0) return;
+  autoSelectFirstRef.current = false;
+
+  const first = files[0];
+  setSelectedFileIds(new Set([first.id]));
+  setPrimaryFileId(first.id);
+  selectionAnchorRef.current = first.id;
+
+  // Select initial audio track on folder load WITHOUT starting playback
+  if (['mp3', 'wav', 'ogg', 'flac'].includes(first.ext.toLowerCase())) {
+    setActiveAudio({ fileId: first.id, autoPlay: false });
+  }
+}, [files]);
 
   useEffect(() => {
     if (!selectedLibraryId || files.length === 0) return;
@@ -816,66 +874,76 @@ export function App() {
   // ThumbGrid interaction. Shift-range walks the visible `files` array between
   // the anchor and the click target (inclusive).
   const handleTileClick = useCallback(
-    (fileId: number, mods: TileClickModifiers) => {
-      const ordered = files;
-      if (mods.shift) {
-        const anchor =
-          selectionAnchorRef.current != null && ordered.some((f) => f.id === selectionAnchorRef.current)
-            ? selectionAnchorRef.current
-            : primaryFileId ?? fileId;
-        const ai = ordered.findIndex((f) => f.id === anchor);
-        const bi = ordered.findIndex((f) => f.id === fileId);
-        if (ai >= 0 && bi >= 0) {
-          const [lo, hi] = ai <= bi ? [ai, bi] : [bi, ai];
-          const next = new Set<number>();
-          for (let i = lo; i <= hi; i++) next.add(ordered[i].id);
-          setSelectedFileIds(next);
-          setPrimaryFileId(fileId);
-          // anchor unchanged on shift-click
-          return;
-        }
-      }
-      if (mods.meta || mods.ctrl) {
-        setSelectedFileIds((prev) => {
-          const next = new Set(prev);
-          if (next.has(fileId)) {
-            next.delete(fileId);
-            // Picking the new primary: prefer the just-toggled id when still
-            // selected, otherwise any remaining member, otherwise null.
-            setPrimaryFileId(next.size > 0 ? [...next][next.size - 1] : null);
-          } else {
-            next.add(fileId);
-            setPrimaryFileId(fileId);
-          }
-          return next;
-        });
-        selectionAnchorRef.current = fileId;
+  (fileId: number, mods: TileClickModifiers) => {
+    // 1. Right Click: Do NOT change active audio or interrupt playback
+    if (mods.isRightClick) {
+      setSelectedFileIds((prev) => (prev.has(fileId) ? prev : new Set([fileId])));
+      return;
+    }
+
+    const ordered = files;
+    const clickedFile = ordered.find((f) => f.id === fileId);
+
+    // 2. Shift / Ctrl Selection logic
+    if (mods.shift) {
+      const anchor =
+        selectionAnchorRef.current != null && ordered.some((f) => f.id === selectionAnchorRef.current)
+          ? selectionAnchorRef.current
+          : primaryFileId ?? fileId;
+      const ai = ordered.findIndex((f) => f.id === anchor);
+      const bi = ordered.findIndex((f) => f.id === fileId);
+      if (ai >= 0 && bi >= 0) {
+        const [lo, hi] = ai <= bi ? [ai, bi] : [bi, ai];
+        const next = new Set<number>();
+        for (let i = lo; i <= hi; i++) next.add(ordered[i].id);
+        setSelectedFileIds(next);
+        setPrimaryFileId(fileId);
         return;
       }
-      // Plain click → single selection.
-      setSelectedFileIds(new Set([fileId]));
-      setPrimaryFileId(fileId);
+    }
+
+    if (mods.meta || mods.ctrl) {
+      setSelectedFileIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(fileId)) {
+          next.delete(fileId);
+          setPrimaryFileId(next.size > 0 ? [...next][next.size - 1] : null);
+        } else {
+          next.add(fileId);
+          setPrimaryFileId(fileId);
+        }
+        return next;
+      });
       selectionAnchorRef.current = fileId;
-    },
-    [files, primaryFileId]
-  );
+      return;
+    }
+
+    // 3. Normal Left Click: Select file and set activeAudio to autoPlay
+    setSelectedFileIds(new Set([fileId]));
+    setPrimaryFileId(fileId);
+    selectionAnchorRef.current = fileId;
+
+    if (clickedFile && ['mp3', 'wav', 'ogg', 'flac'].includes(clickedFile.ext.toLowerCase())) {
+      setActiveAudio({ fileId: clickedFile.id, autoPlay: true });
+    }
+  },
+  [files, primaryFileId]
+);
 
   // Right-click on a tile: open the bulk context menu. Per user preference,
   // keep the current selection unchanged — except when nothing is selected, in
   // which case we promote the right-clicked tile so the menu has something to
   // act on (otherwise right-click would silently do nothing).
-  const handleTileContextMenu = useCallback(
-    (fileId: number, x: number, y: number) => {
-      if (selectedFileIds.size === 0) {
-        setSelectedFileIds(new Set([fileId]));
-        setPrimaryFileId(fileId);
-        selectionAnchorRef.current = fileId;
-      }
-      setContextMenu({ open: true, x, y });
-    },
-    [selectedFileIds]
-  );
-
+const handleTileContextMenu = useCallback(
+  (fileId: number, x: number, y: number) => {
+    setSelectedFileIds((prev) => {
+      if (prev.has(fileId)) return prev;
+      return new Set([fileId]);
+    });
+    setContextMenu({ open: true, x, y });
+  },
+  []
+);
   const closeContextMenu = useCallback(() => {
     setContextMenu((prev) => ({ ...prev, open: false }));
   }, []);
@@ -1645,20 +1713,18 @@ export function App() {
       />
     </Stack>
   ) : (
-    <ThumbGrid
-      libraryId={selectedLibrary.id}
-      files={displayedFiles}
-      thumbVersions={thumbVersions}
-      selectedIds={selectedFileIds}
-      primaryId={primaryFileId}
-      onTileClick={handleTileClick}
-      onTileContextMenu={handleTileContextMenu}
-      headerExtras={sortToolbar}
-      printBeds={printBeds}
-    />
+<ThumbGrid
+  libraryId={selectedLibraryId}
+  files={files}
+  selectedIds={selectedFileIds}
+  primaryId={primaryFileId}
+  thumbVersions={thumbVersions}
+  onTileClick={handleTileClick}
+  onTileContextMenu={handleTileContextMenu}
+/>
   );
 
-  const previewPane = (
+const previewPane = (
     <PreviewPane
       libraryId={selectedLibraryId}
       file={primaryFile}
@@ -1666,6 +1732,8 @@ export function App() {
       lightingStyle={lightingStyle}
       onLightingStyleChange={setLightingStyleState}
       onRerenderThumb={handleRerenderThumb}
+      onMaximize={() => setFullscreenOpen(true)}
+      activeAudio={activeAudio}
     />
   );
 
@@ -1748,6 +1816,27 @@ export function App() {
                 <IconCoffee size={16} />
               </ActionIcon>
             </Tooltip>
+
+            <Menu shadow="md" width={160} position="bottom-end">
+              <Menu.Target>
+                <Tooltip label="Theme">
+                  <ActionIcon variant="subtle" aria-label="Change theme">
+                    <IconPalette size={16} />
+                  </ActionIcon>
+                </Tooltip>
+              </Menu.Target>
+              <Menu.Dropdown>
+                {THEMES.map((t) => (
+                  <Menu.Item
+                    key={t.id}
+                    onClick={() => setThemeId(t.id)}
+                    rightSection={t.id === themeId ? <IconCheck size={14} /> : null}
+                  >
+                    {t.label}
+                  </Menu.Item>
+                ))}
+              </Menu.Dropdown>
+            </Menu>
             <Tooltip label="Preferences">
               <ActionIcon
                 variant="subtle"

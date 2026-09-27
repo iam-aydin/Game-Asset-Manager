@@ -16,6 +16,7 @@ import {
   Tooltip
 } from '@mantine/core';
 import {
+  IconMaximize,
   IconAlertTriangle,
   IconCamera,
   IconRefresh,
@@ -48,21 +49,25 @@ const isTextExtension = (ext: string): boolean =>
   );
 
 interface Props {
+  onMaximize?: () => void;
   libraryId: string | null;
   file: FileRecord | null;
   selectionCount: number;
   lightingStyle: LightingStyle;
   onLightingStyleChange: (style: LightingStyle) => void;
   onRerenderThumb: (fileId: number) => void;
+  activeAudio?: { fileId: number; autoPlay: boolean } | null;
 }
 
 export function PreviewPane({
+  onMaximize,
   libraryId,
   file,
   selectionCount,
   lightingStyle,
   onLightingStyleChange,
-  onRerenderThumb
+  onRerenderThumb,
+  activeAudio
 }: Props) {
   const viewerRef = useRef<ModelViewerHandle>(null);
   const { prefs } = usePreferences();
@@ -140,10 +145,10 @@ export function PreviewPane({
       {/* Main Preview Container */}
       <div
         ref={attachWrapperRef}
-        style={{ flex: 1, minHeight: 0, position: 'relative', background: '#101113' }}
+        style={{ flex: 1, minHeight: 0, position: 'relative', background: 'var(--wh3d-viewport-bg)' }}
       >
         {isAudio ? (
-          <AudioPreview libraryId={libraryId} file={file} />
+          <AudioPreview libraryId={libraryId} file={file} activeAudio={activeAudio} />
         ) : isText ? (
           <TextPreview libraryId={libraryId} file={file} />
         ) : (
@@ -158,6 +163,26 @@ export function PreviewPane({
 
         {/* 3D Crop Overlay skipped for 2D/audio/text assets */}
         {!is2DOrDoc && <CropOverlay size={cropSize} />}
+
+        {onMaximize && !isAudio && (
+          <ActionIcon
+            variant="subtle"
+            color="gray"
+            size="md"
+            onClick={onMaximize}
+            aria-label="Fullscreen"
+            style={{
+              position: 'absolute',
+              top: 8,
+              right: 8,
+              background: 'var(--wh3d-overlay-bg, rgba(16, 17, 19, 0.85))',
+              border: '1px solid var(--wh3d-overlay-border, #2C2E33)',
+              zIndex: 5
+            }}
+          >
+            <IconMaximize size={16} />
+          </ActionIcon>
+        )}
 
         {selectionCount > 1 && (
           <div
@@ -308,32 +333,35 @@ export function PreviewPane({
   );
 }
 
-function AudioPreview({ libraryId, file }: { libraryId: string; file: FileRecord }) {
-   // Still computed and passed through — AudioPlayer uses it only for a
-   // faint 0.35-opacity backdrop behind its own seek slider, which doesn't
-   // compete with the live hero visualizer for screen space.
-   const thumbSrc = file.hasThumb ? `wh3d-thumb://${libraryId}/${file.id}` : null;
+function AudioPreview({
+  libraryId,
+  file,
+  activeAudio
+}: {
+  libraryId: string;
+  file: FileRecord;
+  activeAudio?: { fileId: number; autoPlay: boolean } | null;
+}) {
+  const thumbSrc = file.hasThumb ? `wh3d-thumb://${libraryId}/${file.id}` : null;
+  const autoPlay = activeAudio?.fileId === file.id ? activeAudio.autoPlay : false;
 
   return (
-     // Not Center/vertically-centered on purpose: the visualizer fills
-     // whatever flexible space is available above the player, and the
-     // player itself sits pinned near the bottom, close to the grid
-     // divider below — both stay responsive to the pane resizing since
-     // it's a plain flex column, no fixed pixel heights involved.
-     <Stack h="100%" p="sm" gap="sm" style={{ minHeight: 0 }}>
-       <Box style={{ flex: 1, minHeight: 0 }}>
-         <AudioVisualizer bars={44} height="100%" />
-       </Box>
-       <Box style={{ width: '100%', maxWidth: 640, alignSelf: 'center' }}>
-         <AudioPlayer
-           libraryId={libraryId}
-           fileId={file.id}
-           filename={file.filename}
-           thumbSrc={thumbSrc}
-           showHero={false}
-         />
-       </Box>
-     </Stack>
+    <Stack h="100%" p="sm" gap="sm" style={{ minHeight: 0 }}>
+      <Box style={{ flex: 1, minHeight: 0 }}>
+        <AudioVisualizer bars={44} height="100%" />
+      </Box>
+      <Box style={{ width: '100%', maxWidth: 640, alignSelf: 'center' }}>
+        <AudioPlayer
+          key={file.id}
+          libraryId={libraryId}
+          fileId={file.id}
+          filename={file.filename}
+          thumbSrc={thumbSrc}
+          showHero={false}
+          autoPlay={autoPlay}
+        />
+      </Box>
+    </Stack>
   );
 }
 

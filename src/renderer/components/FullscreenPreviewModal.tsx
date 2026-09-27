@@ -144,8 +144,8 @@ function ImageViewer({ src, alt, thumbUrl }: { src: string; alt: string; thumbUr
             if (imgSrc !== thumbUrl) setImgSrc(thumbUrl);
           }}
           style={{
-            maxWidth: '100%',
-            maxHeight: '100%',
+            width: '100%',
+            height: '100%',
             objectFit: 'contain',
             transform: `translate(${position.x}px, ${position.y}px) scale(${scale})`,
             transition: isDragging ? 'none' : 'transform 0.08s ease-out',
@@ -155,20 +155,20 @@ function ImageViewer({ src, alt, thumbUrl }: { src: string; alt: string; thumbUr
       </Center>
 
       {/* Zoom / Reset Controls */}
-      <Group
-        gap={6}
-        style={{
-          position: 'absolute',
-          bottom: 16,
-          right: 16,
-          background: 'rgba(16, 17, 19, 0.85)',
-          padding: '4px 8px',
-          borderRadius: 8,
-          border: '1px solid #2C2E33',
-          backdropFilter: 'blur(4px)',
-          zIndex: 10
-        }}
-      >
+        <Group
+          gap={6}
+          style={{
+            position: 'absolute',
+            bottom: 16,
+            right: 16,
+            background: 'var(--wh3d-overlay-bg, rgba(16, 17, 19, 0.85))',
+            padding: '4px 8px',
+            borderRadius: 8,
+            border: '1px solid var(--wh3d-overlay-border, #2C2E33)',
+            backdropFilter: 'blur(4px)',
+            zIndex: 10
+          }}
+>
         <ActionIcon
           variant="subtle"
           color="gray"
@@ -215,33 +215,33 @@ export function FullscreenPreviewModal({
   const { prefs } = usePreferences();
   const renderQuality = prefs?.renderQuality ?? DEFAULT_RENDER_QUALITY;
 
-  const modalStyles = {
-    header: {
-      padding: '12px 18px',
-      background: '#101113',
-      borderBottom: '1px solid #2C2E33'
-    },
-    title: {
-      fontSize: '0.9rem',
-      fontWeight: 600,
-      color: '#C1C2C5'
-    },
-    close: {
-      color: '#A6A7AB'
-    },
-    body: {
-      height: 'calc(100vh - 53px)',
-      padding: 0,
-      overflow: 'hidden'
-    },
-    content: {
-      background: '#101113',
-      overflow: 'hidden'
-    },
-    inner: {
-      padding: 0
-    }
-  };
+const modalStyles = {
+  header: {
+    padding: '12px 18px',
+    background: 'var(--mantine-color-dark-8)',
+    borderBottom: '1px solid var(--mantine-color-dark-4)'
+  },
+  title: {
+    fontSize: '0.9rem',
+    fontWeight: 600,
+    color: 'var(--mantine-color-text-primary)'
+  },
+  close: {
+    color: 'var(--mantine-color-text-dimmed)'
+  },
+  body: {
+    height: 'calc(100vh - 53px)',
+    padding: 0,
+    overflow: 'hidden'
+  },
+  content: {
+    background: 'var(--mantine-color-dark-8)',
+    overflow: 'hidden'
+  },
+  inner: {
+    padding: 0
+  }
+};
 
   if (!file || !libraryId) {
     return (
