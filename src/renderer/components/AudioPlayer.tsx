@@ -19,7 +19,6 @@ import {
 import {
   IconAdjustmentsHorizontal,
   IconGauge,
-  IconMusic,
   IconPlayerPause,
   IconPlayerPlay,
   IconRepeat,
@@ -242,7 +241,11 @@ export function AudioPlayer({
   const [volume, setVolume] = useState(1);
   const [isMuted, setIsMuted] = useState(false);
   const [waveformPeaks, setWaveformPeaks] = useState<number[]>([]);
-  const [coverFailed, setCoverFailed] = useState(false);
+
+  // The cover slot only exists once the image has actually loaded, so files
+  // without embedded artwork render exactly as if the feature weren't there.
+  const [coverReady, setCoverReady] = useState(false);
+  const resolvedCoverUrl = coverUrl || `wh3d-cover://${libraryId}/${fileId}`;
 
   const [speed, setSpeed] = useState(() => audioEffectsStore.get().speed);
   const [pitch, setPitch] = useState(() => audioEffectsStore.get().pitch);
@@ -258,6 +261,27 @@ export function AudioPlayer({
   const [eqOpen, setEqOpen] = useState(false);
   const [effectsOpen, setEffectsOpen] = useState(false);
   const [volumeOpen, setVolumeOpen] = useState(false);
+
+  // Probe the cover off-screen first (window.Image, because Mantine's Image is
+  // imported in this file). If it 404s — no embedded artwork — the slot never
+  // renders, so there is no icon, no gap, and no layout shift.
+  useEffect(() => {
+    setCoverReady(false);
+    let cancelled = false;
+    const probe = new window.Image();
+    probe.onload = () => {
+      if (!cancelled) setCoverReady(true);
+    };
+    probe.onerror = () => {
+      if (!cancelled) setCoverReady(false);
+    };
+    probe.src = resolvedCoverUrl;
+    return () => {
+      cancelled = true;
+      probe.onload = null;
+      probe.onerror = null;
+    };
+  }, [resolvedCoverUrl]);
 
   // Refs for click outside & timer tracking
   const seekbarRef = useRef<HTMLDivElement | null>(null);
@@ -505,7 +529,6 @@ export function AudioPlayer({
     setIsPlaying(false);
     setIsLoading(true);
     setWaveformPeaks([]);
-    setCoverFailed(false);
 
     pendingPlayRef.current = autoPlay;
     setPendingPlay(autoPlay);
@@ -883,10 +906,6 @@ export function AudioPlayer({
 
   const speedColor = getSpeedColor(speed);
 
-  // Dynamic Cover Art vs Audio Thumbnail resolution
-  const resolvedCoverUrl = coverUrl || `wh3d-cover://${libraryId}/${fileId}`;
-  const showCoverImage = !coverFailed && Boolean(resolvedCoverUrl);
-
   return (
     <Box
       ref={rootRef}
@@ -922,34 +941,21 @@ export function AudioPlayer({
         }}
       >
         <Group wrap="nowrap" gap="md" align="center">
-          {/* Cover Art / Audio Thumbnail Slot */}
-          <Box
-            style={{
-              width: 42,
-              height: 42,
-              borderRadius: 8,
-              overflow: 'hidden',
-              flexShrink: 0,
-              backgroundColor: 'var(--mantine-color-dark-6)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              border: '1px solid var(--mantine-color-dark-4)'
-            }}
-          >
-            {showCoverImage ? (
-              <Image
-                src={resolvedCoverUrl}
-                w={42}
-                h={42}
-                fit="cover"
-                alt={filename}
-                onError={() => setCoverFailed(true)}
-              />
-            ) : (
-              <IconMusic size={20} color="var(--mantine-color-dark-2)" />
-            )}
-          </Box>
+          {/* Cover art — only rendered when the file actually has embedded artwork */}
+          {coverReady && (
+            <Box
+              style={{
+                width: 42,
+                height: 42,
+                borderRadius: 8,
+                overflow: 'hidden',
+                flexShrink: 0,
+                border: '1px solid var(--mantine-color-dark-4)'
+              }}
+            >
+              <Image src={resolvedCoverUrl} w={42} h={42} fit="cover" alt={filename} />
+            </Box>
+          )}
 
           {/* Play Button */}
           <ActionIcon

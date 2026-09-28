@@ -27,3 +27,17 @@ export function frameObject(camera: THREE.PerspectiveCamera, object: THREE.Objec
 export function objectCenter(object: THREE.Object3D): THREE.Vector3 {
   return new THREE.Box3().setFromObject(object).getCenter(new THREE.Vector3());
 }
+
+/**
+ * Bounding-sphere radius for an object. Camera zoom limits are expressed as
+ * multiples of this so they scale with the model — a mansion modeled in
+ * centimetres and a ring modeled in millimetres need very different absolute
+ * distances, and hardcoded limits teleport the camera on one or the other.
+ * Falls back to 1 for empty/degenerate objects.
+ */
+export function objectRadius(object: THREE.Object3D): number {
+  const box = new THREE.Box3().setFromObject(object);
+  if (box.isEmpty()) return 1;
+  const radius = box.getSize(new THREE.Vector3()).length() / 2;
+  return radius > 0 ? radius : 1;
+}

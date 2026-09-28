@@ -18,7 +18,7 @@ import {
   Text,
   Tooltip
 } from '@mantine/core';
-import { IconCoffee, IconCopy, IconPalette, IconRefresh, IconSettings, IconX } from '@tabler/icons-react';
+import { IconHeart, IconCopy, IconPalette, IconRefresh, IconSettings, IconX } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import {
   Panel,
@@ -1808,12 +1808,12 @@ const previewPane = (
               <ActionIcon
                 variant="subtle"
                 component="a"
-                href="https://buymeacoffee.com/thorson"
+                href="https://linktr.ee/ichbinaydin"
                 target="_blank"
                 rel="noreferrer"
-                aria-label="Buy me a coffee"
+                aria-label="Support Game Asset Manager"
               >
-                <IconCoffee size={16} />
+                <IconHeart size={16} />
               </ActionIcon>
             </Tooltip>
 
@@ -1944,6 +1944,8 @@ const previewPane = (
         opened={preferencesOpen}
         onClose={() => setPreferencesOpen(false)}
         libraryId={selectedLibraryId}
+        themeId={themeId}
+        onThemeChange={setThemeId}
       />
 
       <BatchRenameModal

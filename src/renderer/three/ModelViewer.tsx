@@ -3,7 +3,7 @@ import { ActionIcon, Button, Group, Center, Loader, Stack, Text } from '@mantine
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { disposeObject, loadModel, ThreeMFEmbeddedOnlyError } from './loaders';
-import { frameObject, objectCenter } from './framing';
+import { frameObject, objectCenter, objectRadius } from './framing';
 import { DEFAULT_LIGHTING_STYLE, LightingRig, type LightingStyle } from './lighting';
 import { applyOrientation } from './orientation';
 import type { CameraState, FileRecord } from '@shared/types';
@@ -37,8 +37,15 @@ function clampZoom(value: number): number {
 const MODEL_KEY_ZOOM_STEP = 1.08;
 const MODEL_KEY_ROTATE_STEP = THREE.MathUtils.degToRad(4);
 const MODEL_KEY_PAN_STEP = 0.1;
-const MODEL_MIN_DISTANCE = 0.1;
-const MODEL_MAX_DISTANCE = 500;
+// Zoom limits are multiples of the model's bounding radius, NOT absolute
+// distances. Absolute limits (the old 0.1 / 500) teleported the camera on any
+// model whose scale didn't happen to fit them — e.g. a mansion with radius
+// ~1000 got clamped from 3500 straight down to 500, i.e. inside the mesh.
+const MODEL_MIN_DISTANCE_FACTOR = 0.02;
+const MODEL_MAX_DISTANCE_FACTOR = 50;
+// How close (as a fraction of radius) keyboard zoom-in may get to a surface
+// before it stops instead of tunnelling through it.
+const MODEL_SURFACE_MARGIN_FACTOR = 0.01;
 
 interface Props {
   libraryId: string | null;
@@ -130,6 +137,20 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
 
   // Store original/default camera state for 3D reset
   const defaultCameraStateRef = useRef<CameraState | null>(null);
+
+  // Bounding radius of the currently loaded model — drives the zoom limits.
+  const modelRadiusRef = useRef(1);
+  // Reused for keyboard zoom-in surface checks (avoids allocating per keypress).
+  const zoomRaycasterRef = useRef(new THREE.Raycaster());
+
+  // Recomputes the model radius and pushes size-relative min/max distances
+  // into OrbitControls, so mouse-wheel zoom respects the same limits.
+  const applyDistanceLimits = (ctx: ViewerCtx, obj: THREE.Object3D) => {
+    const r = objectRadius(obj);
+    modelRadiusRef.current = r;
+    ctx.controls.minDistance = r * MODEL_MIN_DISTANCE_FACTOR;
+    ctx.controls.maxDistance = r * MODEL_MAX_DISTANCE_FACTOR;
+  };
 
   const dragStateRef = useRef<{
     pointerId: number;
@@ -315,13 +336,15 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     };
   }, [renderQuality]);
 
+  // Live theme switching: WebGL can't read CSS variables, so re-read the
+  // viewport background whenever App.tsx announces a theme change.
   useEffect(() => {
-  const applyBg = () => {
-    ctxRef.current?.renderer.setClearColor(readViewportBgColor(), 1);
-  };
-  window.addEventListener('wh3d:themechange', applyBg);
-  return () => window.removeEventListener('wh3d:themechange', applyBg);
-}, []);
+    const applyBg = () => {
+      ctxRef.current?.renderer.setClearColor(readViewportBgColor(), 1);
+    };
+    window.addEventListener('wh3d:themechange', applyBg);
+    return () => window.removeEventListener('wh3d:themechange', applyBg);
+  }, []);
 
   useEffect(() => {
     ctxRef.current?.lighting.apply(lightingStyle, qualityPreset);
@@ -333,6 +356,7 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     applyOrientation(ctx.currentObject, file.orientation);
     frameObject(ctx.camera, ctx.currentObject);
     ctx.controls.target.copy(objectCenter(ctx.currentObject));
+    applyDistanceLimits(ctx, ctx.currentObject);
     ctx.controls.update();
   }, [file.orientation.upAxis]);
 
@@ -341,6 +365,7 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     if (!ctx?.currentObject) return;
     applyOrientation(ctx.currentObject, file.orientation);
     ctx.controls.target.copy(objectCenter(ctx.currentObject));
+    applyDistanceLimits(ctx, ctx.currentObject);
   }, [file.orientation.yaw]);
 
   useEffect(() => {
@@ -411,6 +436,7 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
 
         ctx.scene.add(obj);
         ctx.currentObject = obj;
+        applyDistanceLimits(ctx, obj);
 
         applyShadowFlags(obj, qualityPreset.shadows.enabled);
         applyAnisotropy(
@@ -620,15 +646,45 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
           ctx.controls.update();
         } else {
           // W / S -> Zoom in / out (Dolly)
-          const factor = key === 'w' ? 1 / MODEL_KEY_ZOOM_STEP : MODEL_KEY_ZOOM_STEP;
+          const radius = modelRadiusRef.current;
+          const minDist = radius * MODEL_MIN_DISTANCE_FACTOR;
+          const maxDist = radius * MODEL_MAX_DISTANCE_FACTOR;
+          const zoomingIn = key === 'w';
+          const factor = zoomingIn ? 1 / MODEL_KEY_ZOOM_STEP : MODEL_KEY_ZOOM_STEP;
+
           const offset = ctx.camera.position.clone().sub(ctx.controls.target);
-          const newDist = Math.min(
-            MODEL_MAX_DISTANCE,
-            Math.max(MODEL_MIN_DISTANCE, offset.length() * factor)
-          );
-          offset.setLength(newDist);
-          ctx.camera.position.copy(ctx.controls.target).add(offset);
-          ctx.controls.update();
+          const currentDist = offset.length();
+          let newDist = currentDist * factor;
+
+          // Zooming in: don't tunnel through geometry. Cast along the view
+          // direction (camera -> target) and stop just short of the first
+          // surface instead of flying inside the mesh.
+          if (zoomingIn && ctx.currentObject && currentDist > 0) {
+            const viewDir = offset.clone().negate().normalize();
+            const raycaster = zoomRaycasterRef.current;
+            raycaster.set(ctx.camera.position, viewDir);
+            const hit = raycaster
+              .intersectObject(ctx.currentObject, true)
+              .find((h) => (h.object as THREE.Mesh).isMesh);
+            if (hit) {
+              const stopAt = Math.max(0, hit.distance - radius * MODEL_SURFACE_MARGIN_FACTOR);
+              const wantedTravel = currentDist - newDist;
+              if (wantedTravel > stopAt) newDist = currentDist - stopAt;
+            }
+          }
+
+          // Clamp to the size-relative limits — but never move the camera in
+          // the OPPOSITE direction of what was pressed. If we're already past
+          // a limit (e.g. a saved camera), hold position rather than jump.
+          newDist = zoomingIn
+            ? Math.min(currentDist, Math.max(minDist, newDist))
+            : Math.max(currentDist, Math.min(maxDist, newDist));
+
+          if (newDist > 0) {
+            offset.setLength(newDist);
+            ctx.camera.position.copy(ctx.controls.target).add(offset);
+            ctx.controls.update();
+          }
         }
       } else if (key === 'a' || key === 'd') {
         e.preventDefault();
@@ -703,7 +759,7 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
               pointerEvents: 'none'
             }}
           />
-          
+
           {plainImageMode && imageZoom !== 1 && (
             <Text
               size="xs"
@@ -721,50 +777,50 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
             </Text>
           )}
           {plainImageMode && (
-  <Group
-    gap={6}
-    style={{
-      position: 'absolute',
-      bottom: 8,
-      right: 8,
-      background: 'var(--wh3d-overlay-bg, rgba(16, 17, 19, 0.85))',
-      padding: '4px 8px',
-      borderRadius: 8,
-      border: '1px solid var(--wh3d-overlay-border, #2C2E33)',
-      backdropFilter: 'blur(4px)',
-      zIndex: 10
-    }}
-  >
-    <ActionIcon
-      variant="subtle"
-      color="gray"
-      size="sm"
-      onClick={() => setImageZoom((z) => clampZoom(z / IMAGE_KEY_ZOOM_STEP))}
-    >
-      −
-    </ActionIcon>
-    <Text size="xs" c="dimmed" style={{ minWidth: 40, textAlign: 'center' }}>
-      {Math.round(imageZoom * 100)}%
-    </Text>
-    <ActionIcon
-      variant="subtle"
-      color="gray"
-      size="sm"
-      onClick={() => setImageZoom((z) => clampZoom(z * IMAGE_KEY_ZOOM_STEP))}
-    >
-      +
-    </ActionIcon>
-    <Button
-      variant="subtle"
-      color="gray"
-      size="xs"
-      onClick={resetView}
-      style={{ fontSize: 11, padding: '0 6px', height: 22 }}
-    >
-      Reset (R)
-    </Button>
-  </Group>
-)}
+            <Group
+              gap={6}
+              style={{
+                position: 'absolute',
+                bottom: 8,
+                right: 8,
+                background: 'var(--wh3d-overlay-bg, rgba(16, 17, 19, 0.85))',
+                padding: '4px 8px',
+                borderRadius: 8,
+                border: '1px solid var(--wh3d-overlay-border, #2C2E33)',
+                backdropFilter: 'blur(4px)',
+                zIndex: 10
+              }}
+            >
+              <ActionIcon
+                variant="subtle"
+                color="gray"
+                size="sm"
+                onClick={() => setImageZoom((z) => clampZoom(z / IMAGE_KEY_ZOOM_STEP))}
+              >
+                −
+              </ActionIcon>
+              <Text size="xs" c="dimmed" style={{ minWidth: 40, textAlign: 'center' }}>
+                {Math.round(imageZoom * 100)}%
+              </Text>
+              <ActionIcon
+                variant="subtle"
+                color="gray"
+                size="sm"
+                onClick={() => setImageZoom((z) => clampZoom(z * IMAGE_KEY_ZOOM_STEP))}
+              >
+                +
+              </ActionIcon>
+              <Button
+                variant="subtle"
+                color="gray"
+                size="xs"
+                onClick={resetView}
+                style={{ fontSize: 11, padding: '0 6px', height: 22 }}
+              >
+                Reset (R)
+              </Button>
+            </Group>
+          )}
         </div>
       )}
       {loading && (
