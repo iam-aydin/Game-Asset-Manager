@@ -83,6 +83,11 @@ interface PersistedAudioEffects {
   bass: number;
   treble: number;
   isLooping: boolean;
+  // Volume used to live only in component state, so it reset to 100% every
+  // time the player remounted (switching tracks, reopening the app). It's
+  // now part of the persisted blob like every other effect. Mute is kept
+  // out on purpose — nobody wants the player to silently reopen muted.
+  volume: number;
 }
 
 const DEFAULT_AUDIO_EFFECTS: PersistedAudioEffects = {
@@ -92,7 +97,8 @@ const DEFAULT_AUDIO_EFFECTS: PersistedAudioEffects = {
   subBass: 0,
   bass: 0,
   treble: 0,
-  isLooping: true
+  isLooping: true,
+  volume: 1
 };
 
 const STORAGE_KEY = 'wh3d_audio_player_effects';
@@ -238,7 +244,9 @@ export function AudioPlayer({
   const pendingPlayRef = useRef(autoPlay);
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
-  const [volume, setVolume] = useState(1);
+  // Was `useState(1)` — always reset to 100% on every mount. Now reads the
+  // last saved value, same as speed/pitch/EQ/loop below.
+  const [volume, setVolume] = useState(() => audioEffectsStore.get().volume);
   const [isMuted, setIsMuted] = useState(false);
   const [waveformPeaks, setWaveformPeaks] = useState<number[]>([]);
 
@@ -731,14 +739,16 @@ export function AudioPlayer({
     }
   };
 
-  const handleVolumeWheel = (e: React.WheelEvent) => {
+  // Windows-style hover-to-scroll: each control reacts to the wheel only
+  // while the pointer is actually over that control (that's just what
+  // onWheel already means), instead of the old global "scroll anywhere
+  // changes volume" behavior. dir is +1 for scroll-up/forward and -1 for
+  // scroll-down/back, matching how the Windows volume flyout behaves.
+  const onWheelAdjust = (adjust: (dir: 1 | -1) => void) => (e: React.WheelEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    if (e.deltaY < 0) {
-      adjustVolumeRelative(5);
-    } else if (e.deltaY > 0) {
-      adjustVolumeRelative(-5);
-    }
+    if (e.deltaY < 0) adjust(1);
+    else if (e.deltaY > 0) adjust(-1);
   };
 
   useEffect(() => {
@@ -750,7 +760,10 @@ export function AudioPlayer({
 
   useEffect(() => {
     applyParams();
-    audioEffectsStore.set({ reverbWet, subBass, bass, treble });
+    // Volume now saves alongside the other effects — see
+    // PersistedAudioEffects above. isMuted intentionally stays local/session
+    // only.
+    audioEffectsStore.set({ volume, reverbWet, subBass, bass, treble });
   }, [volume, isMuted, reverbWet, subBass, bass, treble]);
 
   useEffect(() => {
@@ -870,6 +883,7 @@ export function AudioPlayer({
     setBass(defaults.bass);
     setTreble(defaults.treble);
     setIsLooping(defaults.isLooping);
+    setVolume(defaults.volume);
     setConfirmResetOpen(false);
   };
 
@@ -911,7 +925,6 @@ export function AudioPlayer({
       ref={rootRef}
       onMouseDown={handleMouseDown}
       onAuxClick={handleAuxClick}
-      onWheel={handleVolumeWheel}
       style={{ position: 'relative', width: '100%' }}
     >
       {showHero && (
@@ -1027,27 +1040,29 @@ export function AudioPlayer({
 
           {/* Controls */}
           <Group gap="xs" wrap="nowrap" style={{ flexShrink: 0 }}>
-            {/* Repeat / Loop Toggle */}
-            <Tooltip label={isLooping ? 'Loop: On' : 'Loop: Off'} withinPortal>
+            {/* Repeat / Loop Toggle — hover + scroll: up turns it on, down turns it off */}
+            <Tooltip label={isLooping ? 'Loop: On (scroll to toggle)' : 'Loop: Off (scroll to toggle)'} withinPortal>
               <ActionIcon
                 variant={isLooping ? 'filled' : 'subtle'}
                 color={isLooping ? 'indigo' : 'gray'}
                 size="md"
                 onClick={() => setIsLooping(!isLooping)}
+                onWheel={onWheelAdjust((dir) => setIsLooping(dir === 1))}
                 aria-label="Toggle Repeat Loop"
               >
                 <IconRepeat size={16} />
               </ActionIcon>
             </Tooltip>
 
-            {/* Speed Selection */}
+            {/* Speed Selection — hover + scroll steps through the presets */}
             <Menu shadow="md" width={100} position="top">
               <Menu.Target>
-                <Tooltip label={`Speed: ${speed}x (J/K/L)`} withinPortal>
+                <Tooltip label={`Speed: ${speed}x (J/K/L, or scroll)`} withinPortal>
                   <ActionIcon
                     variant={speed !== 1 ? 'filled' : 'subtle'}
                     color={speedColor ?? 'gray'}
                     size="md"
+                    onWheel={onWheelAdjust((dir) => changeSpeedStep(dir === 1 ? 'up' : 'down'))}
                   >
                     <IconGauge size={16} />
                   </ActionIcon>
@@ -1113,8 +1128,15 @@ export function AudioPlayer({
                       </Text>
                     </UnstyledButton>
                   </Group>
+                  {/* Each band reacts to the wheel only while hovered, so the
+                      three sliders can be adjusted independently. */}
                   {eqBands.map((band) => (
-                    <div key={band.label}>
+                    <div
+                      key={band.label}
+                      onWheel={onWheelAdjust((dir) =>
+                        band.set(Math.max(-EQ_MAX_DB, Math.min(EQ_MAX_DB, band.value + dir)))
+                      )}
+                    >
                       <Group justify="space-between" mb={2}>
                         <Text size="xs" c="dimmed">
                           {band.label} ({band.hint})
@@ -1169,7 +1191,9 @@ export function AudioPlayer({
                   <Text size="xs" fw={600}>
                     Audio Effects
                   </Text>
-                  <div>
+                  {/* Pitch and Reverb each only respond to the wheel while
+                      hovered, so scrolling one never touches the other. */}
+                  <div onWheel={onWheelAdjust((dir) => setPitch((p) => Math.max(-12, Math.min(12, p + dir))))}>
                     <Text size="xs" c="dimmed">
                       Pitch ({pitch > 0 ? `+${pitch}` : pitch} st)
                     </Text>
@@ -1184,7 +1208,11 @@ export function AudioPlayer({
                       styles={{ thumb: sliderThumbStyle }}
                     />
                   </div>
-                  <div>
+                  <div
+                    onWheel={onWheelAdjust((dir) =>
+                      setReverbWet((v) => Math.round(Math.max(0, Math.min(1, v + dir * 0.05)) * 100) / 100)
+                    )}
+                  >
                     <Text size="xs" c="dimmed">
                       Reverb ({Math.round(reverbWet * 100)}%)
                     </Text>
@@ -1204,7 +1232,7 @@ export function AudioPlayer({
               </Popover.Dropdown>
             </Popover>
 
-            {/* Volume Control Popover */}
+            {/* Volume Control Popover — hover the icon (or the open panel) and scroll */}
             <Popover
               width={280}
               position="top"
@@ -1215,14 +1243,14 @@ export function AudioPlayer({
               closeOnClickOutside={false}
             >
               <Popover.Target>
-                <Box>
-                  <Tooltip label={`Volume: ${isMuted || volume === 0 ? 'Muted (0%)' : `${volumePct}%`}`} withinPortal>
+                <Box onWheel={onWheelAdjust((dir) => adjustVolumeRelative(dir * 5))}>
+                  <Tooltip label={`Volume: ${isMuted || volume === 0 ? 'Muted (0%)' : `${volumePct}%`} (scroll to adjust)`} withinPortal>
                     <ActionIcon
                       ref={volumeButtonRef}
                       variant="subtle"
                       color={boosted ? 'orange' : 'gray'}
                       size="md"
-                      aria-label="Volume (Scroll anywhere to adjust, M to toggle mute)"
+                      aria-label="Volume (hover and scroll to adjust, M to toggle mute)"
                       onClick={toggleVolume}
                       style={{
                         color: isMuted || volume === 0 ? '#fd6b6b' : undefined,
@@ -1238,7 +1266,10 @@ export function AudioPlayer({
                   </Tooltip>
                 </Box>
               </Popover.Target>
-              <Popover.Dropdown style={{ padding: '8px 12px' }}>
+              <Popover.Dropdown
+                style={{ padding: '8px 12px' }}
+                onWheel={onWheelAdjust((dir) => adjustVolumeRelative(dir * 5))}
+              >
                 <Group gap="xs" wrap="nowrap">
                   <ActionIcon
                     variant="subtle"
@@ -1291,7 +1322,8 @@ export function AudioPlayer({
       >
         <Stack gap="md">
           <Text size="sm">
-            Are you sure you want to reset all audio effects (speed, pitch, EQ, reverb, loop) back to defaults?
+            Are you sure you want to reset all audio effects (speed, pitch, EQ, reverb, loop,
+            volume) back to defaults?
           </Text>
           <Group justify="flex-end" gap="xs">
             <Button variant="subtle" color="gray" onClick={() => setConfirmResetOpen(false)}>
