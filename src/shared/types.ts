@@ -426,6 +426,9 @@ export interface AudioMetadata {
 
    export interface VideoMetadata {
      durationSec: number;
+     audioSampleRate?: number;   // Hz
+audioChannels?: number;
+audioBitrateKbps?: number;
      width: number;
      height: number;
      fps?: number;

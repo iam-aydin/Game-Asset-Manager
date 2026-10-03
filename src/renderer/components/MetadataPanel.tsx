@@ -20,6 +20,11 @@ import { usePreferences } from '../util/use-preferences';
 import { useSidecarLicense } from '../util/use-sidecar-license';
 import { ipc } from '../ipc-client';
 
+// Local on purpose: works even if @shared/formats has no video helper yet.
+const VIDEO_EXTENSIONS = ['mp4', 'webm', 'mov', 'mkv', 'avi', 'm4v', 'ogv'];
+const isVideoExtension = (ext: string): boolean =>
+  VIDEO_EXTENSIONS.includes(ext.replace(/^\./, '').toLowerCase());
+
 interface Props {
   libraryId: string | null;
   primaryFile: FileRecord | null;
@@ -139,7 +144,8 @@ function SingleFilePanel({
 
   const isImage = isImageExtension(file.ext);
   const isAudio = isAudioExtension(file.ext);
-  
+  const isVideo = isVideoExtension(file.ext);
+
   // Explicitly check for 3D model status
   const isModel =
     metadata?.thumbSource === 'model' ||
@@ -147,6 +153,7 @@ function SingleFilePanel({
       metadata.thumbSource !== 'document' &&
       !isImage &&
       !isAudio &&
+      !isVideo &&
       (metadata.vertexCount > 0 || metadata.meshCount > 0));
 
   const width = metadata?.image?.width ?? metadata?.imageHeight;
@@ -177,7 +184,7 @@ function SingleFilePanel({
       <Divider />
 
       <Field label="Size" value={formatBytes(file.sizeBytes)} />
-      
+
       <Field
         label="Modified"
         value={`${formatRelativeTime(file.mtimeMs)} · ${formatDateTime(file.mtimeMs)}`}
@@ -188,6 +195,14 @@ function SingleFilePanel({
         <>
           <Divider />
           <AudioStats file={file} metadata={metadata} />
+        </>
+      )}
+
+      {/* Video Stats */}
+      {isVideo && (
+        <>
+          <Divider />
+          <VideoStats libraryId={libraryId} file={file} metadata={metadata} />
         </>
       )}
 
@@ -381,7 +396,7 @@ function AudioStats({ file, metadata }: { file: FileRecord; metadata: ExtractedM
 
       {durationStr && <Field label="Length" value={durationStr} />}
       {channelsStr && <Field label="Channels" value={channelsStr} />}
-      
+
       {bitrateKbps !== null && bitrateKbps > 0 && (
         <Field
           label="Bitrate"
@@ -397,6 +412,286 @@ function AudioStats({ file, metadata }: { file: FileRecord; metadata: ExtractedM
           statusColor={getSampleRateStatusColor(sampleRateHz)}
         />
       )}
+
+      {metadata?.format && <SourceMetadata format={metadata.format} />}
+    </Stack>
+  );
+}
+
+// ---- Video ------------------------------------------------------------------
+
+function formatVideoDuration(durationSec?: number | null): string | null {
+  if (durationSec === undefined || durationSec === null || !Number.isFinite(durationSec)) return null;
+  if (durationSec <= 0) return null;
+  const hrs = Math.floor(durationSec / 3600);
+  const mins = Math.floor((durationSec % 3600) / 60);
+  const secs = Math.floor(durationSec % 60);
+  const ss = secs.toString().padStart(2, '0');
+  if (hrs > 0) return `${hrs}:${mins.toString().padStart(2, '0')}:${ss}`;
+  return `${mins}:${ss}`;
+}
+
+/** Reads length + resolution straight from the file, so it works even when the
+ *  indexer didn't extract any video metadata. */
+function useVideoProbe(libraryId: string, fileId: number) {
+  const [info, setInfo] = useState<{ duration: number; width: number; height: number } | null>(
+    null
+  );
+
+  useEffect(() => {
+    setInfo(null);
+    const v = document.createElement('video');
+    v.preload = 'metadata';
+    v.muted = true;
+    v.onloadedmetadata = () => {
+      setInfo({
+        duration: Number.isFinite(v.duration) ? v.duration : 0,
+        width: v.videoWidth,
+        height: v.videoHeight
+      });
+    };
+    v.onerror = () => setInfo(null);
+    v.src = `wh3d-file://${encodeURIComponent(libraryId)}/${fileId}`;
+    return () => {
+      v.onloadedmetadata = null;
+      v.onerror = null;
+      v.removeAttribute('src');
+      v.load();
+    };
+  }, [libraryId, fileId]);
+
+  return info;
+}
+
+function getVideoResolutionLabel(width: number, height: number): string | null {
+  const longSide = Math.max(width, height);
+  if (longSide >= 3840) return '4K';
+  if (longSide >= 2560) return '1440p';
+  if (longSide >= 1900) return '1080p';
+  if (longSide >= 1260) return '720p';
+  if (longSide >= 850) return '480p';
+  return null;
+}
+
+// ---- Video ratings ----------------------------------------------------------
+// Tune everything here. Long side is used so vertical and scope-ratio videos rate fairly.
+
+/** >= 1080p green, 480p up to (not incl.) 1080p yellow, below 480p red. */
+function getVideoResolutionStatus(width: number, height: number): 'green' | 'yellow' | 'red' {
+  const longSide = Math.max(width, height);
+  if (longSide >= 1900) return 'green';
+  if (longSide >= 850) return 'yellow';
+  return 'red';
+}
+
+/** 60 fps green, 30 fps yellow, anything lower red (59/29 allow for 59.94 / 29.97). */
+function getFpsStatus(fps: number): 'green' | 'yellow' | 'red' {
+  if (fps >= 59) return 'green';
+  if (fps >= 29) return 'yellow';
+  return 'red';
+}
+
+// Reference video bitrates (kbps) from YouTube's recommended H.264 SDR upload table:
+// [pixels, standard frame rate (<=30), high frame rate (>=48)]
+const BITRATE_TIERS: Array<[number, number, number]> = [
+  [640 * 360, 1000, 1500],
+  [854 * 480, 2500, 4000],
+  [1280 * 720, 5000, 7500],
+  [1920 * 1080, 8000, 12000],
+  [2560 * 1440, 16000, 24000],
+  [3840 * 2160, 40000, 60000]
+];
+
+/** Newer codecs reach the same quality with fewer bits than H.264. */
+function codecBitrateFactor(codec: string | null): number {
+  const c = (codec ?? '').toLowerCase();
+  if (c.includes('av1') || c.includes('av01')) return 0.5;
+  if (c.includes('vp9') || c.includes('vp09')) return 0.6;
+  if (c.includes('hevc') || c.includes('h265') || c.includes('hvc1') || c.includes('hev1'))
+    return 0.6;
+  return 1;
+}
+
+function referenceBitrateKbps(width: number, height: number, fps: number | null): number {
+  const px = width * height;
+  const col = fps && fps >= 48 ? 2 : 1;
+  const first = BITRATE_TIERS[0];
+  const last = BITRATE_TIERS[BITRATE_TIERS.length - 1];
+  if (px <= first[0]) return (first[col] * px) / first[0];
+  if (px >= last[0]) return (last[col] * px) / last[0];
+  for (let i = 0; i < BITRATE_TIERS.length - 1; i++) {
+    const lo = BITRATE_TIERS[i];
+    const hi = BITRATE_TIERS[i + 1];
+    if (px >= lo[0] && px <= hi[0]) {
+      const t = (px - lo[0]) / (hi[0] - lo[0]);
+      return lo[col] + t * (hi[col] - lo[col]);
+    }
+  }
+  return last[col];
+}
+
+/** Rated against what that resolution/fps/codec normally needs: >= 60% green, >= 30% yellow. */
+function getVideoBitrateStatus(
+  kbps: number,
+  width: number,
+  height: number,
+  fps: number | null,
+  codec: string | null
+): 'green' | 'yellow' | 'red' {
+  const expected = referenceBitrateKbps(width, height, fps) * codecBitrateFactor(codec);
+  const ratio = kbps / expected;
+  if (ratio >= 0.6) return 'green';
+  if (ratio >= 0.3) return 'yellow';
+  return 'red';
+}
+
+function VideoStats({
+  libraryId,
+  file,
+  metadata
+}: {
+  libraryId: string;
+  file: FileRecord;
+  metadata: ExtractedMetadata | null;
+}) {
+  const probe = useVideoProbe(libraryId, file.id);
+  const m = (metadata || {}) as Record<string, any>;
+  const video = m.video || m;
+  const audio = m.audio || m.audioStream || m.audioTrack || {};
+
+  const duration: number | null =
+    video.duration ??
+    video.durationSeconds ??
+    video.durationSec ??
+    m.duration ??
+    (probe && probe.duration > 0 ? probe.duration : null);
+
+  const width: number | null =
+    video.width ?? m.videoWidth ?? (probe && probe.width > 0 ? probe.width : null);
+  const height: number | null =
+    video.height ?? m.videoHeight ?? (probe && probe.height > 0 ? probe.height : null);
+
+  const fps: number | null = video.fps ?? video.frameRate ?? m.fps ?? m.frameRate ?? null;
+  const codec: string | null = video.codec ?? video.videoCodec ?? m.codec ?? m.videoCodec ?? null;
+
+  // The indexer stores the overall bitrate as `bitrateKbps` (already in kbps).
+  const bitrateRaw: number | null =
+    video.bitrateKbps ?? video.bitrate ?? video.bitRate ?? m.bitrateKbps ?? m.bitrate ?? m.bitRate ?? null;
+  let bitrateKbps: number | null = null;
+  if (bitrateRaw) {
+    bitrateKbps =
+      video.bitrateKbps != null || m.bitrateKbps != null
+        ? Math.round(bitrateRaw)
+        : bitrateRaw > 100000
+          ? Math.round(bitrateRaw / 1000)
+          : Math.round(bitrateRaw);
+  } else if (duration && duration > 0 && file.sizeBytes > 0) {
+    bitrateKbps = Math.round((file.sizeBytes * 8) / (duration * 1000));
+  }
+
+  let aspect: string | null = null;
+  if (width && height) {
+    const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
+    const d = gcd(width, height) || 1;
+    const w = width / d;
+    const h = height / d;
+    aspect = w > 50 || h > 50 ? `${(width / height).toFixed(2)}:1` : `${w}:${h}`;
+  }
+
+  // Audio track (same ratings as the audio files use)
+  const audioCodec: string | null =
+    audio.codec ?? audio.audioCodec ?? video.audioCodec ?? m.audioCodec ?? null;
+  const audioChannels: number | null =
+    audio.channels ?? audio.numberOfChannels ?? audio.channelCount ?? video.audioChannels ?? m.audioChannels ?? null;
+  const audioRateRaw: number | null =
+    audio.sampleRate ?? audio.sample_rate ?? audio.samplingRate ?? video.audioSampleRate ?? m.audioSampleRate ?? null;
+  const audioRateHz = audioRateRaw ? (audioRateRaw < 1000 ? audioRateRaw * 1000 : audioRateRaw) : null;
+  // The indexer stores `audioBitrateKbps` (already kbps); other keys are raw/unknown units.
+  const audioBitrateDirect: number | null = video.audioBitrateKbps ?? m.audioBitrateKbps ?? null;
+  const audioBitrateRaw: number | null =
+    audioBitrateDirect ?? audio.bitrate ?? audio.bitRate ?? m.audioBitrate ?? m.audioBitRate ?? null;
+  const audioBitrateKbps = audioBitrateRaw
+    ? audioBitrateDirect != null
+      ? Math.round(audioBitrateRaw)
+      : audioBitrateRaw > 1000
+      ? Math.round(audioBitrateRaw / 1000)
+      : Math.round(audioBitrateRaw)
+    : null;
+  const channelsStr = formatAudioChannels(audioChannels ?? undefined);
+  const hasAudioInfo = !!(audioCodec || channelsStr || audioRateHz || audioBitrateKbps);
+
+  const durationStr = formatVideoDuration(duration);
+  const resLabel = width && height ? getVideoResolutionLabel(width, height) : null;
+
+  return (
+    <Stack gap={4}>
+      <Group justify="space-between">
+        <Text size="xs" tt="uppercase" c="dimmed" fw={700}>
+          Video
+        </Text>
+      </Group>
+
+      {durationStr && <Field label="Length" value={durationStr} />}
+      {width && height && (
+        <Field
+          label="Resolution"
+          value={`${width} × ${height} px${resLabel ? ` (${resLabel})` : ''}`}
+          statusColor={getVideoResolutionStatus(width, height)}
+        />
+      )}
+      {aspect && <Field label="Aspect ratio" value={aspect} />}
+      {fps ? (
+        <Field
+          label="Frame rate"
+          value={`${Math.round(fps * 100) / 100} fps`}
+          statusColor={getFpsStatus(fps)}
+        />
+      ) : null}
+      {codec && <Field label="Codec" value={String(codec)} />}
+      {bitrateKbps !== null && bitrateKbps > 0 && (
+        <Field
+          label="Bitrate"
+          value={
+            bitrateKbps >= 1000
+              ? `${(bitrateKbps / 1000).toFixed(1)} Mbps`
+              : `${bitrateKbps} kbps`
+          }
+          statusColor={
+            width && height
+              ? getVideoBitrateStatus(bitrateKbps, width, height, fps, codec)
+              : undefined
+          }
+        />
+      )}
+
+      <div style={{ marginTop: 6 }}>
+        <Text size="xs" tt="uppercase" c="dimmed" fw={700} mb={4}>
+          Audio
+        </Text>
+        <Stack gap={4}>
+          {audioCodec && <Field label="Codec" value={String(audioCodec)} />}
+          {channelsStr && <Field label="Channels" value={channelsStr} />}
+          {audioBitrateKbps !== null && audioBitrateKbps > 0 && (
+            <Field
+              label="Bitrate"
+              value={`${audioBitrateKbps} kbps`}
+              statusColor={getBitrateStatusColor(audioBitrateKbps)}
+            />
+          )}
+          {audioRateHz !== null && (
+            <Field
+              label="Sample rate"
+              value={`${(audioRateHz / 1000).toLocaleString('en-US', { maximumFractionDigits: 1 })} kHz`}
+              statusColor={getSampleRateStatusColor(audioRateHz)}
+            />
+          )}
+          {!hasAudioInfo && (
+            <Text size="xs" c="dimmed">
+              No audio track info indexed.
+            </Text>
+          )}
+        </Stack>
+      </div>
 
       {metadata?.format && <SourceMetadata format={metadata.format} />}
     </Stack>
@@ -440,15 +735,15 @@ function ModelStats({ metadata }: { metadata: ExtractedMetadata }) {
         </Text>
       </Group>
 
-      <Field 
-        label="Vertices" 
-        value={metadata.vertexCount.toLocaleString()} 
-        statusColor={getTriangleStatusColor(metadata.vertexCount)} 
+      <Field
+        label="Vertices"
+        value={metadata.vertexCount.toLocaleString()}
+        statusColor={getTriangleStatusColor(metadata.vertexCount)}
       />
-      <Field 
-        label="Triangles" 
-        value={metadata.triangleCount.toLocaleString()} 
-        statusColor={getTriangleStatusColor(metadata.triangleCount)} 
+      <Field
+        label="Triangles"
+        value={metadata.triangleCount.toLocaleString()}
+        statusColor={getTriangleStatusColor(metadata.triangleCount)}
       />
       <Field
         label="Meshes"
@@ -609,21 +904,20 @@ function SidecarLicense({ text }: { text: string }) {
   );
 }
 
-function Field({ 
-  label, 
-  value, 
-  statusColor 
-}: { 
-  label: string; 
-  value: string; 
+function Field({
+  label,
+  value,
+  statusColor
+}: {
+  label: string;
+  value: string;
   statusColor?: 'green' | 'yellow' | 'red';
 }) {
   const COLOR_MAP = {
     green: '#22c55e',
     yellow: '#eab308',
-    red: '#ef4444',
+    red: '#ef4444'
   };
-
 
   const topColor = statusColor ? COLOR_MAP[statusColor] : null;
 
@@ -644,10 +938,10 @@ function Field({
             borderRadius: 999,
             background: `linear-gradient(to right, ${topColor} 0%, #171717 100%)`,
             marginBottom: 6,
-            flexShrink: 0,
+            flexShrink: 0
           }}
         />
       )}
     </Group>
   );
-}
+}     

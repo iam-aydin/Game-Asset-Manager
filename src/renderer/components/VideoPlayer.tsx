@@ -4,6 +4,7 @@ import {
   Alert,
   Badge,
   Box,
+  Button,
   Card,
   Center,
   Collapse,
@@ -11,6 +12,7 @@ import {
   Group,
   Loader,
   Menu,
+  Modal,
   Popover,
   Slider,
   Stack,
@@ -50,6 +52,11 @@ const SPEED_PRESETS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 3, 4];
 
 const EQ_MAX_DB = 12;
 const EQ_HEADROOM = 0.25;
+
+// Same volume range/snap as AudioPlayer. Above 100% goes through a Web Audio gain node.
+const VOLUME_MAX_PCT = 200;
+const VOLUME_SNAP_LOW = 94;
+const VOLUME_SNAP_HIGH = 125;
 
 const sliderThumbStyle = {
   backgroundColor: 'var(--wh3d-slider-thumb-bg, #4c6ef5)',
@@ -96,7 +103,7 @@ const DEFAULT_AUDIO_FX: AudioFx = {
 
 type PersistedVideoPrefs = {
   speed: number;
-  volume: number; // 0..1 (HTMLMediaElement can't exceed 1 without Web Audio)
+  volume: number; // 0..2 (anything above 1 uses the Web Audio boost gain)
   isLooping: boolean;
 } & VideoFx &
   AudioFx;
@@ -132,6 +139,15 @@ const videoPrefsStore = {
     } catch (e) {
       console.error('Failed to save video prefs to localStorage:', e);
     }
+  },
+  reset(): PersistedVideoPrefs {
+    persistedPrefs = { ...DEFAULT_VIDEO_PREFS };
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(persistedPrefs));
+    } catch (e) {
+      console.error('Failed to reset video prefs in localStorage:', e);
+    }
+    return persistedPrefs;
   }
 };
 
@@ -162,6 +178,7 @@ const createImpulseResponse = (ctx: AudioContext, durationSec = 2.5, decay = 2.5
 
 interface VideoAudioGraph {
   ctx: AudioContext;
+  video: HTMLVideoElement;
   source: MediaElementAudioSourceNode;
   preamp: GainNode;
   sub: BiquadFilterNode;
@@ -169,12 +186,20 @@ interface VideoAudioGraph {
   treble: BiquadFilterNode;
   dry: GainNode;
   wet: GainNode;
+  boost: GainNode;
   limiter: DynamicsCompressorNode;
 }
+
+// createMediaElementSource() may only be called ONCE per <video>. Calling it again
+// (React StrictMode double effects, remounts) throws, and a disconnected source
+// leaves the element silent/stalled. So the graph is cached per element and reused.
+const graphCache = new WeakMap<HTMLVideoElement, VideoAudioGraph>();
 
 /** Same chain as AudioPlayer: preamp -> sub shelf -> bass peak -> treble shelf
  *  -> dry/reverb mix -> limiter. Volume stays on the <video> element. */
 const buildVideoAudioGraph = (video: HTMLVideoElement): VideoAudioGraph => {
+  const cached = graphCache.get(video);
+  if (cached) return cached;
   const ctx = getSharedAudioContext();
   const source = ctx.createMediaElementSource(video);
 
@@ -211,21 +236,38 @@ const buildVideoAudioGraph = (video: HTMLVideoElement): VideoAudioGraph => {
   sub.connect(bass);
   bass.connect(treble);
   treble.connect(dry);
-  dry.connect(limiter);
+  const boost = ctx.createGain(); // volume above 100%
+  boost.connect(limiter);
+  dry.connect(boost);
   treble.connect(convolver);
   convolver.connect(wet);
-  wet.connect(limiter);
+  wet.connect(boost);
 
-  return { ctx, source, preamp, sub, bass, treble, dry, wet, limiter };
+  const graph: VideoAudioGraph = {
+    ctx,
+    video,
+    source,
+    preamp,
+    sub,
+    bass,
+    treble,
+    dry,
+    wet,
+    boost,
+    limiter
+  };
+  graphCache.set(video, graph);
+  return graph;
 };
 
-const applyAudioFx = (g: VideoAudioGraph, fx: AudioFx) => {
+const applyAudioFx = (g: VideoAudioGraph, fx: AudioFx, volume: number) => {
   const t = g.ctx.currentTime;
   g.dry.gain.setTargetAtTime(1 - fx.reverbWet, t, 0.01);
   g.wet.gain.setTargetAtTime(fx.reverbWet, t, 0.01);
   g.sub.gain.setTargetAtTime(fx.subBass, t, 0.02);
   g.bass.gain.setTargetAtTime(fx.bass, t, 0.02);
   g.treble.gain.setTargetAtTime(fx.treble, t, 0.02);
+  g.boost.gain.setTargetAtTime(Math.max(1, volume), t, 0.02);
   const maxBoost = Math.max(0, fx.subBass, fx.bass, fx.treble);
   g.preamp.gain.setTargetAtTime(Math.pow(10, -(maxBoost * EQ_HEADROOM) / 20), t, 0.02);
 };
@@ -377,6 +419,7 @@ export function VideoPlayer({
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const scrubbingRef = useRef(false);
   const graphRef = useRef<VideoAudioGraph | null>(null);
+  const resetOpenRef = useRef(false);
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [isBuffering, setIsBuffering] = useState(true);
@@ -390,6 +433,8 @@ export function VideoPlayer({
   const [isLooping, setIsLooping] = useState(() => videoPrefsStore.get().isLooping);
   const [volumeOpen, setVolumeOpen] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [confirmResetOpen, setConfirmResetOpen] = useState(false);
+  resetOpenRef.current = confirmResetOpen;
 
   // Effects popover
   const [fxOpen, setFxOpen] = useState(false);
@@ -438,6 +483,12 @@ export function VideoPlayer({
 
   const src = `wh3d-file://${libraryId}/${fileId}`;
 
+  // Only the wrapper goes fullscreen, and Mantine portals render on document.body,
+  // which sits behind the fullscreen layer. While fullscreen, portal into the
+  // wrapper instead so menus/tooltips show over the video.
+  const portalProps =
+    isFullscreen && wrapperRef.current ? { target: wrapperRef.current } : undefined;
+
   // ---- Sync React state -> <video> element ----
   useEffect(() => {
     const v = videoRef.current;
@@ -470,11 +521,14 @@ export function VideoPlayer({
     videoPrefsStore.set(vfx);
   }, [vfx]);
 
-  // Audio effects: the Web Audio graph is only built the first time an effect
-  // is actually turned on, so plain playback never goes through it.
   useEffect(() => {
     videoPrefsStore.set(afx);
-    if (!afxActive && !graphRef.current) return;
+  }, [afx]);
+
+  // The Web Audio graph is only built once an audio effect is on or volume is
+  // boosted above 100%, so plain playback never goes through it.
+  useEffect(() => {
+    if (!afxActive && volume <= 1 && !graphRef.current) return;
     const v = videoRef.current;
     if (!v) return;
     if (!graphRef.current) {
@@ -485,29 +539,39 @@ export function VideoPlayer({
         return;
       }
     }
-    applyAudioFx(graphRef.current, afx);
+    applyAudioFx(graphRef.current, afx, volume);
     if (graphRef.current.ctx.state === 'suspended') {
       void graphRef.current.ctx.resume().catch(() => undefined);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [afx]);
+  }, [afx, volume]);
 
   useEffect(() => {
     return () => {
       const g = graphRef.current;
+      graphRef.current = null;
       if (!g) return;
+      // Dev/StrictMode runs this cleanup while the element is still mounted.
+      // Tearing the graph down then would orphan the element's audio, so only
+      // disconnect when the <video> has really left the DOM.
+      if (g.video.isConnected) return;
       try {
         g.source.disconnect();
       } catch {}
       try {
         g.limiter.disconnect();
       } catch {}
-      graphRef.current = null;
+      graphCache.delete(g.video);
     };
   }, []);
 
   useEffect(() => {
-    const onChange = () => setIsFullscreen(document.fullscreenElement === wrapperRef.current);
+    const onChange = () => {
+      setIsFullscreen(document.fullscreenElement === wrapperRef.current);
+      // Close open menus on toggle so none are left floating in the wrong layer.
+      setFxOpen(false);
+      setVolumeOpen(false);
+    };
     document.addEventListener('fullscreenchange', onChange);
     return () => document.removeEventListener('fullscreenchange', onChange);
   }, []);
@@ -542,7 +606,7 @@ export function VideoPlayer({
   const adjustVolumeRelative = (deltaPct: number) => {
     setIsMuted(false);
     setVolume((prev) => {
-      const pct = Math.max(0, Math.min(100, Math.round(prev * 100) + deltaPct));
+      const pct = Math.max(0, Math.min(VOLUME_MAX_PCT, Math.round(prev * 100) + deltaPct));
       return pct / 100;
     });
   };
@@ -569,6 +633,42 @@ export function VideoPlayer({
   };
 
   const toggleMute = () => setIsMuted((prev) => !prev);
+
+  const handleVolumeChange = (pct: number) => {
+    setIsMuted(false);
+    const locked = pct >= VOLUME_SNAP_LOW && pct <= VOLUME_SNAP_HIGH ? 100 : pct;
+    setVolume(locked / 100);
+  };
+
+  // A media element routed through a suspended AudioContext stalls, so make
+  // sure the context is running before any play().
+  const resumeGraph = () => {
+    const ctx = graphRef.current?.ctx;
+    if (ctx && ctx.state === 'suspended') void ctx.resume().catch(() => undefined);
+  };
+
+  // Reset everything (speed, volume, loop, mute, video + audio effects) to defaults.
+  const confirmResetEffects = () => {
+    const d = videoPrefsStore.reset();
+    setSpeed(d.speed);
+    setVolume(d.volume);
+    setIsMuted(false);
+    setIsLooping(d.isLooping);
+    setVfx({ ...DEFAULT_VIDEO_FX });
+    setAfx({ ...DEFAULT_AUDIO_FX });
+    setConfirmResetOpen(false);
+  };
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if (e.button === 1) {
+      e.preventDefault();
+      setConfirmResetOpen(true);
+    }
+  };
+
+  const handleAuxClick = (e: React.MouseEvent) => {
+    if (e.button === 1) e.preventDefault();
+  };
 
   const toggleFullscreen = () => {
     const el = wrapperRef.current;
@@ -611,6 +711,7 @@ export function VideoPlayer({
       const tag = target?.tagName;
       if (target && (tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable)) return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (resetOpenRef.current) return;
 
       const a = actionsRef.current;
       const key = e.key.toLowerCase();
@@ -646,6 +747,9 @@ export function VideoPlayer({
       } else if (key === 'f') {
         e.preventDefault();
         a.toggleFullscreen();
+      } else if (key === 'r') {
+        e.preventDefault();
+        setConfirmResetOpen(true);
       }
     };
 
@@ -673,6 +777,7 @@ export function VideoPlayer({
 
   const volumePct = Math.round((isMuted ? 0 : volume) * 100);
   const muted = isMuted || volume === 0;
+  const boosted = !isMuted && volume > 1;
 
   const setV = (partial: Partial<VideoFx>) => setVfx((prev) => ({ ...prev, ...partial }));
   const setA = (partial: Partial<AudioFx>) => setAfx((prev) => ({ ...prev, ...partial }));
@@ -748,6 +853,7 @@ export function VideoPlayer({
             <Tooltip
               label={isLooping ? 'Loop: On (scroll to toggle)' : 'Loop: Off (scroll to toggle)'}
               withinPortal
+              portalProps={portalProps}
             >
               <ActionIcon
                 variant={isLooping ? 'filled' : 'subtle'}
@@ -762,9 +868,13 @@ export function VideoPlayer({
             </Tooltip>
 
             {/* Speed — hover + scroll steps through presets */}
-            <Menu shadow="md" width={100} position="top">
+            <Menu shadow="md" width={100} position="top" portalProps={portalProps}>
               <Menu.Target>
-                <Tooltip label={`Speed: ${speed}x (J/K/L, or scroll)`} withinPortal>
+                <Tooltip
+                  label={`Speed: ${speed}x (J/K/L, or scroll)`}
+                  withinPortal
+                  portalProps={portalProps}
+                >
                   <ActionIcon
                     variant={speed !== 1 ? 'filled' : 'subtle'}
                     color={speed !== 1 ? 'indigo' : 'gray'}
@@ -807,10 +917,11 @@ export function VideoPlayer({
               withArrow={false}
               opened={fxOpen}
               onChange={setFxOpen}
+              portalProps={portalProps}
               classNames={{ dropdown: PLAYER_GLASS_POPOVER_CLASS }}
             >
               <Popover.Target>
-                <Tooltip label="Effects" withinPortal>
+                <Tooltip label="Effects" withinPortal portalProps={portalProps}>
                   <ActionIcon
                     variant={fxActive ? 'filled' : 'subtle'}
                     color={fxActive ? 'violet' : 'gray'}
@@ -950,12 +1061,13 @@ export function VideoPlayer({
 
             {/* Volume — hover the icon (or the open panel) and scroll */}
             <Popover
-              width={260}
+              width={280}
               position="top"
               shadow="md"
               withArrow={false}
               opened={volumeOpen}
               onChange={setVolumeOpen}
+              portalProps={portalProps}
               classNames={{ dropdown: PLAYER_GLASS_POPOVER_CLASS }}
             >
               <Popover.Target>
@@ -963,10 +1075,11 @@ export function VideoPlayer({
                   <Tooltip
                     label={`Volume: ${muted ? 'Muted (0%)' : `${volumePct}%`} (scroll to adjust, M to mute)`}
                     withinPortal
+                    portalProps={portalProps}
                   >
                     <ActionIcon
                       variant="subtle"
-                      color="gray"
+                      color={boosted ? 'orange' : 'gray'}
                       size="md"
                       aria-label="Volume"
                       onClick={() => setVolumeOpen((o) => !o)}
@@ -1000,15 +1113,12 @@ export function VideoPlayer({
                   <Slider
                     size="xs"
                     min={0}
-                    max={100}
+                    max={VOLUME_MAX_PCT}
                     step={1}
                     value={isMuted ? 0 : Math.round(volume * 100)}
-                    onChange={(pct) => {
-                      setIsMuted(false);
-                      setVolume(pct / 100);
-                    }}
+                    onChange={handleVolumeChange}
                     label={(val) => `${val}%`}
-                    color="indigo"
+                    color={boosted ? 'orange' : 'indigo'}
                     style={{ flex: 1 }}
                     styles={{ thumb: sliderThumbStyle }}
                   />
@@ -1029,7 +1139,11 @@ export function VideoPlayer({
               </Popover.Dropdown>
             </Popover>
 
-            <Tooltip label={isFullscreen ? 'Exit fullscreen (F)' : 'Fullscreen (F)'} withinPortal>
+            <Tooltip
+              label={isFullscreen ? 'Exit fullscreen (F)' : 'Fullscreen (F)'}
+              withinPortal
+              portalProps={portalProps}
+            >
               <ActionIcon
                 variant="subtle"
                 color="gray"
@@ -1049,13 +1163,17 @@ export function VideoPlayer({
   return (
     <Box
       ref={wrapperRef}
+      onMouseDown={handleMouseDown}
+      onAuxClick={handleAuxClick}
       style={{
         display: 'flex',
         flexDirection: 'column',
         height: '100%',
         width: '100%',
         minHeight: 0,
-        background: 'var(--wh3d-viewport-bg)'
+        position: 'relative',
+        // Black in both themes (was var(--wh3d-viewport-bg), which is white in light mode).
+        background: '#000'
       }}
     >
       <PlayerGlassStyles />
@@ -1080,12 +1198,18 @@ export function VideoPlayer({
           }}
           onLoadedData={(e) => {
             setIsBuffering(false);
-            if (autoPlay) void e.currentTarget.play().catch(() => undefined);
+            if (autoPlay) {
+              resumeGraph();
+              void e.currentTarget.play().catch(() => undefined);
+            }
           }}
           onCanPlay={() => setIsBuffering(false)}
           onWaiting={() => setIsBuffering(true)}
           onPlaying={() => setIsBuffering(false)}
-          onPlay={() => setIsPlaying(true)}
+          onPlay={() => {
+            setIsPlaying(true);
+            resumeGraph();
+          }}
           onPause={() => setIsPlaying(false)}
           onEnded={() => setIsPlaying(false)}
           onTimeUpdate={(e) => {
@@ -1140,6 +1264,32 @@ export function VideoPlayer({
 
       {/* Control bar: under the video by default */}
       {!overlayControls && controlBar}
+
+      {/* Reset confirmation (R key or middle mouse button) */}
+      <Modal
+        opened={confirmResetOpen}
+        onClose={() => setConfirmResetOpen(false)}
+        title="Reset Video Settings"
+        centered
+        size="sm"
+        portalProps={portalProps}
+        classNames={{ content: PLAYER_GLASS_POPOVER_CLASS }}
+        overlayProps={{ backgroundOpacity: 0.35, blur: 3 }}
+      >
+        <Stack gap="md">
+          <Text size="sm">
+            Reset speed, volume, loop, and all video and audio effects back to defaults?
+          </Text>
+          <Group justify="flex-end" gap="xs">
+            <Button variant="subtle" color="gray" onClick={() => setConfirmResetOpen(false)}>
+              Cancel
+            </Button>
+            <Button color="red" onClick={confirmResetEffects}>
+              Reset Effects
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
     </Box>
   );
 }

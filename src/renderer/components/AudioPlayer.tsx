@@ -1314,13 +1314,15 @@ export function AudioPlayer({
       </Card>
 
       {/* Reset Confirmation Modal */}
-      <Modal
-        opened={confirmResetOpen}
-        onClose={() => setConfirmResetOpen(false)}
-        title="Reset Audio Effects"
-        centered
-        size="sm"
-      >
+<Modal
+  opened={confirmResetOpen}
+  onClose={() => setConfirmResetOpen(false)}
+  title="Reset Audio Effects"
+  centered
+  size="sm"
+  classNames={{ content: PLAYER_GLASS_POPOVER_CLASS }}
+  overlayProps={{ backgroundOpacity: 0.35, blur: 3 }}
+>
         <Stack gap="md">
           <Text size="sm">
             Are you sure you want to reset all audio effects (speed, pitch, EQ, reverb, loop,
