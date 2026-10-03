@@ -24,7 +24,10 @@ export const AUDIO_EXTENSIONS = [
 export const VIDEO_EXTENSIONS = [
   'mp4',
   'mov',
-  'avi'
+  'avi',
+  'webm',
+  'mkv',
+  'bik'
 ] as const;
 
 export const TEXT_EXTENSIONS = [

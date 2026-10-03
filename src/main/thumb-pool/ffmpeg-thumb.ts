@@ -22,8 +22,8 @@ const log = scopedLogger('ffmpeg-thumb');
 
 /** Where in the video the frame is taken, as a fraction of the duration. */
 const SEEK_FRACTION = 0.1;
-/** How many ffmpeg processes may run at once. */
-const VIDEO_CONCURRENCY = 3;
+/** How many ffmpeg processes may run at once (scales with CPU cores). */
+const VIDEO_CONCURRENCY = Math.max(4, os.cpus().length - 2);
 const PROBE_TIMEOUT_MS = 10_000;
 const FRAME_TIMEOUT_MS = 20_000;
 const MAX_STDERR_BYTES = 256 * 1024;
@@ -40,11 +40,9 @@ let cachedFfmpegPath: string | null | undefined;
  * (the package must be listed in electron-builder's `asarUnpack`).
  */
 function getFfmpegPath(): string | null {
-    
   if (cachedFfmpegPath !== undefined) return cachedFfmpegPath;
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    
     const p = require('ffmpeg-static') as string | null;
     const fixed = p ? p.replace(/app\.asar([\\/])/, 'app.asar.unpacked$1') : null;
     cachedFfmpegPath = fixed && existsSync(fixed) ? fixed : null;
@@ -53,7 +51,6 @@ function getFfmpegPath(): string | null {
     log.error('ffmpeg-static is not installed', { err: (err as Error).message ?? String(err) });
     cachedFfmpegPath = null;
   }
-  
   return cachedFfmpegPath;
 }
 
@@ -152,7 +149,8 @@ function parseProbe(stderr: string): ProbeInfo | null {
   if (!videoLine) return null;
   const rest = videoLine[1];
 
-  const size = /(?:^|[\s,])(\d{2,5})x(\d{2,5})(?=[\s,[])/.exec(rest);
+  // `|$` so a size at the very end of the line still matches.
+  const size = /(?:^|[\s,])(\d{2,5})x(\d{2,5})(?=[\s,[]|$)/.exec(rest);
   if (!size) return null;
 
   const dur = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(stderr);
@@ -186,7 +184,7 @@ async function extractFrame(absPath: string, seekSec: number): Promise<Buffer | 
   const size = THUMB_WORKER_RENDER_SIZE;
   // Same look as the other tiles: fit inside a square, letterboxed on #101113.
   const filter =
-    `scale=${size}:${size}:force_original_aspect_ratio=decrease:flags=bilinear,` +
+    `scale=${size}:${size}:force_original_aspect_ratio=decrease:flags=fast_bilinear,` +
     `pad=${size}:${size}:(ow-iw)/2:(oh-ih)/2:color=0x101113`;
 
   const args = [
@@ -196,6 +194,9 @@ async function extractFrame(absPath: string, seekSec: number): Promise<Buffer | 
     'error',
     '-ss',
     seekSec.toFixed(3),
+    // Jump to the nearest keyframe instead of decoding up to the exact
+    // timestamp. Much faster on big files; the exact frame doesn't matter.
+    '-noaccurate_seek',
     '-i',
     absPath,
     '-map',
@@ -211,11 +212,22 @@ async function extractFrame(absPath: string, seekSec: number): Promise<Buffer | 
     'image2pipe',
     '-c:v',
     'png',
+    '-compression_level',
+    '1',
     'pipe:1'
   ];
 
   const res = await runFfmpeg(args, FRAME_TIMEOUT_MS);
-  return looksLikePng(res.stdout) ? res.stdout : null;
+  if (!looksLikePng(res.stdout)) {
+    log.warn('ffmpeg frame failed', {
+      file: absPath.split(/[\\/]/).pop(),
+      code: res.code,
+      seekSec,
+      stderr: res.stderr.slice(-500)
+    });
+    return null;
+  }
+  return res.stdout;
 }
 
 // ─── public API ───────────────────────────────────────────────────────────
@@ -231,28 +243,28 @@ export function isFfmpegAvailable(): boolean {
 
 /**
  * Render a video's thumbnail and metadata. Throws on any failure (missing
- * binary, no video stream, no decodable frame, timeout) so the caller can fall
- * back to another renderer.
+ * binary, no video stream, no decodable frame, timeout).
  */
 export async function renderVideoThumbnailFfmpeg(absPath: string): Promise<FfmpegThumbResult> {
   await acquire();
   try {
-   const t0 = Date.now();
-   const probeRun = await runFfmpeg(['-hide_banner', '-nostdin', '-i', absPath], PROBE_TIMEOUT_MS);
-   const probeMs = Date.now() - t0;
+    const t0 = Date.now();
+    const probeRun = await runFfmpeg(['-hide_banner', '-nostdin', '-i', absPath], PROBE_TIMEOUT_MS);
+    const probeMs = Date.now() - t0;
     const info = parseProbe(probeRun.stderr);
-    if (!info) throw new Error('no video stream found');
+    if (!info) throw new Error('no video stream found: ' + probeRun.stderr.slice(-200));
 
     const seekSec = info.durationSec > 0 ? info.durationSec * SEEK_FRACTION : 0;
-   const frameStart = Date.now();
-   let png = await extractFrame(absPath, seekSec);
+    const frameStart = Date.now();
+    let png = await extractFrame(absPath, seekSec);
     // Some files can't seek (or are shorter than the probe claims): retry at 0.
-   if (!png && seekSec > 0) png = await extractFrame(absPath, 0);
-   if (!png) throw new Error('ffmpeg produced no frame');
-      log.info('ffmpeg thumb', {
-     file: absPath.split(/[\\/]/).pop(),
-     probeMs,
-     frameMs: Date.now() - frameStart});
+    if (!png && seekSec > 0) png = await extractFrame(absPath, 0);
+    if (!png) throw new Error('ffmpeg produced no frame');
+    log.info('ffmpeg thumb', {
+      file: absPath.split(/[\\/]/).pop(),
+      probeMs,
+      frameMs: Date.now() - frameStart
+    });
 
     const video: VideoMetadata = {
       durationSec: info.durationSec,

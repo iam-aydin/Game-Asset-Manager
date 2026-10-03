@@ -35,6 +35,9 @@ function createMainWindow(): BrowserWindow {
     show: false,
     backgroundColor: '#1a1b1e',
     title: 'Game Asset Manager',
+    // No native File/Edit/View/Window/Help bar on Windows/Linux. macOS keeps
+    // its menu because the system menu bar is part of the OS there.
+    autoHideMenuBar: process.platform !== 'darwin',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -42,6 +45,10 @@ function createMainWindow(): BrowserWindow {
       sandbox: false
     }
   });
+
+  // Menu stays installed so accelerators (F11, Ctrl +/-, DevTools, undo...)
+  // keep working. Only the visible bar is hidden.
+  if (process.platform !== 'darwin') win.setMenuBarVisibility(false);
 
   win.once('ready-to-show', () => win.show());
   // Flush any library events that fired before the first window existed

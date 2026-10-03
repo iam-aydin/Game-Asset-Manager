@@ -10,8 +10,10 @@ import type Database from 'better-sqlite3';
  *   2 — orientation correction (STL/3MF render +Z up instead of treating
  *       them as Y-up) + per-file orientation override. Existing thumbnails
  *       are re-rendered on first launch after this bump.
+ *   3 — video thumbnails via ffmpeg only; re-render cached video placeholder
+ *       tiles and previously failed videos.
  */
-export const RENDERER_VERSION = 2;
+export const RENDERER_VERSION = 3;
 
 export interface ThumbnailRow {
   fileId: number;

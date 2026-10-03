@@ -21,18 +21,10 @@ const log = scopedLogger('queue-runner');
 // every routine render.
 const SLOW_RENDER_MS = 5_000;
 
-const RECONCILE_BATCH = 1000;
+// Was 1000, which silently left every file past the first 1000 without a job.
+const RECONCILE_BATCH = 100_000;
 const STALE_CLAIM_MS = 5 * 60_000;
 const MAX_ATTEMPTS = 3;
-
-let chromiumVideoChain: Promise<void> = Promise.resolve();
-function runExclusiveChromiumVideo<T>(fn: () => Promise<T>): Promise<T> {
-  const run = chromiumVideoChain.then(fn);
-  chromiumVideoChain = run.then(() => undefined, () => undefined);
-  return run;
-}
-
-
 
 export interface QueueStats {
   libraryId: string;
@@ -54,10 +46,10 @@ export class ThumbQueueRunner extends EventEmitter {
    */
   private lightingStyle: LightingStyle = DEFAULT_LIGHTING_STYLE;
 
-  // 4 in-flight jobs: models/images/audio/documents still go through the
+  // 12 in-flight jobs: models/images/audio/documents still go through the
   // 2-window render pool (extra jobs wait in its queue), while videos run in
   // ffmpeg processes capped separately inside ffmpeg-thumb.ts.
-  constructor(maxConcurrent = 4) {
+  constructor(maxConcurrent = 12) {
     super();
     this.maxConcurrent = maxConcurrent;
   }
@@ -82,9 +74,22 @@ export class ThumbQueueRunner extends EventEmitter {
     library.thumbErrors.clearWithMessages([...TRANSIENT_RENDER_ERROR_MESSAGES]);
     const needing = library.thumbnails.findFilesNeedingThumbs(RECONCILE_BATCH);
     if (needing.length === 0) return;
+    // Videos go first: ffmpeg renders them in a few hundred ms each, so they
+    // should never wait behind thousands of models/images/docs that share the
+    // slower 3D render pool.
+    const videoIds = new Set<number>();
+    for (const n of needing) {
+      const f = library.files.getById(n.fileId);
+      if (f && isVideoExtension(f.ext)) videoIds.add(n.fileId);
+    }
     library.thumbJobs.enqueueMany(
-      needing.map((n) => ({ fileId: n.fileId, priority: PRIORITY_BACKGROUND }))
+      needing.map((n) => ({
+        fileId: n.fileId,
+        priority: videoIds.has(n.fileId) ? PRIORITY_VISIBLE : PRIORITY_BACKGROUND
+      }))
     );
+    // enqueueMany coalesces duplicates, so also bump jobs that already existed.
+    for (const id of videoIds) library.thumbJobs.bumpPriority(id, PRIORITY_VISIBLE);
     this.drain();
   }
 
@@ -195,28 +200,18 @@ export class ThumbQueueRunner extends EventEmitter {
         log,
         'thumb-render',
         async () => {
-          // Videos: ffmpeg first (fast, out-of-process, handles AVI/HEVC).
-          // If it can't produce a frame, fall back to the Chromium worker,
-          // which also writes the placeholder tile for undecodable files.
-          if (isVideo) {
-            try {
-              return await renderVideoThumbnailFfmpeg(absPath);
-            } catch (err) {
-              log.warn('ffmpeg thumbnail failed, falling back to Chromium worker', {
-                relPath: file.relPath,
-                err: (err as Error).message ?? String(err)
-              });
-            }
-          }
-const viaPool = () =>
-  thumbPool.render({
-    absPath,
-    ext: file.ext,
-    lightingStyle: this.lightingStyle,
-    orientation: file.orientation,
-    mediaUrl: isVideo ? `wh3d-file://${lib.entry.id}/${file.id}` : undefined
-  });
-return isVideo ? runExclusiveChromiumVideo(viaPool) : viaPool();
+          // Videos: ffmpeg only (fast, out-of-process, handles AVI/HEVC).
+          // No Chromium fallback — it was slow, ran one video at a time and
+          // could block the queue for 30s per file. If ffmpeg fails, the job
+          // fails normally and is retried up to MAX_ATTEMPTS.
+          if (isVideo) return renderVideoThumbnailFfmpeg(absPath);
+
+          return thumbPool.render({
+            absPath,
+            ext: file.ext,
+            lightingStyle: this.lightingStyle,
+            orientation: file.orientation
+          });
         },
         { warnAboveMs: SLOW_RENDER_MS, meta: { libraryId: lib.entry.id, fileId, ext: file.ext } }
       );

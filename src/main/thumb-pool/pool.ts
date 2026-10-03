@@ -53,8 +53,11 @@ export class ThumbPool {
   private shuttingDown = false;
 
   constructor(opts: PoolOptions = {}) {
-    this.workerCount = opts.workerCount ?? 2;
-    this.maxJobsPerWorker = opts.maxJobsPerWorker ?? 500;
+    // 4 hidden render windows (was 2) so images/docs/models clear faster.
+    this.workerCount = opts.workerCount ?? 4;
+    // Recycling a window costs a full page reload; 1000 keeps leaks in check
+    // without restarting every few seconds (50 was far too aggressive).
+    this.maxJobsPerWorker = opts.maxJobsPerWorker ?? 1000;
     this.perJobTimeoutMs = opts.perJobTimeoutMs ?? 30_000;
   }
 

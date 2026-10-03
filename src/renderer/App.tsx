@@ -10,7 +10,6 @@ import {
   Center,
   Divider,
   Group,
-  Loader,
   Progress,
   ScrollArea,
   Select,
@@ -50,7 +49,6 @@ import { LibrarySidebar } from './components/LibrarySidebar';
 import { Logo } from './components/Logo';
 import { FolderTree } from './components/FolderTree';
 import { TagsSidebar } from './components/TagsSidebar';
-import { TriageFacets } from './components/TriageFacets';
 import { CollectionsSidebar } from './components/CollectionsSidebar';
 import { FolderRowList } from './components/FavoritesSidebar';
 import { CollapsibleSection } from './components/CollapsibleSection';
@@ -193,6 +191,12 @@ function readStoredExtensions(): Set<SupportedExtension> {
   }
 }
 
+/** Thumbnail-loading progress shown in the top bar. */
+interface ThumbLoad {
+  total: number;
+  done: number;
+}
+
 export function App() {
   const [libraries, setLibraries] = useState<LibrarySummary[]>([]);
   const [selectedLibraryId, setSelectedLibraryId] = useState<string | null>(null);
@@ -251,15 +255,15 @@ export function App() {
     () => readStoredExtensions()
   );
   useEffect(() => {
-  try {
-    localStorage.setItem(
-      EXT_FILTER_STORAGE_KEY,
-      JSON.stringify([...selectedExtensions])
-    );
-  } catch {
-    // best-effort; ignore
-  }
-}, [selectedExtensions]);
+    try {
+      localStorage.setItem(
+        EXT_FILTER_STORAGE_KEY,
+        JSON.stringify([...selectedExtensions])
+      );
+    } catch {
+      // best-effort; ignore
+    }
+  }, [selectedExtensions]);
 
   const [selectedTagIds, setSelectedTagIds] = useState<Set<number>>(() => new Set());
   const [minRating, setMinRating] = useState<number>(0);
@@ -300,24 +304,24 @@ export function App() {
   // useMantineColorScheme, plus our custom CSS var overrides at :root. Every
   // component in the app reads colors through var(--mantine-color-dark-N)
   // etc., so this is the only place that needs to touch the DOM.
-useEffect(() => {
-  const theme = getTheme(themeId);
-  setColorScheme(theme.colorScheme);
+  useEffect(() => {
+    const theme = getTheme(themeId);
+    setColorScheme(theme.colorScheme);
 
-  const root = document.documentElement.style;
-  for (const t of THEMES) {
-    for (const key of Object.keys(t.cssVars)) {
-      root.removeProperty(key);
+    const root = document.documentElement.style;
+    for (const t of THEMES) {
+      for (const key of Object.keys(t.cssVars)) {
+        root.removeProperty(key);
+      }
     }
-  }
-  for (const [key, value] of Object.entries(theme.cssVars)) {
-    root.setProperty(key, value);
-  }
+    for (const [key, value] of Object.entries(theme.cssVars)) {
+      root.setProperty(key, value);
+    }
 
-  // NEW — let non-CSS consumers (Three.js's WebGL clear color, which can't
-  // read CSS custom properties directly) know the theme changed live.
-  window.dispatchEvent(new Event('wh3d:themechange'));
-}, [themeId, setColorScheme]);
+    // Let non-CSS consumers (Three.js's WebGL clear color, which can't
+    // read CSS custom properties directly) know the theme changed live.
+    window.dispatchEvent(new Event('wh3d:themechange'));
+  }, [themeId, setColorScheme]);
   // --------------------------------------------------------------------------
 
   const outerPanelGroupRef = useRef<ImperativePanelGroupHandle>(null);
@@ -580,6 +584,81 @@ useEffect(() => {
     setCacheStatus(cache);
   }, []);
 
+  // --- Thumbnail loading progress -------------------------------------------
+  // Drives the "Loading thumbnails · done/total" bar in the top bar. The total
+  // is counted from the library's files that still lack a thumbnail; each
+  // thumb-rendered / thumb-failed event then ticks `done` up. Recounts are
+  // throttled and triggered by scans, file changes, library switches and
+  // re-render requests, so the bar appears whenever assets are loading and
+  // disappears on its own once everything has a thumbnail.
+  const [thumbLoad, setThumbLoad] = useState<ThumbLoad | null>(null);
+  const selectedLibraryIdRef = useRef<string | null>(null);
+  selectedLibraryIdRef.current = selectedLibraryId;
+  const recountTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastRecountRef = useRef(0);
+  const hadThumbLoadRef = useRef(false);
+
+  const recountThumbs = useCallback(async (libraryId: string) => {
+    lastRecountRef.current = Date.now();
+    try {
+      const all = await ipc.queryFiles({
+        libraryId,
+        parentDir: '',
+        recursive: true,
+        limit: 100000
+      });
+      if (selectedLibraryIdRef.current !== libraryId) return;
+      let pending = 0;
+      for (const f of all) {
+        if (!f.hasThumb && !f.thumbError) pending++;
+      }
+      setThumbLoad((prev) => {
+        if (pending === 0) return null;
+        const done = prev ? Math.min(prev.done, prev.total) : 0;
+        return { total: done + pending, done };
+      });
+    } catch {
+      // Progress is cosmetic; never surface errors from it.
+    }
+  }, []);
+
+  const scheduleThumbRecount = useCallback(() => {
+    if (!selectedLibraryIdRef.current || recountTimerRef.current) return;
+    const wait = Math.max(1000, 5000 - (Date.now() - lastRecountRef.current));
+    recountTimerRef.current = setTimeout(() => {
+      recountTimerRef.current = null;
+      const id = selectedLibraryIdRef.current;
+      if (id) void recountThumbs(id);
+    }, wait);
+  }, [recountThumbs]);
+
+  const bumpThumbDone = useCallback(() => {
+    setThumbLoad((prev) => {
+      if (!prev) return prev;
+      const done = prev.done + 1;
+      return done >= prev.total ? null : { total: prev.total, done };
+    });
+  }, []);
+
+  // When the bar finishes, recount once more to catch retries / stragglers.
+  useEffect(() => {
+    if (thumbLoad) {
+      hadThumbLoadRef.current = true;
+      return;
+    }
+    if (hadThumbLoadRef.current) {
+      hadThumbLoadRef.current = false;
+      scheduleThumbRecount();
+    }
+  }, [thumbLoad, scheduleThumbRecount]);
+
+  useEffect(() => {
+    return () => {
+      if (recountTimerRef.current) clearTimeout(recountTimerRef.current);
+    };
+  }, []);
+  // --------------------------------------------------------------------------
+
   const clearSelection = useCallback(() => {
     setSelectedFileIds(new Set());
     setPrimaryFileId(null);
@@ -600,6 +679,7 @@ useEffect(() => {
     setCollections([]);
     clearSelection();
     setScanStatus(null);
+    setThumbLoad(null);
     setThumbVersions(new Map());
     setSearchInput('');
     setSearchQuery('');
@@ -613,12 +693,14 @@ useEffect(() => {
     void refreshTags(selectedLibraryId);
     void refreshCollections(selectedLibraryId);
     void refreshScanStatus(selectedLibraryId);
+    void recountThumbs(selectedLibraryId);
   }, [
     selectedLibraryId,
     refreshTree,
     refreshTags,
     refreshCollections,
     refreshScanStatus,
+    recountThumbs,
     clearSelection
   ]);
 
@@ -660,21 +742,21 @@ useEffect(() => {
   // primary so the preview pane updates without an explicit click. The flag
   // ensures this only happens once per navigation — subsequent IPC reloads
   // (scan, watcher) leave the selection alone.
-useEffect(() => {
-  if (!autoSelectFirstRef.current) return;
-  if (files.length === 0) return;
-  autoSelectFirstRef.current = false;
+  useEffect(() => {
+    if (!autoSelectFirstRef.current) return;
+    if (files.length === 0) return;
+    autoSelectFirstRef.current = false;
 
-  const first = files[0];
-  setSelectedFileIds(new Set([first.id]));
-  setPrimaryFileId(first.id);
-  selectionAnchorRef.current = first.id;
+    const first = files[0];
+    setSelectedFileIds(new Set([first.id]));
+    setPrimaryFileId(first.id);
+    selectionAnchorRef.current = first.id;
 
-  // Select initial audio track on folder load WITHOUT starting playback
-  if (['mp3', 'wav', 'ogg', 'flac'].includes(first.ext.toLowerCase())) {
-    setActiveAudio({ fileId: first.id, autoPlay: false });
-  }
-}, [files]);
+    // Select initial audio track on folder load WITHOUT starting playback
+    if (['mp3', 'wav', 'ogg', 'flac'].includes(first.ext.toLowerCase())) {
+      setActiveAudio({ fileId: first.id, autoPlay: false });
+    }
+  }, [files]);
 
   useEffect(() => {
     if (!selectedLibraryId || files.length === 0) return;
@@ -788,6 +870,7 @@ useEffect(() => {
         setScanStatus(event.progress);
         void refreshTree(event.libraryId);
         reloadFiles();
+        scheduleThumbRecount();
         return;
       }
       if (event.kind === 'scan-cancelled') {
@@ -819,6 +902,7 @@ useEffect(() => {
       if (event.kind === 'files-changed') {
         void refreshTree(event.libraryId);
         reloadFiles();
+        scheduleThumbRecount();
         return;
       }
       if (event.kind === 'thumb-rendered') {
@@ -827,7 +911,12 @@ useEffect(() => {
           next.set(event.fileId, (next.get(event.fileId) ?? 0) + 1);
           return next;
         });
+        bumpThumbDone();
         if (event.fileId === s.primaryFileId) reloadFiles();
+        return;
+      }
+      if (event.kind === 'thumb-failed') {
+        bumpThumbDone();
         return;
       }
       if (event.kind === 'tags-changed') {
@@ -845,7 +934,14 @@ useEffect(() => {
         return;
       }
     });
-  }, [refreshTree, refreshFiles, refreshTags, refreshCollections]);
+  }, [
+    refreshTree,
+    refreshFiles,
+    refreshTags,
+    refreshCollections,
+    scheduleThumbRecount,
+    bumpThumbDone
+  ]);
 
   // Folder/collection/scope mutex helpers — exactly one selection mode is
   // active at a time. Picking a folder or collection drops out of tree/all-libs
@@ -874,76 +970,77 @@ useEffect(() => {
   // ThumbGrid interaction. Shift-range walks the visible `files` array between
   // the anchor and the click target (inclusive).
   const handleTileClick = useCallback(
-  (fileId: number, mods: TileClickModifiers) => {
-    // 1. Right Click: Do NOT change active audio or interrupt playback
-    if (mods.isRightClick) {
-      setSelectedFileIds((prev) => (prev.has(fileId) ? prev : new Set([fileId])));
-      return;
-    }
-
-    const ordered = files;
-    const clickedFile = ordered.find((f) => f.id === fileId);
-
-    // 2. Shift / Ctrl Selection logic
-    if (mods.shift) {
-      const anchor =
-        selectionAnchorRef.current != null && ordered.some((f) => f.id === selectionAnchorRef.current)
-          ? selectionAnchorRef.current
-          : primaryFileId ?? fileId;
-      const ai = ordered.findIndex((f) => f.id === anchor);
-      const bi = ordered.findIndex((f) => f.id === fileId);
-      if (ai >= 0 && bi >= 0) {
-        const [lo, hi] = ai <= bi ? [ai, bi] : [bi, ai];
-        const next = new Set<number>();
-        for (let i = lo; i <= hi; i++) next.add(ordered[i].id);
-        setSelectedFileIds(next);
-        setPrimaryFileId(fileId);
+    (fileId: number, mods: TileClickModifiers) => {
+      // 1. Right Click: Do NOT change active audio or interrupt playback
+      if (mods.isRightClick) {
+        setSelectedFileIds((prev) => (prev.has(fileId) ? prev : new Set([fileId])));
         return;
       }
-    }
 
-    if (mods.meta || mods.ctrl) {
-      setSelectedFileIds((prev) => {
-        const next = new Set(prev);
-        if (next.has(fileId)) {
-          next.delete(fileId);
-          setPrimaryFileId(next.size > 0 ? [...next][next.size - 1] : null);
-        } else {
-          next.add(fileId);
+      const ordered = files;
+      const clickedFile = ordered.find((f) => f.id === fileId);
+
+      // 2. Shift / Ctrl Selection logic
+      if (mods.shift) {
+        const anchor =
+          selectionAnchorRef.current != null &&
+          ordered.some((f) => f.id === selectionAnchorRef.current)
+            ? selectionAnchorRef.current
+            : primaryFileId ?? fileId;
+        const ai = ordered.findIndex((f) => f.id === anchor);
+        const bi = ordered.findIndex((f) => f.id === fileId);
+        if (ai >= 0 && bi >= 0) {
+          const [lo, hi] = ai <= bi ? [ai, bi] : [bi, ai];
+          const next = new Set<number>();
+          for (let i = lo; i <= hi; i++) next.add(ordered[i].id);
+          setSelectedFileIds(next);
           setPrimaryFileId(fileId);
+          return;
         }
-        return next;
-      });
+      }
+
+      if (mods.meta || mods.ctrl) {
+        setSelectedFileIds((prev) => {
+          const next = new Set(prev);
+          if (next.has(fileId)) {
+            next.delete(fileId);
+            setPrimaryFileId(next.size > 0 ? [...next][next.size - 1] : null);
+          } else {
+            next.add(fileId);
+            setPrimaryFileId(fileId);
+          }
+          return next;
+        });
+        selectionAnchorRef.current = fileId;
+        return;
+      }
+
+      // 3. Normal Left Click: Select file and set activeAudio to autoPlay
+      setSelectedFileIds(new Set([fileId]));
+      setPrimaryFileId(fileId);
       selectionAnchorRef.current = fileId;
-      return;
-    }
 
-    // 3. Normal Left Click: Select file and set activeAudio to autoPlay
-    setSelectedFileIds(new Set([fileId]));
-    setPrimaryFileId(fileId);
-    selectionAnchorRef.current = fileId;
-
-    if (clickedFile && ['mp3', 'wav', 'ogg', 'flac'].includes(clickedFile.ext.toLowerCase())) {
-      setActiveAudio({ fileId: clickedFile.id, autoPlay: true });
-    }
-  },
-  [files, primaryFileId]
-);
+      if (clickedFile && ['mp3', 'wav', 'ogg', 'flac'].includes(clickedFile.ext.toLowerCase())) {
+        setActiveAudio({ fileId: clickedFile.id, autoPlay: true });
+      }
+    },
+    [files, primaryFileId]
+  );
 
   // Right-click on a tile: open the bulk context menu. Per user preference,
   // keep the current selection unchanged — except when nothing is selected, in
   // which case we promote the right-clicked tile so the menu has something to
   // act on (otherwise right-click would silently do nothing).
-const handleTileContextMenu = useCallback(
-  (fileId: number, x: number, y: number) => {
-    setSelectedFileIds((prev) => {
-      if (prev.has(fileId)) return prev;
-      return new Set([fileId]);
-    });
-    setContextMenu({ open: true, x, y });
-  },
-  []
-);
+  const handleTileContextMenu = useCallback(
+    (fileId: number, x: number, y: number) => {
+      setSelectedFileIds((prev) => {
+        if (prev.has(fileId)) return prev;
+        return new Set([fileId]);
+      });
+      setContextMenu({ open: true, x, y });
+    },
+    []
+  );
   const closeContextMenu = useCallback(() => {
     setContextMenu((prev) => ({ ...prev, open: false }));
   }, []);
@@ -981,6 +1078,11 @@ const handleTileContextMenu = useCallback(
     }
   }, [files, selectedFileIds]);
 
+  const filesAt = useCallback(
+    (ids: number[]) => files.filter((f) => ids.includes(f.id)),
+    [files]
+  );
+
   const requestMove = useCallback(
     (toParentDir: string, fileIds: number[]) => {
       const draggedFiles = filesAt(fileIds);
@@ -996,13 +1098,7 @@ const handleTileContextMenu = useCallback(
       if (sameLib.every((f) => f.parentDir === toParentDir)) return;
       setMoveConfirm({ open: true, files: sameLib, toParentDir });
     },
-    // filesAt closes over `files` state via a helper defined below
-    []
-  );
-
-  const filesAt = useCallback(
-    (ids: number[]) => files.filter((f) => ids.includes(f.id)),
-    [files]
+    [filesAt]
   );
 
   const performMove = useCallback(async () => {
@@ -1113,9 +1209,9 @@ const handleTileContextMenu = useCallback(
     (fileId: number) => {
       const file = files.find((f) => f.id === fileId);
       if (!file) return;
-      void ipc.rerenderThumb(file.libraryId, fileId);
+      void ipc.rerenderThumb(file.libraryId, fileId).then(() => scheduleThumbRecount());
     },
-    [files]
+    [files, scheduleThumbRecount]
   );
 
   // Folder-level actions from the FolderTree context menu. Route through the
@@ -1204,7 +1300,8 @@ const handleTileContextMenu = useCallback(
   const handleBulkRerender = useCallback(async () => {
     if (!selectedLibraryId || selectedIdsArray.length === 0) return;
     await ipc.rerenderThumbs(selectedLibraryId, selectedIdsArray);
-  }, [selectedLibraryId, selectedIdsArray]);
+    scheduleThumbRecount();
+  }, [selectedLibraryId, selectedIdsArray, scheduleThumbRecount]);
 
   // Rating/label apply to the single-file primary too — both panels route
   // through these same handlers, so there's one code path for tile/menu/panel
@@ -1454,14 +1551,19 @@ const handleTileContextMenu = useCallback(
     });
   }, []);
 
-  const handleToggleColorLabel = useCallback((label: ColorLabel) => {
-    setSelectedColorLabels((prev) => {
-      const next = new Set(prev);
-      if (next.has(label)) next.delete(label);
-      else next.add(label);
-      return next;
-    });
-  }, []);
+    const handleSetExtensions = useCallback(
+    (exts: SupportedExtension[], selected: boolean) => {
+      setSelectedExtensions((prev) => {
+        const next = new Set(prev);
+        for (const e of exts) {
+          if (selected) next.add(e);
+          else next.delete(e);
+        }
+        return next;
+      });
+    },
+    []
+  );
 
   // Duplicate-group bulk select: within each content-hash group, keep the
   // first file (as ordered by the current query) and select all the rest, so
@@ -1713,18 +1815,18 @@ const handleTileContextMenu = useCallback(
       />
     </Stack>
   ) : (
-<ThumbGrid
-  libraryId={selectedLibraryId}
-  files={files}
-  selectedIds={selectedFileIds}
-  primaryId={primaryFileId}
-  thumbVersions={thumbVersions}
-  onTileClick={handleTileClick}
-  onTileContextMenu={handleTileContextMenu}
-/>
+    <ThumbGrid
+      libraryId={selectedLibraryId}
+      files={files}
+      selectedIds={selectedFileIds}
+      primaryId={primaryFileId}
+      thumbVersions={thumbVersions}
+      onTileClick={handleTileClick}
+      onTileContextMenu={handleTileContextMenu}
+    />
   );
 
-const previewPane = (
+  const previewPane = (
     <PreviewPane
       libraryId={selectedLibraryId}
       file={primaryFile}
@@ -1780,6 +1882,7 @@ const previewPane = (
             />
             <div style={{ flex: 1 }} />
             <CacheRebuildStatus status={cacheStatus} onCancel={handleCancelCacheRebuild} />
+            {cacheStatus?.state !== 'rebuilding' && <ThumbLoadStatus load={thumbLoad} />}
             <ScanStatusBadge status={scanStatus} onCancel={handleCancelScan} />
             <Tooltip label="Rescan library">
               <ActionIcon
@@ -1854,14 +1957,18 @@ const previewPane = (
               onQueryChange={setSearchInput}
               selectedExtensions={selectedExtensions}
               onToggleExtension={handleToggleExtension}
+              onSetExtensions={handleSetExtensions}
               onClearExtensions={() => setSelectedExtensions(new Set())}
               libraryName={selectedLibrary?.name ?? null}
+                            matchBadge={
+                filterActive ? (
+                  <Badge size="sm" variant="light" color="indigo">
+                    {files.length} match{files.length === 1 ? '' : 'es'}
+                  </Badge>
+                ) : undefined
+              }
             />
-            {filterActive && (
-              <Badge size="sm" variant="light" color="indigo">
-                {files.length} match{files.length === 1 ? '' : 'es'}
-              </Badge>
-            )}
+
             <div style={{ flex: 1 }} />
             <Tooltip
               label="Show only files whose exact content (SHA-256) matches at least one other file"
@@ -2039,7 +2146,6 @@ const previewPane = (
   );
 }
 
-  
 function ShowAllInLibraryLink({
   libraryName,
   active,
@@ -2148,10 +2254,17 @@ function ScanStatusBadge({
   if (status.state === 'scanning') {
     return (
       <Group gap={6} wrap="nowrap">
-        <Loader size="xs" />
         <Text size="xs" c="dimmed">
           Scanning · {status.filesSeen} files
         </Text>
+        <Progress
+          value={100}
+          animated
+          w={90}
+          size="sm"
+          radius="xl"
+          aria-label="Scanning folder"
+        />
         <Tooltip label="Cancel scan">
           <ActionIcon variant="subtle" color="gray" size="sm" onClick={onCancel} aria-label="Cancel scan">
             <IconX size={14} />
@@ -2178,11 +2291,29 @@ function ScanStatusBadge({
     const total = status.inserted + status.updated;
     return (
       <Text size="xs" c="dimmed">
-        Watching · {status.filesSeen} files{total > 0 ? ` (+${total} this scan)` : ''}
+        Loaded · {status.filesSeen} files{total > 0 ? ` (+${total} new)` : ''}
       </Text>
     );
   }
   return null;
+}
+
+/**
+ * Toolbar widget shown whenever thumbnails are still being generated —
+ * after adding a folder, a rescan, new files appearing, or a re-render
+ * request. Same look as the cache-rebuild bar, minus the cancel button.
+ */
+function ThumbLoadStatus({ load }: { load: ThumbLoad | null }) {
+  if (!load) return null;
+  const pct = load.total > 0 ? Math.round((load.done / load.total) * 100) : 0;
+  return (
+    <Group gap={6} wrap="nowrap">
+      <Text size="xs" c="dimmed">
+        Loading thumbnails · {load.done}/{load.total}
+      </Text>
+      <Progress value={pct} w={90} size="sm" radius="xl" aria-label="Thumbnail loading progress" />
+    </Group>
+  );
 }
 
 /**

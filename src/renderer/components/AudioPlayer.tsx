@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { PlayerGlassStyles, PLAYER_GLASS_CLASS, PLAYER_GLASS_POPOVER_CLASS } from './PlayerGlass';
 import {
   ActionIcon,
   Box,
@@ -927,6 +928,7 @@ export function AudioPlayer({
       onAuxClick={handleAuxClick}
       style={{ position: 'relative', width: '100%' }}
     >
+      <PlayerGlassStyles />
       {showHero && (
         <Box
           style={{
@@ -943,15 +945,11 @@ export function AudioPlayer({
         </Box>
       )}
       <Card
-        withBorder
+        withBorder={false}
         radius="lg"
         p="xs"
-        bg="var(--mantine-color-dark-8)"
-        style={{
-          border: '1px solid var(--mantine-color-dark-4)',
-          width: '100%',
-          boxShadow: '0 4px 20px rgba(0,0,0,0.3)'
-        }}
+        className={PLAYER_GLASS_CLASS}
+        style={{ width: '100%' }}
       >
         <Group wrap="nowrap" gap="md" align="center">
           {/* Cover art — only rendered when the file actually has embedded artwork */}
@@ -1097,10 +1095,11 @@ export function AudioPlayer({
               width={240}
               position="top"
               shadow="md"
-              withArrow
+              withArrow={false}
               opened={eqOpen}
               onChange={setEqOpen}
               closeOnClickOutside={false}
+              classNames={{ dropdown: PLAYER_GLASS_POPOVER_CLASS }}
             >
               <Popover.Target>
                 <Tooltip label="Equalizer" withinPortal>
@@ -1168,10 +1167,11 @@ export function AudioPlayer({
               width={220}
               position="top"
               shadow="md"
-              withArrow
+              withArrow={false}
               opened={effectsOpen}
               onChange={setEffectsOpen}
               closeOnClickOutside={false}
+              classNames={{ dropdown: PLAYER_GLASS_POPOVER_CLASS }}
             >
               <Popover.Target>
                 <Tooltip label="Audio Effects" withinPortal>
@@ -1237,10 +1237,11 @@ export function AudioPlayer({
               width={280}
               position="top"
               shadow="md"
-              withArrow
+              withArrow={false}
               opened={volumeOpen}
               onChange={setVolumeOpen}
               closeOnClickOutside={false}
+              classNames={{ dropdown: PLAYER_GLASS_POPOVER_CLASS }}
             >
               <Popover.Target>
                 <Box onWheel={onWheelAdjust((dir) => adjustVolumeRelative(dir * 5))}>
