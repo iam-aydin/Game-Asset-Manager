@@ -54,7 +54,7 @@ export class ThumbPool {
 
   constructor(opts: PoolOptions = {}) {
     this.workerCount = opts.workerCount ?? 2;
-    this.maxJobsPerWorker = opts.maxJobsPerWorker ?? 50;
+    this.maxJobsPerWorker = opts.maxJobsPerWorker ?? 500;
     this.perJobTimeoutMs = opts.perJobTimeoutMs ?? 30_000;
   }
 
@@ -74,6 +74,7 @@ export class ThumbPool {
     ext: string;
     lightingStyle?: LightingStyle;
     orientation?: FileOrientation;
+    mediaUrl?: string;
   }): Promise<RenderOutput> {
     if (this.shuttingDown) {
       return Promise.reject(new Error(POOL_SHUTDOWN_ERROR));

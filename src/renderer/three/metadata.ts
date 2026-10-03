@@ -35,7 +35,7 @@ const TEXTURE_SLOTS = [
  */
 export function extractMetadata(
   obj: THREE.Object3D,
-  thumbSource: 'gl' | '3mf-embedded',
+  thumbSource: ExtractedMetadata['thumbSource'],
   validation?: MeshValidation,
   meshVolumeMm3?: number | null,
   printability?: PrintabilityReport | null,
@@ -139,7 +139,7 @@ function textureSourceName(t: THREE.Texture): string | null {
 }
 
 /** Stub used when we serve a 3MF embedded thumbnail without loading meshes. */
-export function thumbnailOnlyMetadata(thumbSource: 'gl' | '3mf-embedded'): ExtractedMetadata {
+export function thumbnailOnlyMetadata(thumbSource: ExtractedMetadata['thumbSource']): ExtractedMetadata {
   return {
     vertexCount: 0,
     triangleCount: 0,

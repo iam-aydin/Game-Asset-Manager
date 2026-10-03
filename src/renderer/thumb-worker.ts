@@ -10,7 +10,7 @@ import { DEFAULT_LIGHTING_STYLE, LightingRig, type LightingStyle } from './three
 import { THUMB_WORKER_CHANNEL, THUMB_WORKER_RENDER_SIZE } from '@shared/thumb-worker-protocol';
 import type { ThumbRenderRequest, ThumbRenderResult } from '@shared/thumb-worker-protocol';
 import type { ExtractedMetadata } from '@shared/types';
-import { isAudioExtension, isImageExtension } from '@shared/formats';
+import { isAudioExtension, isImageExtension, isVideoExtension } from '@shared/formats';
 import type { IpcRenderer } from 'electron';
 import type { promises as FsPromises } from 'node:fs';
 import { scopedLogger } from './logger';
@@ -185,6 +185,7 @@ function drawWaveform(ctx2d: CanvasRenderingContext2D, buffer: AudioBuffer, size
 }
 
 async function renderAudioThumbnail(req: ThumbRenderRequest): Promise<RenderOutput> {
+  
   const buffer = await fs.readFile(req.absPath);
   const size = THUMB_WORKER_RENDER_SIZE;
   const canvas = document.createElement('canvas');
@@ -240,6 +241,127 @@ async function renderAudioThumbnail(req: ThumbRenderRequest): Promise<RenderOutp
   return { png, metadata };
 }
 
+const VIDEO_SEEK_FRACTION = 0.1;
+const VIDEO_STEP_TIMEOUT_MS = 5_000;
+
+function mediaErrorText(video: HTMLVideoElement): string {
+  const e = video.error;
+  return e ? `code ${e.code}${e.message ? `: ${e.message}` : ''}` : 'unknown error';
+}
+
+function waitForVideoEvent(
+  video: HTMLVideoElement,
+  // helper signature: add the new event name
+  eventName: 'loadedmetadata' | 'loadeddata' | 'seeked',
+  step: string
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const done = (fn: () => void) => {
+      clearTimeout(timer);
+      video.removeEventListener(eventName, onOk);
+      video.removeEventListener('error', onErr);
+      fn();
+    };
+    const onOk = () => done(resolve);
+    const onErr = () =>
+      done(() => reject(new Error(`video ${step} failed (${mediaErrorText(video)})`)));
+    const timer = setTimeout(
+      () => done(() => reject(new Error(`video ${step} timed out`))),
+      VIDEO_STEP_TIMEOUT_MS
+    );
+    video.addEventListener(eventName, onOk);
+    video.addEventListener('error', onErr);
+  });
+}
+
+async function renderVideoThumbnail(req: ThumbRenderRequest): Promise<RenderOutput> {
+  if (!req.mediaUrl) throw new Error('video thumbnail needs req.mediaUrl');
+
+  const size = THUMB_WORKER_RENDER_SIZE;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx2d = canvas.getContext('2d');
+  if (!ctx2d) throw new Error('2D context unavailable for video thumbnail');
+
+  ctx2d.fillStyle = '#101113';
+  ctx2d.fillRect(0, 0, size, size);
+
+  const video = document.createElement('video');
+  video.muted = true;
+  video.preload = 'metadata';
+  video.playsInline = true;
+  // Required so drawing the frame doesn't taint the canvas (toBlob would throw).
+  video.crossOrigin = 'anonymous';
+
+  let durationSec = 0;
+  let width = 0;
+  let height = 0;
+
+  try {
+    const loaded = waitForVideoEvent(video, 'loadedmetadata', 'load');
+    video.src = req.mediaUrl;
+    video.load();
+    await loaded;
+
+    width = video.videoWidth;
+    height = video.videoHeight;
+    durationSec = Number.isFinite(video.duration) ? video.duration : 0;
+    if (width === 0 || height === 0) throw new Error('no video track (or unsupported codec)');
+
+    const target = durationSec > 0 ? Math.max(0.1, durationSec * VIDEO_SEEK_FRACTION) : 0.1;
+    if (target > 0.05) {
+      const seeked = waitForVideoEvent(video, 'seeked', 'seek');
+      video.currentTime = target;
+      await seeked;
+    }
+
+    const scale = Math.min(size / width, size / height);
+    const drawW = width * scale;
+    const drawH = height * scale;
+    ctx2d.drawImage(video, (size - drawW) / 2, (size - drawH) / 2, drawW, drawH);
+  } catch (err) {
+    log.error('video frame extraction failed, falling back to placeholder tile', {
+      absPath: req.absPath,
+      err: (err as Error).message ?? String(err)
+    });
+    width = 0;
+    height = 0;
+    ctx2d.fillStyle = '#101113';
+    ctx2d.fillRect(0, 0, size, size);
+    ctx2d.fillStyle = '#818cf8';
+    ctx2d.font = 'bold 16px sans-serif';
+    ctx2d.textAlign = 'center';
+    ctx2d.fillText(`.${req.ext.toUpperCase()}`, size / 2, size / 2 - 8);
+    ctx2d.fillStyle = '#6b7280';
+    ctx2d.font = '12px sans-serif';
+    ctx2d.fillText('Video File', size / 2, size / 2 + 14);
+  } finally {
+    // Release the file handle held by the protocol stream.
+    video.removeAttribute('src');
+    video.load();
+  }
+
+  const outBlob = await new Promise<Blob | null>((resolve) =>
+    canvas.toBlob(resolve, 'image/png')
+  );
+  if (!outBlob) throw new Error('canvas.toBlob returned null for video thumbnail');
+  const png = new Uint8Array(await outBlob.arrayBuffer());
+
+  const metadata: ExtractedMetadata = {
+    vertexCount: 0,
+    triangleCount: 0,
+    meshCount: 0,
+    materialCount: 0,
+    hasTextures: false,
+    boundingBox: { min: [0, 0, 0], max: [0, 0, 0], size: [0, 0, 0] },
+    thumbSource: 'video',
+    materialNames: [],
+    video: width > 0 ? { durationSec, width, height } : undefined
+  };
+
+  return { png, metadata };
+}
 /** Document/Text preview generator: fills thumbnail box with crisp, readable text preview */
 async function renderDocumentThumbnail(req: ThumbRenderRequest): Promise<RenderOutput> {
   const size = THUMB_WORKER_RENDER_SIZE;
@@ -355,6 +477,10 @@ async function renderToPng(req: ThumbRenderRequest): Promise<RenderOutput> {
   if (isAudioExtension(ext)) {
     return renderAudioThumbnail(req);
   }
+
+  if (isVideoExtension(ext)) {
+  return renderVideoThumbnail(req);
+}
 
   if (DOCUMENT_EXTENSIONS.has(ext)) {
     return renderDocumentThumbnail(req);

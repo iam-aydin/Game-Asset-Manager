@@ -7,6 +7,7 @@ import { thumbAbsPath } from '@main/thumb-pool/storage';
 import { isCoverCapableExt, readAudioCover, readAudioCoverThumb } from '@main/audio-cover';
 import type { AudioCover } from '@main/audio-cover';
 import { scopedLogger } from '@main/logger';
+import { isVideoPath, serveRangedFile } from './serve-file';
 
 const log = scopedLogger('protocol');
 
@@ -31,6 +32,7 @@ export function registerAssetSchemes(): void {
         secure: true,
         supportFetchAPI: true,
         stream: true,
+        corsEnabled: true,
         bypassCSP: false
       }
     },
@@ -109,6 +111,15 @@ function coverResponse(cover: AudioCover): Response {
   });
 }
 
+/**
+ * Video files go through the Range-aware server so <video> can seek; every
+ * other file type keeps the original net.fetch(file://) behaviour.
+ */
+function serveAssetFile(req: Request, abs: string): Promise<Response> | Response {
+  if (isVideoPath(abs)) return serveRangedFile(req, abs);
+  return net.fetch(pathToFileURL(abs).toString());
+}
+
 export function registerAssetProtocols(): void {
   protocol.handle(SCHEME_THUMB, async (req) => {
     const parsed = parse(req.url);
@@ -180,7 +191,7 @@ export function registerAssetProtocols(): void {
         });
         return notFound('File missing on disk');
       }
-      return net.fetch(pathToFileURL(abs).toString());
+      return serveAssetFile(req, abs);
     }
 
     const parsed = parse(req.url);
@@ -201,7 +212,7 @@ export function registerAssetProtocols(): void {
       });
       return notFound('File missing on disk');
     }
-    return net.fetch(pathToFileURL(abs).toString());
+    return serveAssetFile(req, abs);
   });
 
   // Sanity: registering the protocol must happen after app is ready.

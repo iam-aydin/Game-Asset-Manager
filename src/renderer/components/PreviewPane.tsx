@@ -2,6 +2,7 @@ import { useCallback, useRef, useState, type ReactNode } from 'react';
 import { AudioPlayer } from './AudioPlayer';
 import { AudioVisualizer } from './AudioVisualizer';
 import { TextPreview } from './TextPreview';
+import { VideoPlayer } from './VideoPlayer';
 import {
   ActionIcon,
   Alert,
@@ -26,7 +27,7 @@ import {
 import { notifications } from '@mantine/notifications';
 import type { FileRecord } from '@shared/types';
 import type { LightingStyle } from '@shared/lighting-types';
-import { isAudioExtension, isImageExtension } from '@shared/formats';
+import { isAudioExtension, isImageExtension, isVideoExtension } from '@shared/formats';
 import { LIGHTING_PRESETS } from '../three/lighting-presets';
 import {
   UP_AXIS_OPTIONS,
@@ -105,7 +106,8 @@ export function PreviewPane({
   const isImage = isImageExtension(file.ext);
   const isAudio = isAudioExtension(file.ext);
   const isText = isTextExtension(file.ext);
-  const is2DOrDoc = isImage || isAudio || isText;
+  const isVideo = isVideoExtension(file.ext);
+  const is2DOrDoc = isImage || isAudio || isText || isVideo;
 
   const yaw = getYaw(file.orientation);
 
@@ -147,7 +149,15 @@ export function PreviewPane({
         ref={attachWrapperRef}
         style={{ flex: 1, minHeight: 0, position: 'relative', background: 'var(--wh3d-viewport-bg)' }}
       >
-        {isAudio ? (
+        {isVideo ? (
+          <VideoPlayer
+            key={file.id}
+            libraryId={libraryId}
+            fileId={file.id}
+            filename={file.filename}
+            ext={file.ext}
+          />
+        ) : isAudio ? (
           <AudioPreview libraryId={libraryId} file={file} activeAudio={activeAudio} />
         ) : isText ? (
           <TextPreview libraryId={libraryId} file={file} />
@@ -161,7 +171,7 @@ export function PreviewPane({
           />
         )}
 
-        {/* 3D Crop Overlay skipped for 2D/audio/text assets */}
+        {/* 3D Crop Overlay skipped for 2D/audio/text/video assets */}
         {!is2DOrDoc && <CropOverlay size={cropSize} />}
 
         {onMaximize && !isAudio && (

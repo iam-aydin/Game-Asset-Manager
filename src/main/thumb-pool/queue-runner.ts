@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { listOpenLibraries, type OpenLibrary } from '@main/libraries/manager';
 import { RENDERER_VERSION } from '@main/db/repos/thumbnails';
+import { isVideoExtension } from '@shared/formats';
 import { PRIORITY_BACKGROUND, PRIORITY_USER, PRIORITY_VISIBLE } from '@main/db/repos/thumb-jobs';
 import type { ExtractedMetadata } from '@shared/types';
 import { DEFAULT_LIGHTING_STYLE, type LightingStyle } from '@shared/lighting-types';
@@ -10,6 +11,7 @@ import {
 } from '@shared/transient-errors';
 import { thumbAbsPath, thumbRelPath, writeThumbnailFile } from './storage';
 import { thumbPool } from './pool';
+import { renderVideoThumbnailFfmpeg } from './ffmpeg-thumb';
 import { scopedLogger, time } from '@main/logger';
 
 const log = scopedLogger('queue-runner');
@@ -22,6 +24,15 @@ const SLOW_RENDER_MS = 5_000;
 const RECONCILE_BATCH = 1000;
 const STALE_CLAIM_MS = 5 * 60_000;
 const MAX_ATTEMPTS = 3;
+
+let chromiumVideoChain: Promise<void> = Promise.resolve();
+function runExclusiveChromiumVideo<T>(fn: () => Promise<T>): Promise<T> {
+  const run = chromiumVideoChain.then(fn);
+  chromiumVideoChain = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+
 
 export interface QueueStats {
   libraryId: string;
@@ -43,7 +54,10 @@ export class ThumbQueueRunner extends EventEmitter {
    */
   private lightingStyle: LightingStyle = DEFAULT_LIGHTING_STYLE;
 
-  constructor(maxConcurrent = 2) {
+  // 4 in-flight jobs: models/images/audio/documents still go through the
+  // 2-window render pool (extra jobs wait in its queue), while videos run in
+  // ffmpeg processes capped separately inside ffmpeg-thumb.ts.
+  constructor(maxConcurrent = 4) {
     super();
     this.maxConcurrent = maxConcurrent;
   }
@@ -176,16 +190,34 @@ export class ThumbQueueRunner extends EventEmitter {
     let metadata: ExtractedMetadata | null = null;
     let finalErr: string | null = null;
     try {
+      const isVideo = isVideoExtension(file.ext);
       const out = await time(
         log,
         'thumb-render',
-        () =>
-          thumbPool.render({
-            absPath,
-            ext: file.ext,
-            lightingStyle: this.lightingStyle,
-            orientation: file.orientation
-          }),
+        async () => {
+          // Videos: ffmpeg first (fast, out-of-process, handles AVI/HEVC).
+          // If it can't produce a frame, fall back to the Chromium worker,
+          // which also writes the placeholder tile for undecodable files.
+          if (isVideo) {
+            try {
+              return await renderVideoThumbnailFfmpeg(absPath);
+            } catch (err) {
+              log.warn('ffmpeg thumbnail failed, falling back to Chromium worker', {
+                relPath: file.relPath,
+                err: (err as Error).message ?? String(err)
+              });
+            }
+          }
+const viaPool = () =>
+  thumbPool.render({
+    absPath,
+    ext: file.ext,
+    lightingStyle: this.lightingStyle,
+    orientation: file.orientation,
+    mediaUrl: isVideo ? `wh3d-file://${lib.entry.id}/${file.id}` : undefined
+  });
+return isVideo ? runExclusiveChromiumVideo(viaPool) : viaPool();
+        },
         { warnAboveMs: SLOW_RENDER_MS, meta: { libraryId: lib.entry.id, fileId, ext: file.ext } }
       );
       png = out.png;

@@ -424,6 +424,17 @@ export interface AudioMetadata {
   channels: number;
 }
 
+   export interface VideoMetadata {
+     durationSec: number;
+     width: number;
+     height: number;
+     fps?: number;
+     videoCodec?: string;
+     audioCodec?: string;
+     bitrateKbps?: number;
+   }
+
+
 export interface ExtractedMetadata {
   vertexCount: number;
   triangleCount: number;
@@ -436,7 +447,9 @@ export interface ExtractedMetadata {
     size: [number, number, number];
   };
   /** Source of the rendered thumbnail. */
-  thumbSource: 'gl' | '3mf-embedded' | 'image' | 'audio';
+thumbSource: 'gl' | 'model' | '3mf-embedded' | 'image' | 'audio' | 'video' | 'document';
+
+  video?: VideoMetadata;
   /** Distinct material names encountered (max 32). */
   materialNames: string[];
   /** Set when mesh validation ran during render. Absent on older rows. */

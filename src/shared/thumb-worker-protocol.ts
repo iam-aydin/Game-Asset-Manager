@@ -24,6 +24,7 @@ export interface ThumbRenderRequest {
   lightingStyle?: LightingStyle;
   /** Optional orientation override; falls back to format default if omitted. */
   orientation?: FileOrientation;
+  mediaUrl?: string;
 }
 
 export type ThumbRenderResult =

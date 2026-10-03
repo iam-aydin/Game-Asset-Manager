@@ -624,6 +624,7 @@ function Field({
     red: '#ef4444',
   };
 
+
   const topColor = statusColor ? COLOR_MAP[statusColor] : null;
 
   return (

@@ -180,7 +180,8 @@ export function registerFilesIpc(): void {
       // walkLibrary always walks the full mount path, with no subtree param.
       // Falling back to a full rescan here is correct, just broader than
       // "just this folder" until the scanner supports a scoped walk.
-      return scanner.rescan(libraryId);
+      const r = await scanner.rescan(libraryId);
+      return r.ok ? { ok: true } : { ok: false, error: r.error ?? 'Rescan failed' };
     }
   );
 

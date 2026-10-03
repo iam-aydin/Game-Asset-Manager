@@ -21,6 +21,12 @@ export const AUDIO_EXTENSIONS = [
   'flac'
 ] as const;
 
+export const VIDEO_EXTENSIONS = [
+  'mp4',
+  'mov',
+  'avi'
+] as const;
+
 export const TEXT_EXTENSIONS = [
   'txt',
   'md'
@@ -30,12 +36,14 @@ export const SUPPORTED_EXTENSIONS = [
   ...MODEL_EXTENSIONS,
   ...IMAGE_EXTENSIONS,
   ...AUDIO_EXTENSIONS,
+  ...VIDEO_EXTENSIONS,
   ...TEXT_EXTENSIONS
 ] as const;
 
 export type ModelExtension = (typeof MODEL_EXTENSIONS)[number];
 export type ImageExtension = (typeof IMAGE_EXTENSIONS)[number];
 export type AudioExtension = (typeof AUDIO_EXTENSIONS)[number];
+export type VideoExtension = (typeof VIDEO_EXTENSIONS)[number];
 export type TextExtension = (typeof TEXT_EXTENSIONS)[number];
 export type SupportedExtension = (typeof SUPPORTED_EXTENSIONS)[number];
 
@@ -43,6 +51,7 @@ const EXT_SET = new Set<string>(SUPPORTED_EXTENSIONS);
 const MODEL_SET = new Set<string>(MODEL_EXTENSIONS);
 const IMAGE_SET = new Set<string>(IMAGE_EXTENSIONS);
 const AUDIO_SET = new Set<string>(AUDIO_EXTENSIONS);
+const VIDEO_SET = new Set<string>(VIDEO_EXTENSIONS);
 const TEXT_SET = new Set<string>(TEXT_EXTENSIONS);
 
 export function isSupportedExtension(ext: string): ext is SupportedExtension {
@@ -59,6 +68,10 @@ export function isImageExtension(ext: string): ext is ImageExtension {
 
 export function isAudioExtension(ext: string): ext is AudioExtension {
   return AUDIO_SET.has(ext.toLowerCase());
+}
+
+export function isVideoExtension(ext: string): ext is VideoExtension {
+  return VIDEO_SET.has(ext.toLowerCase());
 }
 
 export function isTextExtension(ext: string): ext is TextExtension {
