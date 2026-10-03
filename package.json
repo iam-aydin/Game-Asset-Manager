@@ -27,7 +27,7 @@
     "@mantine/hooks": "^7.13.0",
     "@mantine/notifications": "^7.13.0",
     "@tabler/icons-react": "^3.19.0",
-    "@tanstack/react-virtual": "^3.10.8",
+    "@tanstack/react-virtual": "^3.14.13",
     "@types/archiver": "^7.0.0",
     "archiver": "^7.0.1",
     "better-sqlite3": "^11.3.0",
