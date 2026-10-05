@@ -1,12 +1,25 @@
-import { useState, useEffect } from 'react';
-import { Modal, Stack, Text, Center, Box, Group, ActionIcon, Button } from '@mantine/core';
+import { useState, useEffect, type ReactNode } from 'react';
+import {
+  Modal,
+  Stack,
+  Text,
+  Center,
+  Box,
+  Group,
+  ActionIcon,
+  Button,
+  SegmentedControl
+} from '@mantine/core';
 import type { FileRecord } from '@shared/types';
 import type { LightingStyle } from '@shared/lighting-types';
+import { DEFAULT_HDRI, type HdriId } from '@shared/hdri';
 import { isAudioExtension, isImageExtension } from '@shared/formats';
 import { ModelViewer } from '../three/ModelViewer';
+import { LIGHTING_PRESETS } from '../three/lighting-presets';
+import { HDRI_PRESETS, getHdriPreset } from '../three/hdri-presets';
 import { TextPreview } from './TextPreview';
 import { AudioPlayer } from './AudioPlayer';
-import { usePreferences } from '../util/use-preferences';
+import { usePreferences, savePreferences } from '../util/use-preferences';
 import { DEFAULT_RENDER_QUALITY } from '@shared/render-quality';
 
 interface Props {
@@ -15,6 +28,12 @@ interface Props {
   libraryId: string | null;
   file: FileRecord | null;
   lightingStyle: LightingStyle;
+  /**
+   * Optional. When given, a view-mode change made in fullscreen is also
+   * reported to the parent so the preview pane stays in sync. When omitted,
+   * the modal keeps its own copy of the mode while it is open.
+   */
+  onLightingStyleChange?: (style: LightingStyle) => void;
 }
 
 const isTextExtension = (ext: string): boolean =>
@@ -202,6 +221,32 @@ function ImageViewer({ src, alt, thumbUrl }: { src: string; alt: string; thumbUr
   );
 }
 
+function ControlBlock({
+  label,
+  hint,
+  children
+}: {
+  label: string;
+  hint: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <Stack gap={2} style={{ minWidth: 0 }}>
+      <Group gap={6} wrap="nowrap">
+        <Text size="xs" tt="uppercase" c="dimmed" fw={700}>
+          {label}
+        </Text>
+        {hint != null && (
+          <Text size="xs" c="dimmed">
+            {hint}
+          </Text>
+        )}
+      </Group>
+      {children}
+    </Stack>
+  );
+}
+
 /**
  * Spacebar-launched fullscreen viewer with balanced header margins.
  */
@@ -210,10 +255,37 @@ export function FullscreenPreviewModal({
   onClose,
   libraryId,
   file,
-  lightingStyle
+  lightingStyle,
+  onLightingStyleChange
 }: Props) {
   const { prefs } = usePreferences();
   const renderQuality = prefs?.renderQuality ?? DEFAULT_RENDER_QUALITY;
+  const hdri: HdriId = prefs?.hdri ?? DEFAULT_HDRI;
+  const showGrid = prefs?.showGrid ?? false;
+
+  // Local copy of the view mode so the picker works even when the parent
+  // doesn't pass `onLightingStyleChange`. Re-syncs from the parent whenever
+  // the modal opens or the parent's value changes.
+  const [viewMode, setViewMode] = useState<LightingStyle>(lightingStyle);
+  useEffect(() => {
+    setViewMode(lightingStyle);
+  }, [lightingStyle, opened]);
+
+  const handleViewModeChange = (next: LightingStyle) => {
+    setViewMode(next);
+    onLightingStyleChange?.(next);
+  };
+
+  // HDRI and grid are global preferences, shared with the preview pane.
+  // Wait for the prefs to load so we never overwrite the file with an empty one.
+  const handleHdriChange = (next: HdriId) => {
+    if (!prefs) return;
+    void savePreferences({ ...prefs, hdri: next });
+  };
+  const handleGridChange = (on: boolean) => {
+    if (!prefs) return;
+    void savePreferences({ ...prefs, showGrid: on });
+  };
 
 const modalStyles = {
   header: {
@@ -263,6 +335,7 @@ const modalStyles = {
   const isText = isTextExtension(file.ext);
   const isAudio = isAudioExtension(file.ext);
   const isImage = isImageExtension(file.ext);
+  const isModel = !isText && !isAudio && !isImage;
 
   const encodedLibId = encodeURIComponent(libraryId);
   const fileUrl = `wh3d-file://${encodedLibId}/${file.id}?t=${file.mtimeMs}`;
@@ -277,29 +350,88 @@ const modalStyles = {
       title={file.filename}
       styles={modalStyles}
     >
-      <div style={{ height: '100%', width: '100%', position: 'relative', overflow: 'hidden' }}>
-        {isText ? (
-          <TextPreview libraryId={libraryId} file={file} />
-        ) : isAudio ? (
-          <Center h="100%" p="xl">
-            <Box style={{ width: '100%', maxWidth: 680 }}>
-              <AudioPlayer
-                libraryId={libraryId}
-                fileId={file.id}
-                filename={file.filename}
-                thumbSrc={file.hasThumb ? thumbUrl : null}
-              />
-            </Box>
-          </Center>
-        ) : isImage ? (
-          <ImageViewer src={fileUrl} alt={file.filename} thumbUrl={thumbUrl} />
-        ) : (
-          <ModelViewer
-            libraryId={libraryId}
-            file={file}
-            lightingStyle={lightingStyle}
-            renderQuality={renderQuality}
-          />
+      <div
+        style={{
+          height: '100%',
+          width: '100%',
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden'
+        }}
+      >
+        <div style={{ flex: 1, minHeight: 0, position: 'relative', overflow: 'hidden' }}>
+          {isText ? (
+            <TextPreview libraryId={libraryId} file={file} />
+          ) : isAudio ? (
+            <Center h="100%" p="xl">
+              <Box style={{ width: '100%', maxWidth: 680 }}>
+                <AudioPlayer
+                  libraryId={libraryId}
+                  fileId={file.id}
+                  filename={file.filename}
+                  thumbSrc={file.hasThumb ? thumbUrl : null}
+                />
+              </Box>
+            </Center>
+          ) : isImage ? (
+            <ImageViewer src={fileUrl} alt={file.filename} thumbUrl={thumbUrl} />
+          ) : (
+            <ModelViewer
+              libraryId={libraryId}
+              file={file}
+              lightingStyle={viewMode}
+              hdri={hdri}
+              showGrid={showGrid}
+              renderQuality={renderQuality}
+            />
+          )}
+        </div>
+
+        {/* Same view / environment / grid controls as the preview pane */}
+        {isModel && (
+          <div
+            style={{
+              flexShrink: 0,
+              padding: '8px 12px',
+              borderTop: '1px solid var(--mantine-color-dark-4)',
+              background: 'var(--mantine-color-dark-7)'
+            }}
+          >
+            <Group gap="md" wrap="nowrap">
+              <ControlBlock
+                label="View"
+                hint={LIGHTING_PRESETS.find((p) => p.id === viewMode)?.label}
+              >
+                <SegmentedControl
+                  size="xs"
+                  value={viewMode}
+                  onChange={(v) => handleViewModeChange(v as LightingStyle)}
+                  data={LIGHTING_PRESETS.map((p) => ({ value: p.id, label: p.label }))}
+                />
+              </ControlBlock>
+
+              <ControlBlock label="Environment" hint={getHdriPreset(hdri).label}>
+                <SegmentedControl
+                  size="xs"
+                  value={hdri}
+                  onChange={(v) => handleHdriChange(v as HdriId)}
+                  data={HDRI_PRESETS.map((p) => ({ value: p.id, label: p.label }))}
+                />
+              </ControlBlock>
+
+              <ControlBlock label="Grid" hint={showGrid ? 'On' : 'Off'}>
+                <SegmentedControl
+                  size="xs"
+                  value={showGrid ? 'on' : 'off'}
+                  onChange={(v) => handleGridChange(v === 'on')}
+                  data={[
+                    { value: 'off', label: 'Off' },
+                    { value: 'on', label: 'On' }
+                  ]}
+                />
+              </ControlBlock>
+            </Group>
+          </div>
         )}
       </div>
     </Modal>

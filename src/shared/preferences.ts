@@ -79,6 +79,11 @@ export interface PreferencesFile {
   /** Verbosity for the main-process file log. Default 'info'. Changes apply
    *  immediately without a restart. */
   logLevel?: LogLevel;
+  /** HDRI environment for the 3D viewer (None / Day / Sunset / Night).
+   *  Global, not per file. Default 'none'. */
+  hdri?: import('./hdri').HdriId;
+  /** Show the reference grid (X/Z floor at the origin) in the 3D viewer. Default off. */
+  showGrid?: boolean;
 }
 
 export function emptyPreferences(): PreferencesFile {

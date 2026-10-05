@@ -1,11 +1,17 @@
 /**
- * Photography-style lighting presets — pure data.
+ * View-mode presets — pure data.
  *
- * Each preset is a self-contained const so you can tweak lights, colors,
- * intensities, or exposure in isolation without touching the LightingRig
- * applier. Adding a new preset means:
+ * All four modes deliberately share the SAME light rig (the former "Studio"
+ * setup). What makes Unlit / Wireframe / Normals look different is the
+ * material swap done by `view-modes.ts` in ModelViewer — those materials
+ * ignore lights anyway. Sharing one rig means the thumbnail worker, which
+ * only applies lights and never swaps materials, always renders a normal lit
+ * thumbnail no matter which mode id it receives.
+ *
+ * Adding a mode means:
  *   1. Add an ID to `LIGHTING_STYLE_IDS` in `src/shared/lighting-types.ts`
- *   2. Add a new const here and append to `LIGHTING_PRESETS` + `PRESETS_BY_ID`
+ *   2. Add a const here and append to `LIGHTING_PRESETS` + `PRESETS_BY_ID`
+ *   3. Handle the id in `applyViewMode` in `view-modes.ts`
  *
  * Hex colors are RGB integers (e.g. 0xfff0e0 = warm white). Intensities are
  * physically-based; values look high because they're combined with ACES
@@ -50,12 +56,12 @@ export interface LightingPresetDefinition {
   directionals?: readonly DirectionalLightDef[];
 }
 
-// ─── Studio ──────────────────────────────────────────────────────────────
+// ─── Lit (the shared rig) ────────────────────────────────────────────────
 
-export const STUDIO_PRESET: LightingPresetDefinition = {
-  id: 'studio',
-  label: 'Studio',
-  description: 'Balanced three-point with rim — best general-purpose look.',
+export const LIT_PRESET: LightingPresetDefinition = {
+  id: 'lit',
+  label: 'Lit',
+  description: 'Full lighting: warm key, cool fill and rim light with soft reflections.',
   exposure: 0.85,
   environmentIntensity: 0.4,
   ambient: { color: 0xffffff, intensity: 0.2 },
@@ -70,111 +76,48 @@ export const STUDIO_PRESET: LightingPresetDefinition = {
   ]
 };
 
+// ─── Unlit ───────────────────────────────────────────────────────────────
+
+export const UNLIT_PRESET: LightingPresetDefinition = {
+  ...LIT_PRESET,
+  id: 'unlit',
+  label: 'Unlit',
+  description: 'Flat base color and textures with no lighting.'
+};
+
+// ─── Wireframe ───────────────────────────────────────────────────────────
+
+export const WIREFRAME_PRESET: LightingPresetDefinition = {
+  ...LIT_PRESET,
+  id: 'wireframe',
+  label: 'Wireframe',
+  description: 'Mesh edges only. Useful for checking topology and triangle density.'
+};
+
 // ─── Normals ─────────────────────────────────────────────────────────────
 
-/**
- * Faux normal-map visualization: six axis-aligned colored directional lights
- * paint each face of the model with the canonical normal-map colors so the
- * surface orientation reads at a glance.
- *
- *   +X → red    -X → cyan       (R channel encodes X)
- *   +Y → green  -Y → magenta    (G channel encodes Y)
- *   +Z → blue   -Z → yellow     (B channel encodes Z)
- *
- * It's not a true per-pixel tangent-space normal map (that needs a shader),
- * but the cardinal-direction colors are unmistakable for spotting flipped
- * faces, hidden seams, and topology issues.
- */
 export const NORMALS_PRESET: LightingPresetDefinition = {
+  ...LIT_PRESET,
   id: 'normals',
   label: 'Normals',
-  description: 'Color-codes surface direction (axis-aligned RGB+CMY lights) — useful for spotting flipped faces and topology issues.',
-  // Lower exposure than other presets so the saturated colors don't clip.
-  exposure: 0.8,
-  // No IBL: env-map adds neutral fill that would wash out the color cues.
-  environmentIntensity: 0,
-  // Tiny pure-black ambient (no-op, kept as a deliberate "no fill" marker).
-  ambient: { color: 0x000000, intensity: 0 },
-  directionals: [
-    { color: 0xff0000, intensity: 1.6, position: [1, 0, 0] }, // +X red
-    { color: 0x00ffff, intensity: 1.6, position: [-1, 0, 0] }, // -X cyan
-    { color: 0x00ff00, intensity: 1.6, position: [0, 1, 0] }, // +Y green
-    { color: 0xff00ff, intensity: 1.6, position: [0, -1, 0] }, // -Y magenta
-    { color: 0x0000ff, intensity: 1.6, position: [0, 0, 1] }, // +Z blue
-    { color: 0xffff00, intensity: 1.6, position: [0, 0, -1] } // -Z yellow
-  ]
-};
-
-// ─── Dramatic ────────────────────────────────────────────────────────────
-
-export const DRAMATIC_PRESET: LightingPresetDefinition = {
-  id: 'dramatic',
-  label: 'Dramatic',
-  description: 'Single strong key with low ambient — deep shadows and mood.',
-  exposure: 0.8,
-  environmentIntensity: 0.12,
-  ambient: { color: 0xffffff, intensity: 0.07 },
-  directionals: [
-    // Single strong warm key from above-right — steep enough that shadows
-    // fall down across the model rather than slicing it horizontally.
-    { color: 0xffe9c8, intensity: 5.0, position: [2.5, 5, 2] },
-    // Cool opposite fill — a touch stronger than before so the shadow side
-    // keeps just enough form to read instead of going near-black.
-    { color: 0x6080a0, intensity: 0.6, position: [-2, 0.5, -0.5] }
-  ]
-};
-
-// ─── Product ─────────────────────────────────────────────────────────────
-
-export const PRODUCT_PRESET: LightingPresetDefinition = {
-  id: 'product',
-  label: 'Product',
-  description: 'Clean low-contrast all-around fill for catalog-style reveal.',
-  exposure: 0.9,
-  environmentIntensity: 0.7,
-  // Higher ambient + multiple soft fills = catalog look with no harsh shadows.
-  ambient: { color: 0xffffff, intensity: 0.4 },
-  directionals: [
-    { color: 0xffffff, intensity: 1.85, position: [0, 4, 2] }, // top-front
-    { color: 0xffffff, intensity: 1.2, position: [3, 1, 1] }, // right
-    { color: 0xffffff, intensity: 1.2, position: [-3, 1, 1] }, // left
-    { color: 0xffffff, intensity: 1.35, position: [0, 2, -3] } // back rim
-  ]
-};
-
-// ─── Outdoor ─────────────────────────────────────────────────────────────
-
-export const OUTDOOR_PRESET: LightingPresetDefinition = {
-  id: 'outdoor',
-  label: 'Outdoor',
-  description: 'Warm low-angle key with cool sky — golden-hour feel.',
-  exposure: 0.9,
-  environmentIntensity: 0.55,
-  // Warm sun low on the right; cool sky fill from above.
-  ambient: { color: 0x6088b8, intensity: 0.2 },
-  directionals: [
-    { color: 0xffc585, intensity: 3.8, position: [4, 1.5, 2] }, // sun
-    { color: 0xa8c8ff, intensity: 1.0, position: [-2, 4, -1] }, // sky
-    { color: 0xe8f0ff, intensity: 1.35, position: [-1, 1, -3] } // backlight
-  ]
+  description: 'World-space surface normals as colors. Useful for spotting flipped faces.'
 };
 
 // ─── registry ────────────────────────────────────────────────────────────
 
+/** Order here is the order of the segmented control in the UI. */
 export const LIGHTING_PRESETS: readonly LightingPresetDefinition[] = [
-  STUDIO_PRESET,
-  NORMALS_PRESET,
-  DRAMATIC_PRESET,
-  PRODUCT_PRESET,
-  OUTDOOR_PRESET
+  UNLIT_PRESET,
+  WIREFRAME_PRESET,
+  LIT_PRESET,
+  NORMALS_PRESET
 ];
 
 const PRESETS_BY_ID: Record<LightingStyle, LightingPresetDefinition> = {
-  studio: STUDIO_PRESET,
-  normals: NORMALS_PRESET,
-  dramatic: DRAMATIC_PRESET,
-  product: PRODUCT_PRESET,
-  outdoor: OUTDOOR_PRESET
+  unlit: UNLIT_PRESET,
+  wireframe: WIREFRAME_PRESET,
+  lit: LIT_PRESET,
+  normals: NORMALS_PRESET
 };
 
 export function getLightingPreset(id: LightingStyle): LightingPresetDefinition {

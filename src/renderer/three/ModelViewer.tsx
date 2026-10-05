@@ -5,7 +5,13 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { disposeObject, loadModel, ThreeMFEmbeddedOnlyError } from './loaders';
 import { frameObject, objectCenter, objectRadius } from './framing';
 import { DEFAULT_LIGHTING_STYLE, LightingRig, type LightingStyle } from './lighting';
+import { applyViewMode, releaseViewMode } from './view-modes'; // VIEW MODE (1/4): new import
 import { applyOrientation } from './orientation';
+import { DEFAULT_HDRI, type HdriId } from '@shared/hdri'; // HDRI (1/3)
+import { getHdriPreset } from './hdri-presets';
+import { loadHdri } from './hdri-loader';
+import { createViewerGrid, type ViewerGrid } from './grid'; // GRID (1/4)
+import { AxisGizmo } from './axis-gizmo'; // GIZMO (1/3)
 import type { CameraState, FileRecord } from '@shared/types';
 import { isImageExtension } from '@shared/formats';
 import {
@@ -46,11 +52,15 @@ const MODEL_MAX_DISTANCE_FACTOR = 50;
 // How close (as a fraction of radius) keyboard zoom-in may get to a surface
 // before it stops instead of tunnelling through it.
 const MODEL_SURFACE_MARGIN_FACTOR = 0.01;
+// How long the camera swing takes after clicking an axis on the gizmo.
+const GIZMO_SNAP_MS = 280;
 
 interface Props {
   libraryId: string | null;
   file: FileRecord;
   lightingStyle?: LightingStyle;
+  hdri?: HdriId;
+  showGrid?: boolean;
   renderQuality?: RenderQuality;
 }
 
@@ -118,6 +128,8 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     libraryId: _libraryId,
     file,
     lightingStyle = DEFAULT_LIGHTING_STYLE,
+    hdri = DEFAULT_HDRI,
+    showGrid = false,
     renderQuality = DEFAULT_RENDER_QUALITY
   },
   ref
@@ -134,6 +146,38 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
   const [imagePanY, setImagePanY] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const imageWrapRef = useRef<HTMLDivElement>(null);
+
+  // VIEW MODE (2/4): always-current mode for the async model loader, so a model
+  // that finishes loading after the user switched modes still gets the right one.
+  const viewModeRef = useRef<LightingStyle>(lightingStyle);
+  viewModeRef.current = lightingStyle;
+
+  // GRID (2/4): reference grid at the world origin. The ref mirrors the prop so
+  // the async model loader sees the current value.
+  const showGridRef = useRef(showGrid);
+  showGridRef.current = showGrid;
+  const gridRef = useRef<ViewerGrid | null>(null);
+  const [gridStep, setGridStep] = useState<number | null>(null);
+
+  // Removes the old grid and, if the grid is on and a model is loaded, builds a
+  // new one sized to that model. Cheap; call whenever either input changes.
+  const syncGrid = () => {
+    const ctx = ctxRef.current;
+    if (!ctx) return;
+    if (gridRef.current) {
+      ctx.scene.remove(gridRef.current.group);
+      gridRef.current.dispose();
+      gridRef.current = null;
+    }
+    if (!showGridRef.current || !ctx.currentObject) {
+      setGridStep(null);
+      return;
+    }
+    const grid = createViewerGrid(modelRadiusRef.current);
+    ctx.scene.add(grid.group);
+    gridRef.current = grid;
+    setGridStep(grid.step);
+  };
 
   // Store original/default camera state for 3D reset
   const defaultCameraStateRef = useRef<CameraState | null>(null);
@@ -197,7 +241,12 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
       async captureCurrentFrame() {
         const ctx = ctxRef.current;
         if (!ctx || !ctx.currentObject) return null;
+        // GRID (3/4): never bake the grid into a thumbnail. The drawing buffer
+        // is preserved, so it is safe to show the grid again right after.
+        const grid = gridRef.current;
+        if (grid) grid.group.visible = false;
         ctx.renderer.render(ctx.scene, ctx.camera);
+        if (grid) grid.group.visible = true;
 
         const src = ctx.renderer.domElement;
         const srcW = src.width;
@@ -301,9 +350,94 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     };
     ctxRef.current = ctx;
 
+    // GIZMO (2/3): XYZ indicator in the bottom-right corner, only while a model is shown.
+    const gizmo = new AxisGizmo();
+
+    // GIZMO click: smoothly swing the camera to look along the clicked axis,
+    // keeping the current target and distance.
+    let snapRaf: number | null = null;
+    const cancelSnap = () => {
+      if (snapRaf !== null) {
+        cancelAnimationFrame(snapRaf);
+        snapRaf = null;
+      }
+    };
+    const snapToDirection = (dir: THREE.Vector3) => {
+      cancelSnap();
+      const target = controls.target.clone();
+      const offset = camera.position.clone().sub(target);
+      const dist = offset.length();
+      if (dist === 0) return;
+
+      // Animate in spherical coordinates (azimuth + polar angle) instead of
+      // slerping the direction. At the poles (top / bottom view) the azimuth
+      // is undefined, so a straight slerp ends with a sudden 90-degree flip
+      // of the picture when the last frame snaps the azimuth to 0. Here the
+      // azimuth turns smoothly to its final value, and top / bottom views
+      // always end in the same canonical orientation.
+      const from = new THREE.Spherical().setFromVector3(offset);
+      const to = new THREE.Spherical().setFromVector3(dir.clone().normalize());
+      const POLE_EPS = 1e-4;
+      to.phi = Math.min(Math.PI - POLE_EPS, Math.max(POLE_EPS, to.phi));
+      // Shortest way around for the azimuth.
+      let dTheta = to.theta - from.theta;
+      dTheta = THREE.MathUtils.euclideanModulo(dTheta + Math.PI, Math.PI * 2) - Math.PI;
+      const dPhi = to.phi - from.phi;
+
+      const cur = new THREE.Spherical(dist, from.phi, from.theta);
+      const t0 = performance.now();
+      const step = (now: number) => {
+        const t = Math.min(1, (now - t0) / GIZMO_SNAP_MS);
+        const eased = 1 - Math.pow(1 - t, 3);
+        cur.phi = from.phi + dPhi * eased;
+        cur.theta = from.theta + dTheta * eased;
+        camera.position.copy(target).add(offset.setFromSpherical(cur));
+        controls.update();
+        snapRaf = t < 1 ? requestAnimationFrame(step) : null;
+      };
+      snapRaf = requestAnimationFrame(step);
+    };
+    // The user grabbing the view always wins over a running swing.
+    controls.addEventListener('start', cancelSnap);
+
+    const canvasEl = renderer.domElement;
+    let downX = 0;
+    let downY = 0;
+    const localPoint = (e: MouseEvent) => {
+      const r = canvasEl.getBoundingClientRect();
+      return { x: e.clientX - r.left, y: r.height - (e.clientY - r.top) };
+    };
+    const onGizmoPointerDown = (e: PointerEvent) => {
+      downX = e.clientX;
+      downY = e.clientY;
+    };
+    const onGizmoClick = (e: MouseEvent) => {
+      if (e.button !== 0 || !ctx.currentObject) return;
+      if (Math.hypot(e.clientX - downX, e.clientY - downY) > 4) return; // it was a drag
+      const p = localPoint(e);
+      const hit = gizmo.hitTest(p.x, p.y);
+      if (hit) snapToDirection(hit.dir);
+    };
+    const onGizmoPointerMove = (e: PointerEvent) => {
+      if (e.buttons !== 0) return; // dragging the view
+      const p = localPoint(e);
+      const hit = ctx.currentObject ? gizmo.hitTest(p.x, p.y) : null;
+      gizmo.setHover(hit ? hit.key : null);
+      canvasEl.style.cursor = hit ? 'pointer' : '';
+    };
+    const onGizmoPointerLeave = () => {
+      gizmo.setHover(null);
+      canvasEl.style.cursor = '';
+    };
+    canvasEl.addEventListener('pointerdown', onGizmoPointerDown);
+    canvasEl.addEventListener('click', onGizmoClick);
+    canvasEl.addEventListener('pointermove', onGizmoPointerMove);
+    canvasEl.addEventListener('pointerleave', onGizmoPointerLeave);
+
     const tick = () => {
       controls.update();
       renderer.render(scene, camera);
+      if (ctx.currentObject) gizmo.render(renderer, camera);
       ctx.rafId = requestAnimationFrame(tick);
     };
     tick();
@@ -322,9 +456,21 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
       if (ctx.rafId !== null) cancelAnimationFrame(ctx.rafId);
       ctx.resizeObserver?.disconnect();
       controls.dispose();
+      cancelSnap();
+      controls.removeEventListener('start', cancelSnap);
+      canvasEl.removeEventListener('pointerdown', onGizmoPointerDown);
+      canvasEl.removeEventListener('click', onGizmoClick);
+      canvasEl.removeEventListener('pointermove', onGizmoPointerMove);
+      canvasEl.removeEventListener('pointerleave', onGizmoPointerLeave);
+      gizmo.dispose(); // GIZMO (3/3)
       if (ctx.currentObject) {
         scene.remove(ctx.currentObject);
+        releaseViewMode(ctx.currentObject); // VIEW MODE (3/4): restore originals before disposing
         disposeObject(ctx.currentObject);
+      }
+      if (gridRef.current) {
+        gridRef.current.dispose();
+        gridRef.current = null;
       }
       ctx.lighting.dispose();
       scene.clear();
@@ -346,9 +492,54 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     return () => window.removeEventListener('wh3d:themechange', applyBg);
   }, []);
 
+  // VIEW MODE (4/4): switching modes updates the lights AND swaps the model's materials.
   useEffect(() => {
-    ctxRef.current?.lighting.apply(lightingStyle, qualityPreset);
+    const ctx = ctxRef.current;
+    if (!ctx) return;
+    ctx.lighting.apply(lightingStyle, qualityPreset);
+    if (ctx.currentObject) applyViewMode(ctx.currentObject, lightingStyle);
   }, [lightingStyle, qualityPreset]);
+
+  // GRID (4/4): toggle on/off. `renderQuality` rebuilds the renderer, which
+  // drops the grid with the old scene (the model reloads and re-syncs it).
+  useEffect(() => {
+    syncGrid();
+  }, [showGrid, renderQuality]);
+
+  // HDRI (2/3): background + image-based lighting. The rig keeps the setup, so
+  // later view-mode changes re-apply it (lights the model in Lit only, the
+  // background shows in every mode). `renderQuality` is a dep because that
+  // change rebuilds the renderer and the rig with it.
+  useEffect(() => {
+    const ctx = ctxRef.current;
+    if (!ctx) return;
+    const preset = getHdriPreset(hdri);
+    if (!preset.url) {
+      ctx.lighting.setHdri(null);
+      return;
+    }
+    let canceled = false;
+    loadHdri(preset.id, preset.url)
+      .then((texture) => {
+        if (canceled || ctxRef.current !== ctx) return;
+        ctx.lighting.setHdri({
+          texture,
+          environmentIntensity: preset.environmentIntensity,
+          backgroundIntensity: preset.backgroundIntensity,
+          backgroundBlurriness: preset.backgroundBlurriness,
+          exposure: preset.exposure,
+          lightScale: preset.lightScale
+        });
+      })
+      .catch((err) => {
+        if (canceled) return;
+        console.error(`HDRI "${preset.id}" failed to load`, err);
+        ctx.lighting.setHdri(null);
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [hdri, renderQuality]);
 
   useEffect(() => {
     const ctx = ctxRef.current;
@@ -388,8 +579,10 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
 
     if (ctx.currentObject) {
       ctx.scene.remove(ctx.currentObject);
+      releaseViewMode(ctx.currentObject); // VIEW MODE: restore originals before disposing
       disposeObject(ctx.currentObject);
       ctx.currentObject = null;
+      syncGrid();
     }
 
     const load = async () => {
@@ -437,6 +630,7 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
         ctx.scene.add(obj);
         ctx.currentObject = obj;
         applyDistanceLimits(ctx, obj);
+        syncGrid(); // GRID: build it for this model
 
         applyShadowFlags(obj, qualityPreset.shadows.enabled);
         applyAnisotropy(
@@ -444,6 +638,9 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
           qualityPreset.anisotropy,
           ctx.renderer.capabilities.getMaxAnisotropy()
         );
+        // VIEW MODE: apply whichever mode is active right now (read from the ref, not the
+        // closure, so a mode change made while the model was loading isn't lost).
+        applyViewMode(obj, viewModeRef.current);
 
         const box = new THREE.Box3().setFromObject(obj);
         ctx.lighting.fitToModel(box);
@@ -822,6 +1019,23 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
             </Group>
           )}
         </div>
+      )}
+      {gridStep !== null && !embeddedPngUrl && !plainImageMode && (
+        <Text
+          size="xs"
+          c="dimmed"
+          style={{
+            position: 'absolute',
+            left: 8,
+            bottom: 6,
+            background: 'var(--wh3d-overlay-bg, rgba(16, 17, 19, 0.85))',
+            padding: '2px 6px',
+            borderRadius: 3,
+            pointerEvents: 'none'
+          }}
+        >
+          Grid: 1 cell = {gridStep} units
+        </Text>
       )}
       {loading && (
         <Center style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>

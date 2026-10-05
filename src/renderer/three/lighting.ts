@@ -13,6 +13,23 @@ export { DEFAULT_LIGHTING_STYLE, type LightingStyle } from '@shared/lighting-typ
 export { LIGHTING_PRESETS, type LightingPresetDefinition } from './lighting-presets';
 
 /**
+ * An HDRI the rig should use. The texture is owned by the caller (see
+ * hdri-loader.ts) and is never disposed here. Deliberately NOT imported from
+ * hdri-presets.ts so the thumbnail worker, which also uses this file, doesn't
+ * pull the HDRI assets into its bundle.
+ */
+export interface HdriSetup {
+  /** Equirectangular texture (mapping = EquirectangularReflectionMapping). */
+  texture: THREE.Texture;
+  environmentIntensity: number;
+  backgroundIntensity: number;
+  backgroundBlurriness: number;
+  exposure: number;
+  /** Multiplier on the preset's own lights while the HDRI lights the model. */
+  lightScale: number;
+}
+
+/**
  * Generic applier of LightingPresetDefinitions. Knows nothing about specific
  * presets; tweaks happen in `lighting-presets.ts` as pure data.
  *
@@ -20,11 +37,17 @@ export { LIGHTING_PRESETS, type LightingPresetDefinition } from './lighting-pres
  * one subtree; the PMREM-generated env map is owned here too so it gets
  * disposed alongside.
  *
+ * HDRI: when an HDRI is set (`setHdri`), it is shown as the background in every
+ * view mode, but it only LIGHTS the model in Lit mode (it replaces the built-in
+ * RoomEnvironment and dims the preset's lights by `lightScale`). Unlit,
+ * Wireframe and Normals use materials that ignore lights anyway.
+ *
  * Quality-tier-aware: when the active `RenderQualityPreset` enables shadows,
  * the FIRST directional in the lighting preset becomes the shadow caster.
  * `fitToModel(box)` must be called after loading a model so the shadow
  * camera + light distance match the model's actual scale — without that
  * step, shadows would be wildly miscalibrated for non-unit-sized geometry.
+ * The last box is remembered and re-applied whenever the lights are rebuilt.
  */
 export class LightingRig {
   private group = new THREE.Group();
@@ -35,6 +58,8 @@ export class LightingRig {
   /** Set by applyDefinition; consumed by fitToModel to scale shadow camera. */
   private shadowKey: THREE.DirectionalLight | null = null;
   private quality: RenderQualityPreset = getRenderQualityPreset(DEFAULT_RENDER_QUALITY);
+  private hdri: HdriSetup | null = null;
+  private lastBox: THREE.Box3 | null = null;
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -59,15 +84,41 @@ export class LightingRig {
   }
 
   /**
+   * Set (or clear with null) the HDRI. Takes effect immediately if a style has
+   * already been applied; otherwise it is picked up by the first `apply`.
+   */
+  setHdri(hdri: HdriSetup | null): void {
+    this.hdri = hdri;
+    if (this.currentStyle) this.applyDefinition(getLightingPreset(this.currentStyle));
+  }
+
+  /**
    * Apply a definition directly. Useful for live-tweaking presets in dev or
    * for tests that don't want to register a new ID just to try a variant.
    */
   applyDefinition(def: LightingPresetDefinition): void {
     this.clear();
-    this.renderer.toneMappingExposure = def.exposure;
-    this.scene.background = null;
 
-    if (def.environmentIntensity > 0) {
+    const hdri = this.hdri;
+    // The HDRI only lights the model in Lit mode.
+    const hdriLights = hdri !== null && def.id === 'lit';
+    const lightScale = hdriLights ? hdri.lightScale : 1;
+
+    this.renderer.toneMappingExposure = hdri ? hdri.exposure : def.exposure;
+
+    if (hdri) {
+      // Sky behind the model, in every view mode.
+      this.scene.background = hdri.texture;
+      this.scene.backgroundIntensity = hdri.backgroundIntensity;
+      this.scene.backgroundBlurriness = hdri.backgroundBlurriness;
+    } else {
+      this.scene.background = null;
+    }
+
+    if (hdriLights) {
+      this.scene.environment = hdri.texture;
+      this.scene.environmentIntensity = hdri.environmentIntensity;
+    } else if (!hdri && def.environmentIntensity > 0) {
       this.envMap = this.pmrem.fromScene(
         new RoomEnvironment(),
         this.quality.envMapRoughness
@@ -77,20 +128,22 @@ export class LightingRig {
     }
 
     if (def.ambient) {
-      this.group.add(new THREE.AmbientLight(def.ambient.color, def.ambient.intensity));
+      this.group.add(
+        new THREE.AmbientLight(def.ambient.color, def.ambient.intensity * lightScale)
+      );
     }
     if (def.hemisphere) {
       this.group.add(
         new THREE.HemisphereLight(
           def.hemisphere.skyColor,
           def.hemisphere.groundColor,
-          def.hemisphere.intensity
+          def.hemisphere.intensity * lightScale
         )
       );
     }
     if (def.directionals) {
       def.directionals.forEach((d, i) => {
-        const light = new THREE.DirectionalLight(d.color, d.intensity);
+        const light = new THREE.DirectionalLight(d.color, d.intensity * lightScale);
         light.position.set(d.position[0], d.position[1], d.position[2]);
         // First directional becomes the shadow caster when quality permits.
         if (i === 0 && this.quality.shadows.enabled) {
@@ -109,6 +162,9 @@ export class LightingRig {
         this.group.add(light);
       });
     }
+
+    // The lights were just rebuilt: re-fit the shadow caster to the model.
+    if (this.lastBox) this.fitToModel(this.lastBox);
   }
 
   /**
@@ -122,7 +178,9 @@ export class LightingRig {
    *     correctly even for off-origin models.
    */
   fitToModel(box: THREE.Box3): void {
-    if (!this.shadowKey || box.isEmpty()) return;
+    if (box.isEmpty()) return;
+    this.lastBox = box.clone();
+    if (!this.shadowKey) return;
     const sphere = box.getBoundingSphere(new THREE.Sphere());
     if (sphere.radius === 0) return;
 
@@ -162,6 +220,7 @@ export class LightingRig {
     while (this.group.children.length > 0) {
       this.group.remove(this.group.children[0]);
     }
+    // Only the RoomEnvironment map is ours; HDRI textures belong to the cache.
     if (this.envMap) {
       this.envMap.dispose();
       this.envMap = null;
@@ -172,5 +231,8 @@ export class LightingRig {
     }
     this.scene.environment = null;
     this.scene.environmentIntensity = 1.0;
+    this.scene.background = null;
+    this.scene.backgroundIntensity = 1.0;
+    this.scene.backgroundBlurriness = 0;
   }
 }

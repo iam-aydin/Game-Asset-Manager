@@ -20,27 +20,19 @@ import {
   IconMaximize,
   IconAlertTriangle,
   IconCamera,
-  IconRefresh,
-  IconRotate2,
-  IconRotateClockwise2
+  IconRefresh
 } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import type { FileRecord } from '@shared/types';
 import type { LightingStyle } from '@shared/lighting-types';
+import { DEFAULT_HDRI, type HdriId } from '@shared/hdri';
 import { isAudioExtension, isImageExtension, isVideoExtension } from '@shared/formats';
 import { LIGHTING_PRESETS } from '../three/lighting-presets';
-import {
-  UP_AXIS_OPTIONS,
-  YAW_STEP_DEG,
-  getDefaultOrientation,
-  getYaw,
-  rotateYaw,
-  type UpAxis
-} from '@shared/orientation';
+import { HDRI_PRESETS, getHdriPreset } from '../three/hdri-presets';
 import { ModelViewer, type ModelViewerHandle } from '../three/ModelViewer';
 import { CropOverlay } from './CropOverlay';
 import { ipc } from '../ipc-client';
-import { usePreferences } from '../util/use-preferences';
+import { usePreferences, savePreferences } from '../util/use-preferences';
 import { DEFAULT_RENDER_QUALITY } from '@shared/render-quality';
 
 // Helper to identify document/text extensions
@@ -74,6 +66,8 @@ export function PreviewPane({
   const viewerRef = useRef<ModelViewerHandle>(null);
   const { prefs } = usePreferences();
   const renderQuality = prefs?.renderQuality ?? DEFAULT_RENDER_QUALITY;
+  const hdri: HdriId = prefs?.hdri ?? DEFAULT_HDRI;
+  const showGrid = prefs?.showGrid ?? false;
   const [cropSize, setCropSize] = useState(0);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
 
@@ -114,17 +108,17 @@ export function PreviewPane({
   // just clicked (not on the initial folder auto-select, not on shift/ctrl).
   const autoPlay = activeAudio?.fileId === file.id ? activeAudio.autoPlay : false;
 
-  const yaw = getYaw(file.orientation);
-
-  const setOrientation = (next: { upAxis?: UpAxis; yaw?: number }) => {
-    void ipc.setFileOrientation(file.libraryId, file.id, {
-      upAxis: next.upAxis ?? file.orientation.upAxis,
-      yaw: next.yaw ?? yaw
-    });
+  // The HDRI choice is a global preference (not per file) and persists
+  // across restarts. Wait until the prefs have loaded before writing, so we
+  // never overwrite the file with an empty object.
+  const handleHdriChange = (next: HdriId) => {
+    if (!prefs) return;
+    void savePreferences({ ...prefs, hdri: next });
   };
 
-  const handleRotate = (deltaDeg: number) => {
-    setOrientation({ yaw: rotateYaw(yaw, deltaDeg) });
+  const handleGridChange = (on: boolean) => {
+    if (!prefs) return;
+    void savePreferences({ ...prefs, showGrid: on });
   };
 
   const handleCapture = async () => {
@@ -173,6 +167,8 @@ export function PreviewPane({
             libraryId={libraryId}
             file={file}
             lightingStyle={lightingStyle}
+            hdri={hdri}
+            showGrid={showGrid}
             renderQuality={renderQuality}
           />
         )}
@@ -265,7 +261,10 @@ export function PreviewPane({
           ) : (
             <Group justify="space-between" wrap="nowrap" gap="md">
               <Group gap="md" wrap="nowrap" style={{ flex: 1, minWidth: 0 }}>
-                <ControlBlock label="Lighting" hint={LIGHTING_PRESETS.find((p) => p.id === lightingStyle)?.label}>
+                <ControlBlock
+                  label="View"
+                  hint={LIGHTING_PRESETS.find((p) => p.id === lightingStyle)?.label}
+                >
                   <SegmentedControl
                     size="xs"
                     value={lightingStyle}
@@ -274,55 +273,25 @@ export function PreviewPane({
                   />
                 </ControlBlock>
 
-                <ControlBlock
-                  label="Up axis"
-                  hint={
-                    file.orientationCustomized ? (
-                      <Text
-                        span
-                        size="xs"
-                        c="indigo"
-                        style={{ cursor: 'pointer' }}
-                        onClick={() => void ipc.setFileOrientation(file.libraryId, file.id, null)}
-                      >
-                        reset (def {getDefaultOrientation(file.ext).upAxis})
-                      </Text>
-                    ) : (
-                      file.orientation.upAxis
-                    )
-                  }
-                >
+                <ControlBlock label="Environment" hint={getHdriPreset(hdri).label}>
                   <SegmentedControl
                     size="xs"
-                    value={file.orientation.upAxis}
-                    onChange={(v) => setOrientation({ upAxis: v as UpAxis })}
-                    data={UP_AXIS_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+                    value={hdri}
+                    onChange={(v) => handleHdriChange(v as HdriId)}
+                    data={HDRI_PRESETS.map((p) => ({ value: p.id, label: p.label }))}
                   />
                 </ControlBlock>
 
-                <ControlBlock label="Rotate" hint={`yaw ${yaw}°`}>
-                  <Group gap={4} wrap="nowrap">
-                    <Tooltip label={`Rotate ${YAW_STEP_DEG}° counter-clockwise`}>
-                      <ActionIcon
-                        variant="default"
-                        size="md"
-                        onClick={() => handleRotate(-YAW_STEP_DEG)}
-                        aria-label={`Rotate counter-clockwise by ${YAW_STEP_DEG} degrees`}
-                      >
-                        <IconRotate2 size={16} />
-                      </ActionIcon>
-                    </Tooltip>
-                    <Tooltip label={`Rotate ${YAW_STEP_DEG}° clockwise`}>
-                      <ActionIcon
-                        variant="default"
-                        size="md"
-                        onClick={() => handleRotate(YAW_STEP_DEG)}
-                        aria-label={`Rotate clockwise by ${YAW_STEP_DEG} degrees`}
-                      >
-                        <IconRotateClockwise2 size={16} />
-                      </ActionIcon>
-                    </Tooltip>
-                  </Group>
+                <ControlBlock label="Grid" hint={showGrid ? 'On' : 'Off'}>
+                  <SegmentedControl
+                    size="xs"
+                    value={showGrid ? 'on' : 'off'}
+                    onChange={(v) => handleGridChange(v === 'on')}
+                    data={[
+                      { value: 'off', label: 'Off' },
+                      { value: 'on', label: 'On' }
+                    ]}
+                  />
                 </ControlBlock>
               </Group>
 
