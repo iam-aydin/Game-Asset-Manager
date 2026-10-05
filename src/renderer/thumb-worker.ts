@@ -11,6 +11,7 @@ import { THUMB_WORKER_CHANNEL, THUMB_WORKER_RENDER_SIZE } from '@shared/thumb-wo
 import type { ThumbRenderRequest, ThumbRenderResult } from '@shared/thumb-worker-protocol';
 import type { ExtractedMetadata } from '@shared/types';
 import { isAudioExtension, isImageExtension, isVideoExtension } from '@shared/formats';
+import { extColor } from '@shared/ext-colors';
 import type { IpcRenderer } from 'electron';
 import type { promises as FsPromises } from 'node:fs';
 import { scopedLogger } from './logger';
@@ -80,6 +81,52 @@ function getRenderer(): THREE.WebGLRenderer {
 interface RenderOutput {
   png: Uint8Array;
   metadata: ExtractedMetadata;
+}
+
+/**
+ * Placeholder tile for files that can't be decoded: the extension written
+ * large in its own color (see @shared/ext-colors), with a small type label
+ * underneath. Used instead of a FAILED tile.
+ */
+function drawExtensionTile(
+  ctx2d: CanvasRenderingContext2D,
+  size: number,
+  ext: string,
+  label: string
+): void {
+  const color = extColor(ext);
+  const fontStack = 'system-ui, -apple-system, "Segoe UI", sans-serif';
+
+  ctx2d.fillStyle = '#101113';
+  ctx2d.fillRect(0, 0, size, size);
+
+  const pad = 20;
+  ctx2d.fillStyle = `${color}26`;
+  ctx2d.strokeStyle = `${color}99`;
+  ctx2d.lineWidth = 3;
+  ctx2d.beginPath();
+  ctx2d.roundRect(pad, pad, size - pad * 2, size - pad * 2, 28);
+  ctx2d.fill();
+  ctx2d.stroke();
+
+  const text = ext.replace(/^\./, '').toUpperCase();
+  const maxWidth = size - pad * 2 - 48;
+  let fontSize = 150;
+  ctx2d.font = `800 ${fontSize}px ${fontStack}`;
+  while (fontSize > 28 && ctx2d.measureText(text).width > maxWidth) {
+    fontSize -= 4;
+    ctx2d.font = `800 ${fontSize}px ${fontStack}`;
+  }
+
+  ctx2d.textAlign = 'center';
+  ctx2d.textBaseline = 'middle';
+  ctx2d.fillStyle = color;
+  ctx2d.fillText(text, size / 2, size / 2 - 10);
+
+  ctx2d.fillStyle = `${color}b3`;
+  ctx2d.font = `600 26px ${fontStack}`;
+  ctx2d.fillText(label.toUpperCase(), size / 2, size / 2 + fontSize * 0.45 + 20);
+  ctx2d.textBaseline = 'alphabetic';
 }
 
 async function renderImageThumbnail(req: ThumbRenderRequest): Promise<RenderOutput> {
@@ -205,19 +252,11 @@ async function renderAudioThumbnail(req: ThumbRenderRequest): Promise<RenderOutp
     channels = audioBuffer.numberOfChannels;
     drawWaveform(ctx2d, audioBuffer, size);
   } catch (err) {
-    log.error('audio decode failed, falling back to placeholder tile', {
+    log.error('audio decode failed, falling back to extension tile', {
       absPath: req.absPath,
       err: (err as Error).message ?? String(err)
     });
-    ctx2d.fillStyle = '#101113';
-    ctx2d.fillRect(0, 0, size, size);
-    ctx2d.fillStyle = '#818cf8';
-    ctx2d.font = 'bold 16px sans-serif';
-    ctx2d.textAlign = 'center';
-    ctx2d.fillText(`.${req.ext.toUpperCase()}`, size / 2, size / 2 - 8);
-    ctx2d.fillStyle = '#6b7280';
-    ctx2d.font = '12px sans-serif';
-    ctx2d.fillText('Audio File', size / 2, size / 2 + 14);
+    drawExtensionTile(ctx2d, size, req.ext, 'Audio');
   }
 
   const outBlob = await new Promise<Blob | null>((resolve) =>
@@ -321,21 +360,13 @@ async function renderVideoThumbnail(req: ThumbRenderRequest): Promise<RenderOutp
     const drawH = height * scale;
     ctx2d.drawImage(video, (size - drawW) / 2, (size - drawH) / 2, drawW, drawH);
   } catch (err) {
-    log.error('video frame extraction failed, falling back to placeholder tile', {
+    log.error('video frame extraction failed, falling back to extension tile', {
       absPath: req.absPath,
       err: (err as Error).message ?? String(err)
     });
     width = 0;
     height = 0;
-    ctx2d.fillStyle = '#101113';
-    ctx2d.fillRect(0, 0, size, size);
-    ctx2d.fillStyle = '#818cf8';
-    ctx2d.font = 'bold 16px sans-serif';
-    ctx2d.textAlign = 'center';
-    ctx2d.fillText(`.${req.ext.toUpperCase()}`, size / 2, size / 2 - 8);
-    ctx2d.fillStyle = '#6b7280';
-    ctx2d.font = '12px sans-serif';
-    ctx2d.fillText('Video File', size / 2, size / 2 + 14);
+    drawExtensionTile(ctx2d, size, req.ext, 'Video');
   } finally {
     // Release the file handle held by the protocol stream.
     video.removeAttribute('src');
@@ -395,8 +426,8 @@ async function renderDocumentThumbnail(req: ThumbRenderRequest): Promise<RenderO
   ctx2d.roundRect(pad, pad, cardW, headerH, [8, 8, 0, 0]);
   ctx2d.fill();
 
-  // Extension Badge
-  ctx2d.fillStyle = '#3b82f6';
+  // Extension Badge (colored per extension)
+  ctx2d.fillStyle = extColor(req.ext);
   ctx2d.font = 'bold 12px sans-serif';
   ctx2d.textAlign = 'left';
   ctx2d.fillText(`.${req.ext.toUpperCase()}`, pad + 10, pad + 19);
@@ -479,8 +510,8 @@ async function renderToPng(req: ThumbRenderRequest): Promise<RenderOutput> {
   }
 
   if (isVideoExtension(ext)) {
-  return renderVideoThumbnail(req);
-}
+    return renderVideoThumbnail(req);
+  }
 
   if (DOCUMENT_EXTENSIONS.has(ext)) {
     return renderDocumentThumbnail(req);

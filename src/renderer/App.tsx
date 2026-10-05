@@ -72,7 +72,7 @@ import { MoveConfirmModal } from './components/MoveConfirmModal';
 import { CompareModal } from './components/CompareModal';
 import { FolderRenameModal } from './components/FolderRenameModal';
 import { ipc } from './ipc-client';
-import { SUPPORTED_EXTENSIONS } from '@shared/formats';
+import { SUPPORTED_EXTENSIONS, isAudioExtension, isVideoExtension } from '@shared/formats';
 
 const SEARCH_DEBOUNCE_MS = 200;
 const LIGHTING_STORAGE_KEY = 'wh3d:lightingStyle';
@@ -189,6 +189,12 @@ function readStoredExtensions(): Set<SupportedExtension> {
   } catch {
     return new Set();
   }
+}
+
+/** Audio and video files get a player in the preview pane (and autoplay on click). */
+function isPlayableMediaExt(ext: string): boolean {
+  const e = ext.replace(/^\./, '').toLowerCase();
+  return isAudioExtension(e) || isVideoExtension(e);
 }
 
 /** Thumbnail-loading progress shown in the top bar. */
@@ -752,8 +758,8 @@ export function App() {
     setPrimaryFileId(first.id);
     selectionAnchorRef.current = first.id;
 
-    // Select initial audio track on folder load WITHOUT starting playback
-    if (['mp3', 'wav', 'ogg', 'flac'].includes(first.ext.toLowerCase())) {
+    // Select initial audio/video file on folder load WITHOUT starting playback
+    if (isPlayableMediaExt(first.ext)) {
       setActiveAudio({ fileId: first.id, autoPlay: false });
     }
   }, [files]);
@@ -1015,12 +1021,12 @@ export function App() {
         return;
       }
 
-      // 3. Normal Left Click: Select file and set activeAudio to autoPlay
+      // 3. Normal Left Click: Select file; audio/video autoplay
       setSelectedFileIds(new Set([fileId]));
       setPrimaryFileId(fileId);
       selectionAnchorRef.current = fileId;
 
-      if (clickedFile && ['mp3', 'wav', 'ogg', 'flac'].includes(clickedFile.ext.toLowerCase())) {
+      if (clickedFile && isPlayableMediaExt(clickedFile.ext)) {
         setActiveAudio({ fileId: clickedFile.id, autoPlay: true });
       }
     },

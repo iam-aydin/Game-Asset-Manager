@@ -11,7 +11,7 @@ import {
 } from '@shared/transient-errors';
 import { thumbAbsPath, thumbRelPath, writeThumbnailFile } from './storage';
 import { thumbPool } from './pool';
-import { renderVideoThumbnailFfmpeg } from './ffmpeg-thumb';
+import { FfmpegFrameError, renderVideoThumbnailFfmpeg } from './ffmpeg-thumb';
 import { scopedLogger, time } from '@main/logger';
 
 const log = scopedLogger('queue-runner');
@@ -72,6 +72,10 @@ export class ThumbQueueRunner extends EventEmitter {
     // Scrub spurious failures from a prior shutdown — they aren't real model
     // failures, just jobs that were in flight when the app exited.
     library.thumbErrors.clearWithMessages([...TRANSIENT_RENDER_ERROR_MESSAGES]);
+    // ffmpeg could read these videos (e.g. AV1) but not decode a frame. Videos
+    // now fall back to Chromium, so retry the ones that were marked as failed
+    // before the fallback existed.
+    library.thumbErrors.clearWithMessages(['ffmpeg produced no frame']);
     const needing = library.thumbnails.findFilesNeedingThumbs(RECONCILE_BATCH);
     if (needing.length === 0) return;
     // Videos go first: ffmpeg renders them in a few hundred ms each, so they
@@ -200,11 +204,39 @@ export class ThumbQueueRunner extends EventEmitter {
         log,
         'thumb-render',
         async () => {
-          // Videos: ffmpeg only (fast, out-of-process, handles AVI/HEVC).
-          // No Chromium fallback — it was slow, ran one video at a time and
-          // could block the queue for 30s per file. If ffmpeg fails, the job
-          // fails normally and is retried up to MAX_ATTEMPTS.
-          if (isVideo) return renderVideoThumbnailFfmpeg(absPath);
+          // Videos: ffmpeg first (fast, out-of-process, handles AVI/HEVC).
+          // If ffmpeg can't produce a frame (e.g. AV1 on a build without a
+          // software AV1 decoder) fall back to Chromium, which plays AV1 and
+          // many other codecs. The metadata ffmpeg already probed is kept, so
+          // fps / codecs / audio info still show up for those files.
+          if (isVideo) {
+            try {
+              return await renderVideoThumbnailFfmpeg(absPath);
+            } catch (ffErr) {
+              const ffMessage = (ffErr as Error).message ?? String(ffErr);
+              if (isTransientRenderError(ffMessage)) throw ffErr;
+              log.info('ffmpeg could not render video, falling back to Chromium', {
+                libraryId: lib.entry.id,
+                fileId,
+                relPath: file.relPath,
+                err: ffMessage
+              });
+              const fallback = await thumbPool.render({
+                absPath,
+                ext: file.ext,
+                lightingStyle: this.lightingStyle,
+                orientation: file.orientation,
+                mediaUrl: `wh3d-file://${encodeURIComponent(lib.entry.id)}/${file.id}`
+              });
+              if (ffErr instanceof FfmpegFrameError) {
+                return {
+                  png: fallback.png,
+                  metadata: { ...fallback.metadata, thumbSource: 'video' as const, video: ffErr.video }
+                };
+              }
+              return fallback;
+            }
+          }
 
           return thumbPool.render({
             absPath,

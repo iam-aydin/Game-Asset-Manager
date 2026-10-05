@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Badge, Divider, Group, Stack, Text, Textarea } from '@mantine/core';
+import { Badge, Divider, Group, Stack, Text, Textarea, useComputedColorScheme } from '@mantine/core';
 import type {
   CollectionRecord,
   CollectionWithCount,
@@ -21,7 +21,7 @@ import { useSidecarLicense } from '../util/use-sidecar-license';
 import { ipc } from '../ipc-client';
 
 // Local on purpose: works even if @shared/formats has no video helper yet.
-const VIDEO_EXTENSIONS = ['mp4', 'webm', 'mov', 'mkv', 'avi', 'm4v', 'ogv'];
+const VIDEO_EXTENSIONS = ['mp4', 'webm', 'mov', 'mkv', 'avi', 'bik', 'm4v', 'ogv'];
 const isVideoExtension = (ext: string): boolean =>
   VIDEO_EXTENSIONS.includes(ext.replace(/^\./, '').toLowerCase());
 
@@ -156,7 +156,9 @@ function SingleFilePanel({
       !isVideo &&
       (metadata.vertexCount > 0 || metadata.meshCount > 0));
 
-  const width = metadata?.image?.width ?? metadata?.imageHeight;
+  // Width falls back to imageWidth (it used to fall back to imageHeight,
+  // which made images without the detailed `image` block show height x height).
+  const width = metadata?.image?.width ?? metadata?.imageWidth;
   const height = metadata?.image?.height ?? metadata?.imageHeight;
 
   const sidecarLicense = useSidecarLicense(libraryId, file.parentDir);
@@ -305,6 +307,42 @@ function NotesEditor({ libraryId, file }: { libraryId: string; file: FileRecord 
       />
     </Stack>
   );
+}
+
+// ---- Shared helpers ---------------------------------------------------------
+
+const COMMON_ASPECTS: Array<[number, number]> = [
+  [1, 1],
+  [5, 4],
+  [4, 3],
+  [3, 2],
+  [16, 10],
+  [16, 9],
+  [21, 9],
+  [2, 1]
+];
+
+/**
+ * Aspect ratio label. Snaps to a common ratio (16:9, 4:3, ...) when within 1%,
+ * so 1920 x 1081 reads 16:9 instead of 1920:1081. Portrait ratios are covered
+ * by checking each pair both ways.
+ */
+function formatAspectRatio(width: number, height: number): string {
+  const ratio = width / height;
+  for (const [w, h] of COMMON_ASPECTS) {
+    for (const [a, b] of [
+      [w, h],
+      [h, w]
+    ]) {
+      const target = a / b;
+      if (Math.abs(ratio - target) / target <= 0.01) return `${a}:${b}`;
+    }
+  }
+  const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
+  const d = gcd(width, height) || 1;
+  const w = width / d;
+  const h = height / d;
+  return w > 50 || h > 50 ? `${ratio.toFixed(2)}:1` : `${w}:${h}`;
 }
 
 function getBitrateStatusColor(kbps: number): 'green' | 'yellow' | 'red' {
@@ -589,14 +627,7 @@ function VideoStats({
     bitrateKbps = Math.round((file.sizeBytes * 8) / (duration * 1000));
   }
 
-  let aspect: string | null = null;
-  if (width && height) {
-    const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
-    const d = gcd(width, height) || 1;
-    const w = width / d;
-    const h = height / d;
-    aspect = w > 50 || h > 50 ? `${(width / height).toFixed(2)}:1` : `${w}:${h}`;
-  }
+  const aspect: string | null = width && height ? formatAspectRatio(width, height) : null;
 
   // Audio track (same ratings as the audio files use)
   const audioCodec: string | null =
@@ -815,9 +846,7 @@ function ImageStats({
   height?: number;
 }) {
   const maxDimension = width && height ? Math.max(width, height) : 0;
-  const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
-  const divisor = width && height ? gcd(width, height) || 1 : 1;
-  const aspectRatio = width && height ? `${width / divisor}:${height / divisor}` : null;
+  const aspectRatio = width && height ? formatAspectRatio(width, height) : null;
   const bitDepth = metadata.image?.bitDepth;
   const colorType = metadata.image?.colorType;
 
@@ -904,6 +933,24 @@ function SidecarLicense({ text }: { text: string }) {
   );
 }
 
+/**
+ * Status capsule gradients: [start, end].
+ * Dark theme: the color fades into a very dark shade of itself.
+ * Light theme: the color fades into a brighter shade of itself.
+ */
+const STATUS_GRADIENTS = {
+  dark: {
+    green: ['#22c55e', '#052e16'],
+    yellow: ['#eab308', '#3d3000'],
+    red: ['#ef4444', '#450a0a']
+  },
+  light: {
+    green: ['#22c55e', '#bbf7d0'],
+    yellow: ['#eab308', '#fef08a'],
+    red: ['#ef4444', '#fecaca']
+  }
+} as const;
+
 function Field({
   label,
   value,
@@ -913,13 +960,8 @@ function Field({
   value: string;
   statusColor?: 'green' | 'yellow' | 'red';
 }) {
-  const COLOR_MAP = {
-    green: '#22c55e',
-    yellow: '#eab308',
-    red: '#ef4444'
-  };
-
-  const topColor = statusColor ? COLOR_MAP[statusColor] : null;
+  const scheme = useComputedColorScheme('dark');
+  const colors = statusColor ? STATUS_GRADIENTS[scheme === 'light' ? 'light' : 'dark'][statusColor] : null;
 
   return (
     <Group justify="space-between" align="flex-end" wrap="nowrap">
@@ -929,14 +971,14 @@ function Field({
         </Text>
         <Text size="sm">{value}</Text>
       </div>
-      {topColor && (
+      {colors && (
         <div
           title={`Budget status: ${statusColor}`}
           style={{
             width: 18,
             height: 8,
             borderRadius: 999,
-            background: `linear-gradient(to right, ${topColor} 0%, #171717 100%)`,
+            background: `linear-gradient(90deg, ${colors[0]}, ${colors[1]})`,
             marginBottom: 6,
             flexShrink: 0
           }}
@@ -944,4 +986,4 @@ function Field({
       )}
     </Group>
   );
-}     
+}

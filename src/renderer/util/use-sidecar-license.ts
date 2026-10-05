@@ -1,18 +1,26 @@
 import { useEffect, useRef, useState } from 'react';
 
-const CANDIDATE_NAMES = [
-  'LICENSE.txt',
-  'License.txt',
-  'license.txt',
-  'LICENSE.md',
-  'License.md',
-  'license.md',
-  'LICENSE',
-  'License'
-];
+// Windows and macOS file systems are case-insensitive, so LICENSE.txt,
+// License.txt and license.txt are the same file there. Trying all three
+// only produced extra 404s in the console.
+const CASE_INSENSITIVE_FS =
+  typeof navigator !== 'undefined' && /win|mac/i.test(navigator.platform || navigator.userAgent);
+
+const CANDIDATE_NAMES = CASE_INSENSITIVE_FS
+  ? ['LICENSE.txt', 'LICENSE.md', 'LICENSE']
+  : [
+      'LICENSE.txt',
+      'License.txt',
+      'license.txt',
+      'LICENSE.md',
+      'License.md',
+      'license.md',
+      'LICENSE',
+      'License'
+    ];
 
 // Per-folder cache so flipping between files in the same folder doesn't
-// re-fire 8 failed fetches every click. Keyed on `${libraryId}::${parentDir}`.
+// re-fire failed fetches every click. Keyed on `${libraryId}::${parentDir}`.
 // Cleared implicitly on app reload; that's fine, it's just a perf cache.
 const folderCache = new Map<string, string | null>();
 
@@ -36,6 +44,10 @@ export function useSidecarLicense(
   const requestIdRef = useRef(0);
 
   useEffect(() => {
+    // Always bump, so a slow lookup from a previous folder can never
+    // overwrite the result for this one (including cache hits).
+    const requestId = ++requestIdRef.current;
+
     const key = cacheKey(libraryId, parentDir);
     const cached = folderCache.get(key);
     if (cached !== undefined) {
@@ -44,7 +56,6 @@ export function useSidecarLicense(
       return;
     }
 
-    const requestId = ++requestIdRef.current;
     setLoading(true);
     setText(null);
 
@@ -55,9 +66,10 @@ export function useSidecarLicense(
           const res = await fetch(
             `wh3d-file://${libraryId}/rel/${encodeURIComponent(relPath)}`
           );
+          if (requestIdRef.current !== requestId) return; // stale, folder changed since
           if (!res.ok) continue;
           const body = await res.text();
-          if (requestIdRef.current !== requestId) return; // stale, folder changed since
+          if (requestIdRef.current !== requestId) return;
           folderCache.set(key, body);
           setText(body);
           setLoading(false);

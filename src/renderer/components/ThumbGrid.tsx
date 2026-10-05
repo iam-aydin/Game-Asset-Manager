@@ -2,12 +2,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActionIcon, Center, Group, Stack, Text, Tooltip } from '@mantine/core';
 import { IconMinus, IconPlus, IconStarFilled } from '@tabler/icons-react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import type { ExtractedMetadata, FileRecord, MeshValidation } from '@shared/types';
+import type { ExtractedMetadata, FileRecord } from '@shared/types';
 import type { PrintBed } from '@shared/preferences';
 import { COLOR_LABEL_HEX } from '@shared/ratings';
 import { modelFitsAnyBed } from '@shared/print-bed';
 
 import { formatBytes } from '../util/format';
+import { extColor } from '@shared/ext-colors';
 import { ipc } from '../ipc-client';
 
 export interface TileClickModifiers {
@@ -56,19 +57,6 @@ function readStoredThumbSize(): number {
     return DEFAULT_THUMB_SIZE;
   }
 }
-
-const EXT_COLORS: Record<string, string> = {
-  glb: '#7048e8',
-  gltf: '#7048e8',
-  obj: '#1c7ed6',
-  stl: '#37b24d',
-  ply: '#f59f00',
-  '3mf': '#e8590c',
-  mp3: '#4c6ef5',
-  wav: '#4c6ef5',
-  ogg: '#4c6ef5',
-  flac: '#4c6ef5'
-};
 
 export function ThumbGrid({
   libraryId: _libraryId,
@@ -243,7 +231,6 @@ export function ThumbGrid({
                         bedFitProblem={
                           printBeds.length > 0 && !modelFitsAnyBed(meta, printBeds)
                         }
-                        meshValidation={meta?.validation ?? null}
                         onClick={(e) => {
                           onTileClick(file.id, {
                             shift: e.shiftKey,
@@ -298,7 +285,6 @@ function Tile({
   isPrimary,
   tileHeight,
   bedFitProblem,
-  meshValidation,
   onClick,
   onContextMenu,
   onDragStart
@@ -309,12 +295,11 @@ function Tile({
   isPrimary: boolean;
   tileHeight: number;
   bedFitProblem: boolean;
-  meshValidation: MeshValidation | null;
   onClick: (e: React.MouseEvent) => void;
   onContextMenu?: (e: React.MouseEvent) => void;
   onDragStart?: (e: React.DragEvent) => void;
 }) {
-  const color = EXT_COLORS[file.ext] ?? '#868e96';
+  const color = extColor(file.ext);
   const showThumb = file.hasThumb || thumbVersion > 0;
   const thumbUrl = showThumb
     ? `wh3d-thumb://${file.libraryId}/${file.id}?v=${thumbVersion}`
@@ -385,11 +370,42 @@ function Tile({
         ) : (
           <span>.{file.ext}</span>
         )}
+
+        {/* File-format badge: top-right on every tile. Glass pill tinted with
+            the category's pastel color (same recipe as the Filter dropdown /
+            player glass: tint + blur + translucent border + top highlight). */}
+        <div
+          style={{
+            position: 'absolute',
+            top: 4,
+            right: 4,
+            padding: '1px 6px',
+            borderRadius: 6,
+            fontSize: 9,
+            fontWeight: 700,
+            letterSpacing: 0.5,
+            lineHeight: 1.5,
+            textTransform: 'uppercase',
+            color: color,
+            background: `linear-gradient(135deg, ${color}38, ${color}14), rgba(12, 13, 16, 0.42)`,
+            WebkitBackdropFilter: 'blur(8px) saturate(140%)',
+            backdropFilter: 'blur(8px) saturate(140%)',
+            border: '1px solid rgba(255, 255, 255, 0.22)',
+            boxShadow:
+              '0 2px 8px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.25)',
+            textShadow: '0 1px 3px rgba(0, 0, 0, 0.6)',
+            pointerEvents: 'none'
+          }}
+        >
+          {file.ext}
+        </div>
+
+        {/* Warning badges live bottom-right so they never cover the format badge. */}
         {hasError && (
           <div
             style={{
               position: 'absolute',
-              top: 4,
+              bottom: 4,
               right: 4,
               padding: '2px 6px',
               borderRadius: 3,
@@ -421,7 +437,7 @@ function Tile({
             title="Doesn't fit any registered print bed"
             style={{
               position: 'absolute',
-              top: 4,
+              bottom: 4,
               right: 4,
               padding: '1px 5px',
               borderRadius: 3,
@@ -433,25 +449,6 @@ function Tile({
             }}
           >
             OVERSIZE
-          </div>
-        )}
-        {meshValidation && meshValidation.isWatertight === false && !bedFitProblem && (
-          <div
-            title="Non-watertight mesh"
-            style={{
-              position: 'absolute',
-              top: 4,
-              right: 4,
-              padding: '1px 5px',
-              borderRadius: 3,
-              fontSize: 9,
-              fontWeight: 700,
-              background: 'var(--mantine-color-yellow-9)',
-              color: 'var(--mantine-color-yellow-1)',
-              letterSpacing: 0.4
-            }}
-          >
-            LEAKY
           </div>
         )}
         {file.rating > 0 && (

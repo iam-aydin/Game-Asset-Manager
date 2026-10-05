@@ -9,13 +9,20 @@ import type { Readable } from 'node:stream';
  * also needs `Accept-Ranges: bytes` on the response, or the seek bar is dead.
  * Used by the wh3d-file:// handler for video files only; everything else keeps
  * going through net.fetch(file://) exactly as before.
+ *
+ * Any extension missing from VIDEO_MIME silently falls back to the plain
+ * (non-seekable) path, so add new video formats here.
  */
-
 
 const VIDEO_MIME: Record<string, string> = {
   '.mp4': 'video/mp4',
+  '.m4v': 'video/x-m4v',
   '.mov': 'video/quicktime',
-  '.avi': 'video/x-msvideo'
+  '.avi': 'video/x-msvideo',
+  '.webm': 'video/webm',
+  '.mkv': 'video/x-matroska',
+  '.ogv': 'video/ogg',
+  '.bik': 'video/vnd.radgamettools.bink'
 };
 
 export function isVideoPath(abs: string): boolean {
@@ -86,9 +93,9 @@ export function serveRangedFile(req: Request, abs: string): Response {
   const size = statSync(abs).size;
   const contentType = VIDEO_MIME[path.extname(abs).toLowerCase()] ?? 'application/octet-stream';
   const baseHeaders = {
-  'content-type': contentType,
-  'accept-ranges': 'bytes',
-  'access-control-allow-origin': '*'
+    'content-type': contentType,
+    'accept-ranges': 'bytes',
+    'access-control-allow-origin': '*'
   };
 
   const rangeHeader = req.headers.get('range');

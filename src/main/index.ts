@@ -55,6 +55,14 @@ function createMainWindow(): BrowserWindow {
   // (e.g. integrity-check failures during openAllFromRegistry).
   deliverPendingOnReady(win);
 
+  // The hidden thumbnail-worker windows count as windows, so Electron's
+  // 'window-all-closed' never fires while the pool is alive and the process
+  // lingered in the background after the main window closed. Quit explicitly
+  // when the main window goes away (macOS keeps its usual stay-alive behavior).
+  win.on('closed', () => {
+    if (process.platform !== 'darwin') app.quit();
+  });
+
   win.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url);
     return { action: 'deny' };
@@ -116,13 +124,54 @@ void app.whenReady().then(() => {
   });
 });
 
+// Safety net: also quit if every window (hidden ones included) is gone.
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('before-quit', async () => {
+// ─── Shutdown ──────────────────────────────────────────────────────────────
+
+let shutdownStarted = false;
+
+/** Runs one shutdown step; never throws and never waits longer than `ms`. */
+function shutdownStep(label: string, ms: number, fn: () => unknown): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      log.warn('shutdown step timed out', { step: label, ms });
+      resolve();
+    }, ms);
+    Promise.resolve()
+      .then(fn)
+      .then(
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        (err) => {
+          clearTimeout(timer);
+          log.warn('shutdown step failed', { step: label, error: String(err) });
+          resolve();
+        }
+      );
+  });
+}
+
+async function gracefulShutdown(): Promise<void> {
   log.info('app shutting down');
-  await queueRunner.shutdown();
-  await thumbPool.shutdown();
-  manager.shutdown();
+  await shutdownStep('queueRunner', 2000, () => queueRunner.shutdown());
+  await shutdownStep('thumbPool', 2000, () => thumbPool.shutdown());
+  await shutdownStep('libraries', 2000, () => manager.shutdown());
+  // Destroy anything still alive (leftover hidden windows included).
+  for (const w of BrowserWindow.getAllWindows()) {
+    if (!w.isDestroyed()) w.destroy();
+  }
+}
+
+// Electron does not await async 'before-quit' handlers, so hold the quit,
+// finish shutdown (bounded by timeouts), then hard-exit the process.
+app.on('before-quit', (event) => {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  event.preventDefault();
+  void gracefulShutdown().finally(() => app.exit(0));
 });

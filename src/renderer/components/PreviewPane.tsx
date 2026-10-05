@@ -57,6 +57,7 @@ interface Props {
   lightingStyle: LightingStyle;
   onLightingStyleChange: (style: LightingStyle) => void;
   onRerenderThumb: (fileId: number) => void;
+  /** Set by App when an audio OR video tile is clicked; drives autoplay. */
   activeAudio?: { fileId: number; autoPlay: boolean } | null;
 }
 
@@ -109,6 +110,10 @@ export function PreviewPane({
   const isVideo = isVideoExtension(file.ext);
   const is2DOrDoc = isImage || isAudio || isText || isVideo;
 
+  // Same rule for audio and video: autoplay only when this exact file was
+  // just clicked (not on the initial folder auto-select, not on shift/ctrl).
+  const autoPlay = activeAudio?.fileId === file.id ? activeAudio.autoPlay : false;
+
   const yaw = getYaw(file.orientation);
 
   const setOrientation = (next: { upAxis?: UpAxis; yaw?: number }) => {
@@ -156,6 +161,7 @@ export function PreviewPane({
             fileId={file.id}
             filename={file.filename}
             ext={file.ext}
+            autoPlay={autoPlay}
           />
         ) : isAudio ? (
           <AudioPreview libraryId={libraryId} file={file} activeAudio={activeAudio} />

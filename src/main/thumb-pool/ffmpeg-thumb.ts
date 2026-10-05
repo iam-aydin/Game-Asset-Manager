@@ -141,7 +141,36 @@ interface ProbeInfo {
   fps?: number;
   videoCodec?: string;
   audioCodec?: string;
+  audioSampleRate?: number;
+  audioChannels?: number;
+  audioBitrateKbps?: number;
   bitrateKbps?: number;
+}
+
+const NAMED_CHANNEL_LAYOUTS: Record<string, number> = {
+  mono: 1,
+  stereo: 2,
+  downmix: 2,
+  quad: 4
+};
+
+/**
+ * Channel count from the audio stream description, e.g. "48000 Hz, stereo,
+ * fltp, 160 kb/s" -> 2, "48000 Hz, 5.1(side), fltp" -> 6,
+ * "48000 Hz, 2 channels, s16" -> 2.
+ */
+function parseAudioChannels(audioRest: string): number | undefined {
+  const m = /,\s*(mono|stereo|downmix|quad|\d+\.\d(?:\([^)]*\))?|\d+\s+channels?)\s*(?:,|$)/i.exec(
+    audioRest
+  );
+  if (!m) return undefined;
+  const token = m[1].toLowerCase();
+  if (token in NAMED_CHANNEL_LAYOUTS) return NAMED_CHANNEL_LAYOUTS[token];
+  const count = /^(\d+)\s+channel/.exec(token);
+  if (count) return Number(count[1]);
+  const layout = /^(\d+)\.(\d)/.exec(token);
+  if (layout) return Number(layout[1]) + Number(layout[2]);
+  return undefined;
 }
 
 function parseProbe(stderr: string): ProbeInfo | null {
@@ -158,8 +187,15 @@ function parseProbe(stderr: string): ProbeInfo | null {
 
   const fps = /([\d.]+)\s*fps/.exec(rest);
   const vCodec = /^([A-Za-z0-9_]+)/.exec(rest);
-  const aCodec = /Stream #\d+:\d+[^\n]*?: Audio: ([A-Za-z0-9_]+)/.exec(stderr);
   const bitrate = /Duration:[^\n]*bitrate:\s*(\d+)\s*kb\/s/.exec(stderr);
+
+  // First audio stream only. Example line:
+  //   Stream #0:1[0x2](und): Audio: aac (LC) (mp4a / 0x6134706D), 48000 Hz, stereo, fltp, 160 kb/s (default)
+  const audioLine = /Stream #\d+:\d+[^\n]*?: Audio: ([^\n]+)/.exec(stderr);
+  const audioRest = audioLine ? audioLine[1] : '';
+  const aCodec = audioRest ? /^([A-Za-z0-9_]+)/.exec(audioRest) : null;
+  const aRate = audioRest ? /(\d{4,6})\s*Hz/.exec(audioRest) : null;
+  const aBitrate = audioRest ? /(\d+)\s*kb\/s/.exec(audioRest) : null;
 
   return {
     durationSec: Number.isFinite(durationSec) ? durationSec : 0,
@@ -168,6 +204,9 @@ function parseProbe(stderr: string): ProbeInfo | null {
     fps: fps ? Number(fps[1]) : undefined,
     videoCodec: vCodec ? vCodec[1] : undefined,
     audioCodec: aCodec ? aCodec[1] : undefined,
+    audioSampleRate: aRate ? Number(aRate[1]) : undefined,
+    audioChannels: audioRest ? parseAudioChannels(audioRest) : undefined,
+    audioBitrateKbps: aBitrate ? Number(aBitrate[1]) : undefined,
     bitrateKbps: bitrate ? Number(bitrate[1]) : undefined
   };
 }
@@ -237,6 +276,23 @@ export interface FfmpegThumbResult {
   metadata: ExtractedMetadata;
 }
 
+/**
+ * Thrown when ffmpeg could read the file (probe worked) but could not decode
+ * a frame, e.g. AV1 on a build without a software AV1 decoder. Carries the
+ * probed metadata so a fallback renderer can still store fps, codecs and
+ * audio info. The message stays "ffmpeg produced no frame" on purpose: old
+ * persisted failures with that text are cleared on startup (queue-runner).
+ */
+export class FfmpegFrameError extends Error {
+  readonly video: VideoMetadata;
+
+  constructor(message: string, video: VideoMetadata) {
+    super(message);
+    this.name = 'FfmpegFrameError';
+    this.video = video;
+  }
+}
+
 export function isFfmpegAvailable(): boolean {
   return getFfmpegPath() !== null;
 }
@@ -254,18 +310,6 @@ export async function renderVideoThumbnailFfmpeg(absPath: string): Promise<Ffmpe
     const info = parseProbe(probeRun.stderr);
     if (!info) throw new Error('no video stream found: ' + probeRun.stderr.slice(-200));
 
-    const seekSec = info.durationSec > 0 ? info.durationSec * SEEK_FRACTION : 0;
-    const frameStart = Date.now();
-    let png = await extractFrame(absPath, seekSec);
-    // Some files can't seek (or are shorter than the probe claims): retry at 0.
-    if (!png && seekSec > 0) png = await extractFrame(absPath, 0);
-    if (!png) throw new Error('ffmpeg produced no frame');
-    log.info('ffmpeg thumb', {
-      file: absPath.split(/[\\/]/).pop(),
-      probeMs,
-      frameMs: Date.now() - frameStart
-    });
-
     const video: VideoMetadata = {
       durationSec: info.durationSec,
       width: info.width,
@@ -273,8 +317,23 @@ export async function renderVideoThumbnailFfmpeg(absPath: string): Promise<Ffmpe
       fps: info.fps,
       videoCodec: info.videoCodec,
       audioCodec: info.audioCodec,
+      audioSampleRate: info.audioSampleRate,
+      audioChannels: info.audioChannels,
+      audioBitrateKbps: info.audioBitrateKbps,
       bitrateKbps: info.bitrateKbps
     };
+
+    const seekSec = info.durationSec > 0 ? info.durationSec * SEEK_FRACTION : 0;
+    const frameStart = Date.now();
+    let png = await extractFrame(absPath, seekSec);
+    // Some files can't seek (or are shorter than the probe claims): retry at 0.
+    if (!png && seekSec > 0) png = await extractFrame(absPath, 0);
+    if (!png) throw new FfmpegFrameError('ffmpeg produced no frame', video);
+    log.info('ffmpeg thumb', {
+      file: absPath.split(/[\\/]/).pop(),
+      probeMs,
+      frameMs: Date.now() - frameStart
+    });
 
     const metadata: ExtractedMetadata = {
       vertexCount: 0,
