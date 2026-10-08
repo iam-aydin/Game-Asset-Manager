@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, screen, shell, type Rectangle } from 'electron';
 import { join } from 'node:path';
 import { registerLibraryIpc } from '@main/ipc/libraries';
 import { registerFilesIpc } from '@main/ipc/files';
@@ -25,6 +25,142 @@ const log = scopedLogger('app');
 // the renderer's CSP recognizes wh3d-thumb: / wh3d-file: as image / fetch
 // sources.
 registerAssetSchemes();
+const MINI_W = 640;
+const MINI_H = 400;
+const MINI_MARGIN = 24;
+
+interface SavedWindowState {
+  bounds: Rectangle;
+  wasMaximized: boolean;
+  wasFullScreen: boolean;
+  minSize: [number, number];
+}
+
+const savedWindowState = new WeakMap<BrowserWindow, SavedWindowState>();
+const ANIM_MS = 240;
+const easeInOutCubic = (t: number): number =>
+  t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+function animateBounds(win: BrowserWindow, to: Rectangle, ms = ANIM_MS): Promise<void> {
+  return new Promise((resolve) => {
+    const from = win.getBounds();
+    const start = Date.now();
+    const tick = () => {
+      if (win.isDestroyed()) return resolve();
+      const t = Math.min(1, (Date.now() - start) / ms);
+      const k = easeInOutCubic(t);
+      win.setBounds({
+        x: Math.round(from.x + (to.x - from.x) * k),
+        y: Math.round(from.y + (to.y - from.y) * k),
+        width: Math.round(from.width + (to.width - from.width) * k),
+        height: Math.round(from.height + (to.height - from.height) * k)
+      });
+      if (t < 1) setTimeout(tick, 8);
+      else resolve();
+    };
+    tick();
+  });
+}
+
+const animating = new WeakSet<BrowserWindow>();
+
+async function enterMiniMode(win: BrowserWindow): Promise<void> {
+  if (savedWindowState.has(win) || animating.has(win)) return;
+  animating.add(win);
+  try {
+    const state: SavedWindowState = {
+      bounds: win.getNormalBounds(),
+      wasMaximized: win.isMaximized(),
+      wasFullScreen: win.isFullScreen(),
+      minSize: win.getMinimumSize() as [number, number]
+    };
+    savedWindowState.set(win, state);
+
+    if (state.wasFullScreen) win.setFullScreen(false);
+    const startBounds = win.getBounds();
+    if (win.isMaximized()) {
+      win.unmaximize();
+      win.setBounds(startBounds); // start the animation from the maximized size
+    }
+
+    win.setResizable(true);
+    win.setMaximizable(false);
+    win.setMinimumSize(320, 200);
+
+    // Always on top is ON by default in mini mode (Ctrl+T toggles it).
+    win.setAlwaysOnTop(true, 'screen-saver');
+    if (process.platform === 'darwin') {
+      win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    }
+
+    const wa = screen.getDisplayMatching(state.bounds).workArea;
+    await animateBounds(win, {
+      x: wa.x + wa.width - MINI_W - MINI_MARGIN,
+      y: wa.y + wa.height - MINI_H - MINI_MARGIN,
+      width: MINI_W,
+      height: MINI_H
+    });
+    if (!win.isDestroyed()) win.focus();
+  } finally {
+    animating.delete(win);
+  }
+}
+
+
+async function exitMiniMode(win: BrowserWindow): Promise<void> {
+  const state = savedWindowState.get(win);
+  if (!state || animating.has(win)) return;
+  animating.add(win);
+  try {
+    win.setAlwaysOnTop(false);
+    if (process.platform === 'darwin') win.setVisibleOnAllWorkspaces(false);
+
+    // Grow back to exactly the pre-mini size, discarding whatever the user
+    // dragged the mini player to. Min size is restored AFTER growing, because
+    // restoring it first would snap the small window up instantly.
+    const target = state.wasMaximized
+      ? screen.getDisplayMatching(win.getBounds()).workArea
+      : state.bounds;
+    await animateBounds(win, target);
+    if (win.isDestroyed()) return;
+
+    savedWindowState.delete(win);
+    win.setMaximizable(true);
+    win.setResizable(true);
+    win.setMinimumSize(state.minSize[0], state.minSize[1]);
+
+    if (state.wasMaximized) {
+      win.setBounds(state.bounds); // so un-maximizing later returns to the right size
+      win.maximize();
+    } else {
+      win.setBounds(state.bounds);
+      // Windows can apply the first setBounds at the wrong DPI scale; repeat once.
+      setImmediate(() => {
+        if (!win.isDestroyed() && !win.isMaximized()) win.setBounds(state.bounds);
+      });
+    }
+    if (state.wasFullScreen) win.setFullScreen(true);
+    win.focus();
+  } finally {
+    animating.delete(win);
+  }
+}
+
+
+function registerWindowIpc(): void {
+  // Resolves when the animation has finished, so the renderer can sequence its layout swap.
+  ipcMain.handle('window:setMiniMode', async (e, on: boolean) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (!win || win.isDestroyed()) return;
+    if (on) await enterMiniMode(win);
+    else await exitMiniMode(win);
+  });
+
+  ipcMain.handle('window:setMiniAlwaysOnTop', (e, on: boolean) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (!win || win.isDestroyed() || !savedWindowState.has(win)) return;
+    win.setAlwaysOnTop(on, 'screen-saver');
+  });
+}
 
 function createMainWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -44,6 +180,10 @@ function createMainWindow(): BrowserWindow {
       nodeIntegration: false,
       sandbox: false
     }
+    
+  });
+  win.webContents.on('did-start-navigation', (_e, _url, isInPlace, isMainFrame) => {
+    if (isMainFrame && !isInPlace) void exitMiniMode(win);
   });
 
   // Menu stays installed so accelerators (F11, Ctrl +/-, DevTools, undo...)
@@ -95,6 +235,7 @@ void app.whenReady().then(() => {
   registerCollectionsIpc();
   registerPreferencesIpc();
   registerExportIpc();
+  registerWindowIpc();
   // Best-effort restore of registered libraries; failures show as offline.
   // After each library opens its scanner kicks off a scan, and on completion
   // the queue runner reconciles thumbnails.

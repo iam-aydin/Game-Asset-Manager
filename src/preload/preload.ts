@@ -209,7 +209,10 @@ batchRename: (libraryId: string, plan: BatchRenameItem[]) =>
       | { ok: true; label: string }
       | { ok: false; reason: 'failed'; label: string; error: string }
     >,
-
+  setMiniMode: (on: boolean) =>
+    ipcRenderer.invoke('window:setMiniMode', on) as Promise<void>,
+  setMiniAlwaysOnTop: (on: boolean) =>
+    ipcRenderer.invoke('window:setMiniAlwaysOnTop', on) as Promise<void>,
   onLibraryEvent: (handler: (event: LibraryFilesEvent) => void) => {
     const listener = (_e: IpcRendererEvent, event: LibraryFilesEvent) => handler(event);
     ipcRenderer.on(IPC_EVENT.libraryEvent, listener);

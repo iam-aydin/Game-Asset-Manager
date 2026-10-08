@@ -1,4 +1,11 @@
-import { useCallback, useRef, useState, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode
+} from 'react';
 import { AudioPlayer } from './AudioPlayer';
 import { AudioVisualizer } from './AudioVisualizer';
 import { TextPreview } from './TextPreview';
@@ -18,9 +25,13 @@ import {
 } from '@mantine/core';
 import {
   IconMaximize,
+  IconMinimize,
   IconAlertTriangle,
   IconCamera,
-  IconRefresh
+  IconRefresh,
+  IconX,
+  IconPinned,
+  IconPinnedOff
 } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import type { FileRecord } from '@shared/types';
@@ -34,6 +45,13 @@ import { CropOverlay } from './CropOverlay';
 import { ipc } from '../ipc-client';
 import { usePreferences, savePreferences } from '../util/use-preferences';
 import { DEFAULT_RENDER_QUALITY } from '@shared/render-quality';
+
+// Must match AppShell header height in App.tsx. The expanded video preview
+// starts below the header so the search bar / top bar stay visible.
+const APP_HEADER_HEIGHT = 88;
+
+// Mini player header (the native OS title bar sits above it).
+const MINI_HEADER_H = 28;
 
 // Helper to identify document/text extensions
 const isTextExtension = (ext: string): boolean =>
@@ -51,6 +69,9 @@ interface Props {
   onRerenderThumb: (fileId: number) => void;
   /** Set by App when an audio OR video tile is clicked; drives autoplay. */
   activeAudio?: { fileId: number; autoPlay: boolean } | null;
+  /** Fired when the window enters/leaves the mini player (App blocks its
+   *  global shortcuts while true). */
+  onMiniModeChange?: (mini: boolean) => void;
 }
 
 export function PreviewPane({
@@ -61,7 +82,8 @@ export function PreviewPane({
   lightingStyle,
   onLightingStyleChange,
   onRerenderThumb,
-  activeAudio
+  activeAudio,
+  onMiniModeChange
 }: Props) {
   const viewerRef = useRef<ModelViewerHandle>(null);
   const { prefs } = usePreferences();
@@ -70,6 +92,116 @@ export function PreviewPane({
   const showGrid = prefs?.showGrid ?? false;
   const [cropSize, setCropSize] = useState(0);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
+
+  // Video "expand": the preview fills the whole editor (below the header)
+  // without using real OS/browser fullscreen.
+  const [expanded, setExpanded] = useState(false);
+
+  // Mini player mode (I key): the whole Electron window shrinks into a small
+  // always-on-top player, and this preview fills it. Works for every type.
+  const [mini, setMini] = useState(false);
+  const miniRef = useRef(false);
+  const onMiniModeChangeRef = useRef(onMiniModeChange);
+  onMiniModeChangeRef.current = onMiniModeChange;
+
+  // Always-on-top applies to the mini player only. Default ON each time you
+  // enter it; Ctrl+T toggles it.
+  const [pinned, setPinned] = useState(true);
+  const pinnedRef = useRef(true);
+  const transitioningRef = useRef(false);
+
+  const toggleMini = useCallback((next?: boolean) => {
+    if (transitioningRef.current) return; // ignore presses mid-animation
+    const on = next ?? !miniRef.current;
+    if (on === miniRef.current) return;
+    miniRef.current = on;
+    transitioningRef.current = true;
+
+    if (on) {
+      // Swap to the player layout immediately; the window shrinks around it.
+      pinnedRef.current = true;
+      setPinned(true);
+      setMini(true);
+      onMiniModeChangeRef.current?.(true);
+      void ipc.setMiniMode(true).finally(() => {
+        transitioningRef.current = false;
+      });
+    } else {
+      // Keep the player layout until the window has finished growing back.
+      void ipc.setMiniMode(false).finally(() => {
+        setMini(false);
+        onMiniModeChangeRef.current?.(false);
+        transitioningRef.current = false;
+      });
+    }
+  }, []);
+
+  const togglePinned = useCallback(() => {
+    if (!miniRef.current) return;
+    const next = !pinnedRef.current;
+    pinnedRef.current = next;
+    setPinned(next);
+    void ipc.setMiniAlwaysOnTop(next);
+  }, []);
+  // Never leave the window stuck small/on-top if this component unmounts.
+  useEffect(() => {
+    return () => {
+      if (miniRef.current) {
+        miniRef.current = false;
+        onMiniModeChangeRef.current?.(false);
+        void ipc.setMiniMode(false);
+      }
+    };
+  }, []);
+
+  const hasFile = !!file && !!libraryId;
+  const isVideoFile = !!file && isVideoExtension(file.ext);
+
+  // Keyboard: T = expand (same as the top-right button), I = mini player,
+  // Esc = close either one.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t) {
+        const tag = t.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable) {
+          return;
+        }
+      }
+      // Ctrl+T: toggle always-on-top (mini player only).
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 't') {
+        if (miniRef.current) {
+          e.preventDefault();
+          if (!e.repeat) togglePinned();
+        }
+        return;
+      }
+      if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.repeat) return;
+      
+
+      if (e.key === 'Escape') {
+        if (document.fullscreenElement) return;
+        setExpanded(false);
+        if (miniRef.current) toggleMini(false);
+        return;
+      }
+      if (!hasFile) return;
+
+      const key = e.key.toLowerCase();
+      if (key === 't') {
+        e.preventDefault();
+        if (miniRef.current) return;
+        if (isVideoFile) setExpanded((v) => !v);
+        else onMaximize?.();
+      } else if (key === 'i') {
+        e.preventDefault();
+        setExpanded(false);
+        toggleMini();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [hasFile, isVideoFile, onMaximize, toggleMini, togglePinned]);
 
   const attachWrapperRef = useCallback((el: HTMLDivElement | null) => {
     resizeObserverRef.current?.disconnect();
@@ -103,6 +235,10 @@ export function PreviewPane({
   const isText = isTextExtension(file.ext);
   const isVideo = isVideoExtension(file.ext);
   const is2DOrDoc = isImage || isAudio || isText || isVideo;
+
+  // Mini wins over expanded. Expanded only applies to videos, so selecting
+  // a non-video file automatically drops back to the normal layout.
+  const isExpanded = expanded && isVideo && !mini;
 
   // Same rule for audio and video: autoplay only when this exact file was
   // just clicked (not on the initial folder auto-select, not on shift/ctrl).
@@ -141,82 +277,181 @@ export function PreviewPane({
     onRerenderThumb(file.id);
   };
 
+  // Videos expand in place; everything else keeps opening the modal viewer.
+  const handleMaximizeClick = () => {
+    if (isVideo) {
+      setExpanded((v) => !v);
+    } else {
+      onMaximize?.();
+    }
+  };
+
+  const containerStyle: CSSProperties = mini
+    ? {
+        // Fills the (now small) window, covering the whole manager UI.
+        position: 'fixed',
+        inset: 0,
+        zIndex: 160,
+        display: 'flex',
+        flexDirection: 'column',
+        background: '#000'
+      }
+    : isExpanded
+      ? {
+          position: 'fixed',
+          top: APP_HEADER_HEIGHT,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          zIndex: 150,
+          display: 'flex',
+          flexDirection: 'column',
+          background: '#000'
+        }
+      : {
+          flex: 1,
+          minHeight: 0,
+          position: 'relative',
+          display: 'flex',
+          flexDirection: 'column',
+          background: 'var(--wh3d-viewport-bg)'
+        };
+
   return (
     <Stack gap={0} h="100%">
-      {/* Main Preview Container */}
-      <div
-        ref={attachWrapperRef}
-        style={{ flex: 1, minHeight: 0, position: 'relative', background: 'var(--wh3d-viewport-bg)' }}
-      >
-        {isVideo ? (
-          <VideoPlayer
-            key={file.id}
-            libraryId={libraryId}
-            fileId={file.id}
-            filename={file.filename}
-            ext={file.ext}
-            autoPlay={autoPlay}
-          />
-        ) : isAudio ? (
-          <AudioPreview libraryId={libraryId} file={file} activeAudio={activeAudio} />
-        ) : isText ? (
-          <TextPreview libraryId={libraryId} file={file} />
-        ) : (
-          <ModelViewer
-            ref={viewerRef}
-            libraryId={libraryId}
-            file={file}
-            lightingStyle={lightingStyle}
-            hdri={hdri}
-            showGrid={showGrid}
-            renderQuality={renderQuality}
-          />
-        )}
-
-        {/* 3D Crop Overlay skipped for 2D/audio/text/video assets */}
-        {!is2DOrDoc && <CropOverlay size={cropSize} />}
-
-        {onMaximize && !isAudio && (
-          <ActionIcon
-            variant="subtle"
-            color="gray"
-            size="md"
-            onClick={onMaximize}
-            aria-label="Fullscreen"
-            style={{
-              position: 'absolute',
-              top: 8,
-              right: 8,
-              background: 'var(--wh3d-overlay-bg, rgba(16, 17, 19, 0.85))',
-              border: '1px solid var(--wh3d-overlay-border, #2C2E33)',
-              zIndex: 5
-            }}
-          >
-            <IconMaximize size={16} />
-          </ActionIcon>
-        )}
-
-        {selectionCount > 1 && (
+      {/* Main Preview Container (same element in every mode, so players and the
+          3D viewer never remount when switching between normal/expanded/mini) */}
+      <div style={containerStyle}>
+        {mini && (
           <div
             style={{
-              position: 'absolute',
-              top: 8,
-              left: 8,
-              padding: '4px 8px',
-              borderRadius: 4,
-              background: 'rgba(0, 0, 0, 0.65)',
-              color: 'var(--mantine-color-indigo-3)',
-              fontSize: 12,
-              fontWeight: 600,
-              letterSpacing: 0.3,
-              pointerEvents: 'none',
-              fontFamily: 'var(--mantine-font-family-monospace, monospace)'
+              height: MINI_HEADER_H,
+              flexShrink: 0,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '0 6px 0 10px',
+              background: 'var(--mantine-color-dark-7)',
+              borderBottom: '1px solid var(--mantine-color-dark-4)',
+              userSelect: 'none'
             }}
           >
-            {selectionCount} selected
+            <Text size="xs" fw={600} truncate style={{ flex: 1, minWidth: 0 }}>
+              {file.filename}
+            </Text>
+            <Tooltip
+              label={pinned ? 'Always on top: ON (Ctrl+T)' : 'Always on top: OFF (Ctrl+T)'}
+              withinPortal
+            >
+              <ActionIcon
+                variant={pinned ? 'light' : 'subtle'}
+                color={pinned ? 'indigo' : 'gray'}
+                size="sm"
+                onClick={togglePinned}
+                aria-label="Toggle always on top"
+              >
+                {pinned ? <IconPinned size={14} /> : <IconPinnedOff size={14} />}
+              </ActionIcon>
+            </Tooltip>
           </div>
         )}
+
+        <div
+          ref={attachWrapperRef}
+          style={{ flex: 1, minHeight: 0, position: 'relative', background: 'inherit' }}
+        >
+          {isVideo ? (
+            <VideoPlayer
+              key={file.id}
+              libraryId={libraryId}
+              fileId={file.id}
+              filename={file.filename}
+              ext={file.ext}
+              autoPlay={autoPlay}
+            />
+          ) : isAudio ? (
+            <AudioPreview libraryId={libraryId} file={file} activeAudio={activeAudio} />
+          ) : isText ? (
+            <TextPreview libraryId={libraryId} file={file} />
+          ) : (
+            <ModelViewer
+              ref={viewerRef}
+              libraryId={libraryId}
+              file={file}
+              lightingStyle={lightingStyle}
+              hdri={hdri}
+              showGrid={showGrid}
+              renderQuality={renderQuality}
+            />
+          )}
+
+          {/* 3D Crop Overlay skipped for 2D/audio/text/video assets */}
+          {!is2DOrDoc && <CropOverlay size={cropSize} />}
+
+          {(onMaximize || isVideo) && !isAudio && !mini && (
+            <Tooltip
+              label={
+                isVideo
+                  ? isExpanded
+                    ? 'Shrink (T / Esc)'
+                    : 'Expand (T)'
+                  : 'Fullscreen viewer (T)'
+              }
+              withinPortal
+            >
+              <ActionIcon
+                variant="subtle"
+                color="gray"
+                size="md"
+                onClick={handleMaximizeClick}
+                aria-label={isExpanded ? 'Shrink preview' : 'Expand preview'}
+                style={{
+                  position: 'absolute',
+                  top: 8,
+                  right: 8,
+                  background: 'var(--wh3d-overlay-bg, rgba(16, 17, 19, 0.85))',
+                  border: '1px solid var(--wh3d-overlay-border, #2C2E33)',
+                  zIndex: 5
+                }}
+              >
+                {isExpanded ? <IconMinimize size={16} /> : <IconMaximize size={16} />}
+              </ActionIcon>
+            </Tooltip>
+          )}
+
+          {selectionCount > 1 && !mini && (
+            <div
+              style={{
+                position: 'absolute',
+                top: 8,
+                left: 8,
+                padding: '4px 8px',
+                borderRadius: 4,
+                background: 'rgba(0, 0, 0, 0.65)',
+                color: 'var(--mantine-color-indigo-3)',
+                fontSize: 12,
+                fontWeight: 600,
+                letterSpacing: 0.3,
+                pointerEvents: 'none',
+                fontFamily: 'var(--mantine-font-family-monospace, monospace)'
+              }}
+            >
+              {selectionCount} selected
+            </div>
+          )}
+        </div>
       </div>
+
+      {/* Placeholder left behind in the pane while the preview is popped out */}
+      {(mini || isExpanded) && (
+        <Center style={{ flex: 1, minHeight: 0 }}>
+          <Text size="xs" c="dimmed">
+            {mini
+              ? 'Player mode is active (I or Esc to return)'
+              : 'Preview expanded (T or Esc to close)'}
+          </Text>
+        </Center>
+      )}
 
       {/* Control Strip */}
       <div

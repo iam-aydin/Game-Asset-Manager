@@ -657,6 +657,13 @@ export interface IpcApi {
   revealFile(libraryId: string, fileId: number): Promise<void>;
   startFileDrag(libraryId: string, fileId: number): void;
 
+    /**
+   * Shrink the app window into a small always-on-top player (true) or
+   * restore its previous size/position/maximized state (false).
+   */
+  setMiniMode(on: boolean): Promise<void>;
+    /** Mini player only: pin (true) or unpin (false) the window above other apps. */
+  setMiniAlwaysOnTop(on: boolean): Promise<void>;
   /**
    * Subscribe to per-library file events (scan progress + watcher updates).
    * Returns an unsubscribe function.

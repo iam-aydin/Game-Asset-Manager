@@ -220,6 +220,10 @@ export function App() {
   const [activeAudio, setActiveAudio] = useState<{ fileId: number; autoPlay: boolean } | null>(null);
   const [primaryFileId, setPrimaryFileId] = useState<number | null>(null);
   const selectionAnchorRef = useRef<number | null>(null);
+    // True while the window is shrunk into the mini player. The manager UI is
+  // hidden behind it, so global shortcuts (rating, Delete, arrows, Space) must
+  // not fire, or you could trash files you can't see.
+  const miniModeRef = useRef(false);
   // Raised by nav changes (folder/collection/scope), consumed by the
   // files-loaded effect to auto-select the first file. Lives in a ref so IPC-
   // driven reloads (scan-complete, watcher) don't silently change the user's
@@ -1351,6 +1355,7 @@ export function App() {
         )
           return;
       }
+      if (miniModeRef.current) return;
       if (!selectedLibraryId) return;
 
       // Color labels — modifier + 1..5 = red..purple, modifier + 0 = clear.
@@ -1834,6 +1839,7 @@ export function App() {
 
   const previewPane = (
     <PreviewPane
+    
       libraryId={selectedLibraryId}
       file={primaryFile}
       selectionCount={selectedFileIds.size}
@@ -1842,6 +1848,9 @@ export function App() {
       onRerenderThumb={handleRerenderThumb}
       onMaximize={() => setFullscreenOpen(true)}
       activeAudio={activeAudio}
+      onMiniModeChange={(mini) => {
+      miniModeRef.current = mini;
+      }}
     />
   );
 
