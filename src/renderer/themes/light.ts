@@ -74,7 +74,10 @@ const light: Theme = {
     '--wh3d-waveform-played': '#3b5bdb',
     '--wh3d-waveform-unplayed': 'rgba(0,0,0,0.15)',
     '--wh3d-overlay-bg': 'rgba(255,255,255,0.85)',
-    '--wh3d-overlay-border': '#dee2e6'
+    '--wh3d-overlay-border': '#dee2e6',
+    // Audio visualizer bars (darker so they read on the light background)
+    '--wh3d-viz-top': '#4c6ef5',
+    '--wh3d-viz-mid': '#3b5bdb'
   }
 };
 

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useSyncExternalStore } from 'react';
 import type { CSSProperties } from 'react';
+import { useComputedColorScheme } from '@mantine/core';
 
 /**
  * Tiny shared store. AudioPlayer publishes its AnalyserNode and play state here,
@@ -33,6 +34,11 @@ export const audioVizStore = {
 const VIZ_MIN_HZ = 30;
 const VIZ_MAX_HZ = 16000;
 
+// Fallbacks match the dark theme. The active theme overrides them through
+// --wh3d-viz-top / --wh3d-viz-mid (see dark.ts / light.ts).
+const VIZ_TOP_FALLBACK = '#a5b4fc';
+const VIZ_MID_FALLBACK = '#7c83f5';
+
 interface AudioVisualizerProps {
   /** Number of bars. Use more for a wide/hero visualizer, fewer for a small one. */
   bars?: number;
@@ -43,6 +49,8 @@ interface AudioVisualizerProps {
 
 export function AudioVisualizer({ bars = 56, height = '100%', style }: AudioVisualizerProps) {
   const { analyser, isPlaying } = useSyncExternalStore(audioVizStore.subscribe, audioVizStore.get);
+  // Only here so the effect re-runs (and repaints the idle state) on theme change.
+  const colorScheme = useComputedColorScheme('dark');
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const barsRef = useRef(new Float32Array(bars));
@@ -113,10 +121,15 @@ export function AudioVisualizer({ bars = 56, height = '100%', style }: AudioVisu
       const mid = h / 2;
       const maxHalf = mid - 2 * dpr;
 
+      // Theme colors, read each frame so a theme switch shows up immediately.
+      const styles = getComputedStyle(canvas);
+      const vizTop = styles.getPropertyValue('--wh3d-viz-top').trim() || VIZ_TOP_FALLBACK;
+      const vizMid = styles.getPropertyValue('--wh3d-viz-mid').trim() || VIZ_MID_FALLBACK;
+
       const grad = c.createLinearGradient(0, 0, 0, h);
-      grad.addColorStop(0, '#a5b4fc');
-      grad.addColorStop(0.5, '#7c83f5');
-      grad.addColorStop(1, '#a5b4fc');
+      grad.addColorStop(0, vizTop);
+      grad.addColorStop(0.5, vizMid);
+      grad.addColorStop(1, vizTop);
       c.fillStyle = grad;
 
       for (let i = 0; i < bars; i++) {
@@ -154,7 +167,7 @@ export function AudioVisualizer({ bars = 56, height = '100%', style }: AudioVisu
       if (frame !== null) cancelAnimationFrame(frame);
       ro?.disconnect();
     };
-  }, [analyser, isPlaying, bars]);
+  }, [analyser, isPlaying, bars, colorScheme]);
 
   return (
     <div style={{ width: '100%', height, ...style }}>

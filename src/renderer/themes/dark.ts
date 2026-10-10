@@ -49,7 +49,10 @@ const dark: Theme = {
     '--wh3d-waveform-played': '#4c6ef5',
     '--wh3d-waveform-unplayed': 'rgba(255,255,255,0.25)',
     '--wh3d-overlay-bg': 'rgba(16,17,19,0.85)',
-    '--wh3d-overlay-border': '#2C2E33'
+    '--wh3d-overlay-border': '#2C2E33',
+    // Audio visualizer bars
+    '--wh3d-viz-top': '#a5b4fc',
+    '--wh3d-viz-mid': '#7c83f5'
   }
 };
 

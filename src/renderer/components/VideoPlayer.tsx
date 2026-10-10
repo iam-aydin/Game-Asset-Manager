@@ -48,6 +48,13 @@ interface VideoPlayerProps {
   /** false (default): the control bar sits under the video. true: it floats
    *  over the bottom of the video (the glass then blurs the picture). */
   overlayControls?: boolean;
+  /** Fullscreen = the preview fills the whole app window with an animation.
+   *  PreviewPane owns the state (it is not OS fullscreen, so it can animate). */
+  isFullscreen?: boolean;
+  onFullscreen?: () => void;
+  /** Mini player (I key). Passed by PreviewPane. */
+  onMini?: () => void;
+  isMini?: boolean;
 }
 
 const SPEED_PRESETS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 3, 4];
@@ -627,7 +634,10 @@ export function VideoPlayer({
   filename,
   ext,
   autoPlay = false,
-  overlayControls = false
+  overlayControls = false,
+  isFullscreen = false,
+  onFullscreen,
+  isMini = false
 }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
@@ -653,7 +663,6 @@ export function VideoPlayer({
   const [isLooping, setIsLooping] = useState(() => videoPrefsStore.get().isLooping);
   const [volumeOpen, setVolumeOpen] = useState(false);
   const [speedOpen, setSpeedOpen] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
   const [confirmResetOpen, setConfirmResetOpen] = useState(false);
   resetOpenRef.current = confirmResetOpen;
 
@@ -786,11 +795,10 @@ export function VideoPlayer({
 
   const src = `wh3d-file://${libraryId}/${fileId}`;
 
-  // Only the wrapper goes fullscreen, and Mantine portals render on document.body,
-  // which sits behind the fullscreen layer. While fullscreen, portal into the
-  // wrapper instead so menus/tooltips show over the video.
-  const portalProps =
-    isFullscreen && wrapperRef.current ? { target: wrapperRef.current } : undefined;
+  // Fullscreen is no longer OS fullscreen (PreviewPane fills the app window
+  // with an animation instead), so menus and tooltips can portal to
+  // document.body as usual and still sit above the video.
+  const portalProps = undefined;
 
   // Menus stay on top of their button and never flip below it: their height is
   // capped to the room above instead (see useMenuMaxHeight / GlassScroll).
@@ -883,17 +891,13 @@ export function VideoPlayer({
     };
   }, []);
 
+  // Close open menus when fullscreen toggles, so none are left floating
+  // mid-animation at the old position.
   useEffect(() => {
-    const onChange = () => {
-      setIsFullscreen(document.fullscreenElement === wrapperRef.current);
-      // Close open menus on toggle so none are left floating in the wrong layer.
-      setFxOpen(false);
-      setVolumeOpen(false);
-      setSpeedOpen(false);
-    };
-    document.addEventListener('fullscreenchange', onChange);
-    return () => document.removeEventListener('fullscreenchange', onChange);
-  }, []);
+    setFxOpen(false);
+    setVolumeOpen(false);
+    setSpeedOpen(false);
+  }, [isFullscreen]);
 
   // Shift + scroll wheel zooms toward the mouse pointer (the point under the
   // cursor stays put). Native listener so preventDefault works (React's wheel
@@ -1054,11 +1058,9 @@ export function VideoPlayer({
     if (e.button === 1) e.preventDefault();
   };
 
+  // Fullscreen is owned by PreviewPane (animated window-fill, not OS fullscreen).
   const toggleFullscreen = () => {
-    const el = wrapperRef.current;
-    if (!el) return;
-    if (document.fullscreenElement) void document.exitFullscreen();
-    else void el.requestFullscreen().catch(() => undefined);
+    onFullscreen?.();
   };
 
   // Windows-style hover-to-scroll, same helper shape as AudioPlayer.
@@ -1705,21 +1707,28 @@ export function VideoPlayer({
               </Popover.Dropdown>
             </Popover>
 
-            <Tooltip
-              label={isFullscreen ? 'Exit fullscreen (F)' : 'Fullscreen (F)'}
-              withinPortal
-              portalProps={portalProps}
-            >
-              <ActionIcon
-                variant="subtle"
-                color="gray"
-                size="md"
-                onClick={toggleFullscreen}
-                aria-label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+            {/* Hidden in the mini player (fullscreen does nothing there). */}
+            {!isMini && (
+              <Tooltip
+                label={isFullscreen ? 'Exit fullscreen (F / Esc)' : 'Fullscreen (F)'}
+                withinPortal
+                portalProps={portalProps}
               >
-                {isFullscreen ? <IconArrowsMinimize size={16} /> : <IconArrowsMaximize size={16} />}
-              </ActionIcon>
-            </Tooltip>
+                <ActionIcon
+                  variant="subtle"
+                  color="gray"
+                  size="md"
+                  onClick={toggleFullscreen}
+                  aria-label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+                >
+                  {isFullscreen ? (
+                    <IconArrowsMinimize size={16} />
+                  ) : (
+                    <IconArrowsMaximize size={16} />
+                  )}
+                </ActionIcon>
+              </Tooltip>
+            )}
           </Group>
         </Group>
       </Card>

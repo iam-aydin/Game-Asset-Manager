@@ -25,7 +25,11 @@ import {
   IconRepeat,
   IconVolume,
   IconVolumeOff,
-  IconWand
+  IconWand,
+  IconPictureInPicture,
+  IconPictureInPictureOff,
+  IconArrowsMaximize,
+  IconArrowsMinimize
 } from '@tabler/icons-react';
 import { AudioVisualizer, audioVizStore } from './AudioVisualizer';
 
@@ -37,6 +41,10 @@ interface AudioPlayerProps {
   autoPlay?: boolean;
   showHero?: boolean;
   heroHeight?: number;
+  onMini?: () => void;
+  isMini?: boolean;
+  onFullscreen?: () => void;
+  isFullscreen?: boolean;
 }
 
 const EQ_MAX_DB = 12;
@@ -237,7 +245,11 @@ export function AudioPlayer({
   coverUrl,
   autoPlay = false,
   showHero = true,
-  heroHeight = 260
+  heroHeight = 260,
+  onMini,
+  isMini,
+  onFullscreen,
+  isFullscreen
 }: AudioPlayerProps) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -1309,6 +1321,34 @@ export function AudioPlayer({
                 </Group>
               </Popover.Dropdown>
             </Popover>
+            {onMini && (
+              <Tooltip label={isMini ? 'Back to full window (I)' : 'Mini player (I)'} withinPortal>
+                <ActionIcon
+                  variant={isMini ? 'filled' : 'subtle'}
+                  color={isMini ? 'indigo' : 'gray'}
+                  size="md"
+                  aria-label="Mini player"
+                  onPointerDown={(e) => { e.preventDefault(); onMini(); }}
+                  onClick={onMini}
+                >
+                  {isMini ? <IconPictureInPictureOff size={16} /> : <IconPictureInPicture size={16} />}
+                </ActionIcon>
+              </Tooltip>
+            )}
+            {onFullscreen && (
+              <Tooltip label={isFullscreen ? 'Shrink (T / Esc)' : 'Fullscreen (T)'} withinPortal>
+                <ActionIcon
+                  variant="subtle"
+                  color="gray"
+                  size="md"
+                  onClick={onFullscreen}
+                  aria-label={isFullscreen ? 'Shrink preview' : 'Fullscreen preview'}
+                >
+                  {isFullscreen ? <IconArrowsMinimize size={16} /> : <IconArrowsMaximize size={16} />}
+                </ActionIcon>
+              </Tooltip>
+            )}
+            
           </Group>
         </Group>
       </Card>

@@ -21,12 +21,14 @@ import {
   SegmentedControl,
   Stack,
   Text,
-  Tooltip
+  Tooltip,
+  useComputedColorScheme
 } from '@mantine/core';
 import {
   IconMaximize,
   IconMinimize,
   IconAlertTriangle,
+  IconArrowRight,
   IconCamera,
   IconRefresh,
   IconX,
@@ -42,6 +44,17 @@ import { LIGHTING_PRESETS } from '../three/lighting-presets';
 import { HDRI_PRESETS, getHdriPreset } from '../three/hdri-presets';
 import { ModelViewer, type ModelViewerHandle } from '../three/ModelViewer';
 import { CropOverlay } from './CropOverlay';
+import { flushSync } from 'react-dom';
+import {
+  PREVIEW_TRANSITION,
+  previewTransitionCss,
+  pulseResizeBlur,
+  runPreviewTransition
+} from '@shared/transition';
+
+// Applies a state change inside the animated preview transition. flushSync
+// makes React commit it right away so the browser snapshots the new layout.
+const animateLayout = (fn: () => void) => runPreviewTransition(() => flushSync(fn));
 import { ipc } from '../ipc-client';
 import { usePreferences, savePreferences } from '../util/use-preferences';
 import { DEFAULT_RENDER_QUALITY } from '@shared/render-quality';
@@ -52,6 +65,19 @@ const APP_HEADER_HEIGHT = 88;
 
 // Mini player header (the native OS title bar sits above it).
 const MINI_HEADER_H = 28;
+
+// Mini player body colors. These match --wh3d-viewport-bg in light.ts / dark.ts,
+// but are picked from the live color scheme so the mini player follows the
+// theme the moment it switches (video stays black, see containerStyle).
+const MINI_BG_LIGHT = '#f1f2f4';
+const MINI_BG_DARK = '#101113';
+
+// How the preview fills the app window:
+//   normal   = inside its pane
+//   expanded = fills the editor below the header (T key / top-right button)
+//   full     = fills the whole app window, header included (F key / fullscreen button)
+// Both expanded and full animate through animateLayout (see transition.ts).
+type PreviewLayout = 'normal' | 'expanded' | 'full';
 
 // Helper to identify document/text extensions
 const isTextExtension = (ext: string): boolean =>
@@ -72,6 +98,9 @@ interface Props {
   /** Fired when the window enters/leaves the mini player (App blocks its
    *  global shortcuts while true). */
   onMiniModeChange?: (mini: boolean) => void;
+  /** The same theme button/dropdown the main toolbar uses. Rendered in the
+   *  mini player header, just left of the back button. */
+  themeButton?: ReactNode;
 }
 
 export function PreviewPane({
@@ -83,19 +112,18 @@ export function PreviewPane({
   onLightingStyleChange,
   onRerenderThumb,
   activeAudio,
-  onMiniModeChange
+  onMiniModeChange,
+  themeButton
 }: Props) {
   const viewerRef = useRef<ModelViewerHandle>(null);
   const { prefs } = usePreferences();
+  const colorScheme = useComputedColorScheme('dark');
+  const miniBg = colorScheme === 'light' ? MINI_BG_LIGHT : MINI_BG_DARK;
   const renderQuality = prefs?.renderQuality ?? DEFAULT_RENDER_QUALITY;
   const hdri: HdriId = prefs?.hdri ?? DEFAULT_HDRI;
   const showGrid = prefs?.showGrid ?? false;
   const [cropSize, setCropSize] = useState(0);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
-
-  // Video "expand": the preview fills the whole editor (below the header)
-  // without using real OS/browser fullscreen.
-  const [expanded, setExpanded] = useState(false);
 
   // Mini player mode (I key): the whole Electron window shrinks into a small
   // always-on-top player, and this preview fills it. Works for every type.
@@ -104,18 +132,44 @@ export function PreviewPane({
   const onMiniModeChangeRef = useRef(onMiniModeChange);
   onMiniModeChangeRef.current = onMiniModeChange;
 
+  // Video/audio "expand" and "fullscreen": the preview fills the app window
+  // without using real OS/browser fullscreen, so both can be animated.
+  const [layout, setLayout] = useState<PreviewLayout>('normal');
+  const layoutRef = useRef<PreviewLayout>('normal');
+  layoutRef.current = layout;
+  // Every expand/shrink/fullscreen goes through these so it gets the animation
+  // (see transition.ts). Both do nothing while the mini player is active.
+  const toggleExpanded = useCallback(() => {
+    if (miniRef.current) return;
+    animateLayout(() => setLayout((m) => (m === 'normal' ? 'expanded' : 'normal')));
+  }, []);
+  const toggleFullscreen = useCallback(() => {
+    if (miniRef.current) return;
+    animateLayout(() => setLayout((m) => (m === 'full' ? 'normal' : 'full')));
+  }, []);
+
   // Always-on-top applies to the mini player only. Default ON each time you
   // enter it; Ctrl+T toggles it.
   const [pinned, setPinned] = useState(true);
   const pinnedRef = useRef(true);
   const transitioningRef = useRef(false);
+  // A toggle requested while the window is still animating. Instead of being
+  // dropped (which made the button feel like it needed two clicks), it is
+  // remembered and applied as soon as the current transition finishes.
+  const pendingRef = useRef<boolean | null>(null);
 
-  const toggleMini = useCallback((next?: boolean) => {
-    if (transitioningRef.current) return; // ignore presses mid-animation
-    const on = next ?? !miniRef.current;
+  const applyMini = useCallback((on: boolean) => {
     if (on === miniRef.current) return;
     miniRef.current = on;
     transitioningRef.current = true;
+    pulseResizeBlur(); // frost the window before the layout swaps / window resizes
+
+    const done = () => {
+      transitioningRef.current = false;
+      const queued = pendingRef.current;
+      pendingRef.current = null;
+      if (queued !== null && queued !== miniRef.current) applyMini(queued);
+    };
 
     if (on) {
       // Swap to the player layout immediately; the window shrinks around it.
@@ -123,18 +177,29 @@ export function PreviewPane({
       setPinned(true);
       setMini(true);
       onMiniModeChangeRef.current?.(true);
-      void ipc.setMiniMode(true).finally(() => {
-        transitioningRef.current = false;
-      });
+      void ipc.setMiniMode(true).finally(done);
     } else {
       // Keep the player layout until the window has finished growing back.
       void ipc.setMiniMode(false).finally(() => {
+        pulseResizeBlur(); // cover the layout swap back to the full UI
         setMini(false);
         onMiniModeChangeRef.current?.(false);
-        transitioningRef.current = false;
+        done();
       });
     }
   }, []);
+
+  const toggleMini = useCallback(
+    (next?: boolean) => {
+      const want = next ?? !miniRef.current;
+      if (transitioningRef.current) {
+        pendingRef.current = want;
+        return;
+      }
+      applyMini(want);
+    },
+    [applyMini]
+  );
 
   const togglePinned = useCallback(() => {
     if (!miniRef.current) return;
@@ -156,9 +221,11 @@ export function PreviewPane({
 
   const hasFile = !!file && !!libraryId;
   const isVideoFile = !!file && isVideoExtension(file.ext);
+  const isAudioFile = !!file && isAudioExtension(file.ext);
 
-  // Keyboard: T = expand (same as the top-right button), I = mini player,
-  // Esc = close either one.
+  // Keyboard: T = expand (same as the top-right button), F = fullscreen
+  // (audio here, video handles its own F in VideoPlayer), I = mini player,
+  // Esc = close any of them.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
@@ -177,11 +244,10 @@ export function PreviewPane({
         return;
       }
       if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.repeat) return;
-      
 
       if (e.key === 'Escape') {
         if (document.fullscreenElement) return;
-        setExpanded(false);
+        if (layoutRef.current !== 'normal') animateLayout(() => setLayout('normal'));
         if (miniRef.current) toggleMini(false);
         return;
       }
@@ -191,17 +257,32 @@ export function PreviewPane({
       if (key === 't') {
         e.preventDefault();
         if (miniRef.current) return;
-        if (isVideoFile) setExpanded((v) => !v);
+        // T does nothing for audio (its fullscreen is F).
+        if (isAudioFile) return;
+        if (isVideoFile) toggleExpanded();
         else onMaximize?.();
+      } else if (key === 'f' && isAudioFile) {
+        // Audio fullscreen is F only (video handles its own F in VideoPlayer).
+        e.preventDefault();
+        toggleFullscreen();
       } else if (key === 'i') {
         e.preventDefault();
-        setExpanded(false);
+        setLayout('normal');
         toggleMini();
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [hasFile, isVideoFile, onMaximize, toggleMini, togglePinned]);
+  }, [
+    hasFile,
+    isVideoFile,
+    isAudioFile,
+    onMaximize,
+    toggleMini,
+    toggleExpanded,
+    toggleFullscreen,
+    togglePinned
+  ]);
 
   const attachWrapperRef = useCallback((el: HTMLDivElement | null) => {
     resizeObserverRef.current?.disconnect();
@@ -236,9 +317,10 @@ export function PreviewPane({
   const isVideo = isVideoExtension(file.ext);
   const is2DOrDoc = isImage || isAudio || isText || isVideo;
 
-  // Mini wins over expanded. Expanded only applies to videos, so selecting
-  // a non-video file automatically drops back to the normal layout.
-  const isExpanded = expanded && isVideo && !mini;
+  // Mini wins over expanded/full. They only apply to video and audio, so
+  // selecting any other file automatically drops back to the normal layout.
+  const isPopped = layout !== 'normal' && (isVideo || isAudio) && !mini;
+  const isFull = isPopped && layout === 'full';
 
   // Same rule for audio and video: autoplay only when this exact file was
   // just clicked (not on the initial folder auto-select, not on shift/ctrl).
@@ -280,7 +362,7 @@ export function PreviewPane({
   // Videos expand in place; everything else keeps opening the modal viewer.
   const handleMaximizeClick = () => {
     if (isVideo) {
-      setExpanded((v) => !v);
+      toggleExpanded();
     } else {
       onMaximize?.();
     }
@@ -294,19 +376,21 @@ export function PreviewPane({
         zIndex: 160,
         display: 'flex',
         flexDirection: 'column',
-        background: '#000'
+        // Video keeps its black letterbox; everything else follows the theme.
+        background: isVideo ? '#000' : miniBg
       }
-    : isExpanded
+    : isPopped
       ? {
           position: 'fixed',
-          top: APP_HEADER_HEIGHT,
+          // Expanded stops under the header; fullscreen covers the whole window.
+          top: isFull ? 0 : APP_HEADER_HEIGHT,
           left: 0,
           right: 0,
           bottom: 0,
           zIndex: 150,
           display: 'flex',
           flexDirection: 'column',
-          background: '#000'
+          background: isVideo ? '#000' : 'var(--wh3d-viewport-bg)'
         }
       : {
           flex: 1,
@@ -317,11 +401,18 @@ export function PreviewPane({
           background: 'var(--wh3d-viewport-bg)'
         };
 
+  // Lets the browser morph this element between normal / expanded / full layouts.
+  const animatedContainerStyle = {
+    ...containerStyle,
+    viewTransitionName: PREVIEW_TRANSITION.name
+  } as CSSProperties;
+
   return (
     <Stack gap={0} h="100%">
+      <style>{previewTransitionCss()}</style>
       {/* Main Preview Container (same element in every mode, so players and the
-          3D viewer never remount when switching between normal/expanded/mini) */}
-      <div style={containerStyle}>
+          3D viewer never remount when switching between normal/expanded/full/mini) */}
+      <div style={animatedContainerStyle}>
         {mini && (
           <div
             style={{
@@ -330,12 +421,24 @@ export function PreviewPane({
               display: 'flex',
               alignItems: 'center',
               gap: 6,
-              padding: '0 6px 0 10px',
+              // No right padding: the back button sits flush in the corner
+              padding: '0 0 0 10px',
               background: 'var(--mantine-color-dark-7)',
               borderBottom: '1px solid var(--mantine-color-dark-4)',
               userSelect: 'none'
             }}
           >
+            {/* Back button: rounded top-right corner (matches the window's
+                corner), red on hover, same in light and dark */}
+            <style>{`
+              .gam-mini-back {
+                border-radius: 0 8px 0 0 !important;
+              }
+              .gam-mini-back:hover {
+                background-color: #f30000b0 !important;
+                color: #ffffff !important;
+              }
+            `}</style>
             <Text size="xs" fw={600} truncate style={{ flex: 1, minWidth: 0 }}>
               {file.filename}
             </Text>
@@ -353,6 +456,21 @@ export function PreviewPane({
                 {pinned ? <IconPinned size={14} /> : <IconPinnedOff size={14} />}
               </ActionIcon>
             </Tooltip>
+            {/* Same theme button + dropdown as the main toolbar */}
+            {themeButton}
+            <Tooltip label="Back to full window (I / Esc)" withinPortal>
+              <ActionIcon
+                className="gam-mini-back"
+                variant="subtle"
+                color="gray"
+                size="sm"
+                onClick={() => toggleMini(false)}
+                aria-label="Back to full window"
+                style={{ width: 34, height: MINI_HEADER_H }}
+              >
+                <IconArrowRight size={14} />
+              </ActionIcon>
+            </Tooltip>
           </div>
         )}
 
@@ -368,9 +486,27 @@ export function PreviewPane({
               filename={file.filename}
               ext={file.ext}
               autoPlay={autoPlay}
+              onMini={() => {
+                setLayout('normal');
+                toggleMini();
+              }}
+              isMini={mini}
+              onFullscreen={toggleFullscreen}
+              isFullscreen={isFull}
             />
           ) : isAudio ? (
-            <AudioPreview libraryId={libraryId} file={file} activeAudio={activeAudio} />
+            <AudioPreview
+              libraryId={libraryId}
+              file={file}
+              activeAudio={activeAudio}
+              onMini={() => {
+                setLayout('normal');
+                toggleMini();
+              }}
+              isMini={mini}
+              onFullscreen={toggleFullscreen}
+              isFullscreen={isFull}
+            />
           ) : isText ? (
             <TextPreview libraryId={libraryId} file={file} />
           ) : (
@@ -392,7 +528,7 @@ export function PreviewPane({
             <Tooltip
               label={
                 isVideo
-                  ? isExpanded
+                  ? isPopped
                     ? 'Shrink (T / Esc)'
                     : 'Expand (T)'
                   : 'Fullscreen viewer (T)'
@@ -404,7 +540,7 @@ export function PreviewPane({
                 color="gray"
                 size="md"
                 onClick={handleMaximizeClick}
-                aria-label={isExpanded ? 'Shrink preview' : 'Expand preview'}
+                aria-label={isPopped ? 'Shrink preview' : 'Expand preview'}
                 style={{
                   position: 'absolute',
                   top: 8,
@@ -414,7 +550,7 @@ export function PreviewPane({
                   zIndex: 5
                 }}
               >
-                {isExpanded ? <IconMinimize size={16} /> : <IconMaximize size={16} />}
+                {isPopped ? <IconMinimize size={16} /> : <IconMaximize size={16} />}
               </ActionIcon>
             </Tooltip>
           )}
@@ -443,12 +579,14 @@ export function PreviewPane({
       </div>
 
       {/* Placeholder left behind in the pane while the preview is popped out */}
-      {(mini || isExpanded) && (
+      {(mini || isPopped) && (
         <Center style={{ flex: 1, minHeight: 0 }}>
           <Text size="xs" c="dimmed">
             {mini
               ? 'Player mode is active (I or Esc to return)'
-              : 'Preview expanded (T or Esc to close)'}
+              : isFull
+                ? 'Preview fullscreen (F or Esc to close)'
+                : 'Preview expanded (T or Esc to close)'}
           </Text>
         </Center>
       )}
@@ -556,11 +694,21 @@ export function PreviewPane({
 function AudioPreview({
   libraryId,
   file,
-  activeAudio
+  activeAudio,
+  onMini,
+  isMini,
+  onFullscreen,
+  isFullscreen
 }: {
   libraryId: string;
   file: FileRecord;
   activeAudio?: { fileId: number; autoPlay: boolean } | null;
+  /** Enter/leave the mini player from the audio player's own button. */
+  onMini?: () => void;
+  isMini?: boolean;
+  /** Fill the whole app window (animated, same as video's F). */
+  onFullscreen?: () => void;
+  isFullscreen?: boolean;
 }) {
   const thumbSrc = file.hasThumb ? `wh3d-thumb://${libraryId}/${file.id}` : null;
   const autoPlay = activeAudio?.fileId === file.id ? activeAudio.autoPlay : false;
@@ -579,6 +727,10 @@ function AudioPreview({
           thumbSrc={thumbSrc}
           showHero={false}
           autoPlay={autoPlay}
+          onMini={onMini}
+          isMini={isMini}
+          onFullscreen={onFullscreen}
+          isFullscreen={isFullscreen}
         />
       </Box>
     </Stack>

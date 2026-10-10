@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { installResizeBlur } from '@shared/transition';
 import { Menu, useMantineColorScheme } from '@mantine/core';
 import { IconCheck } from '@tabler/icons-react';
 import { THEMES, DEFAULT_THEME_ID, getTheme } from './themes';
@@ -71,6 +72,11 @@ import { DeleteConfirmModal } from './components/DeleteConfirmModal';
 import { MoveConfirmModal } from './components/MoveConfirmModal';
 import { CompareModal } from './components/CompareModal';
 import { FolderRenameModal } from './components/FolderRenameModal';
+// Glass look is always on for now. The on/off switch (theme menu) is commented
+// out below; search for "GLASS TOGGLE" to bring it back. NormalLook.tsx exports
+// the same names, so the switch renders one or the other.
+import { GlassStyles, GLASS_POPOVER_CLASS } from './components/Glasseffect';
+// GLASS TOGGLE: import { GlassStyles as NormalStyles } from './components/NormalLook';
 import { ipc } from './ipc-client';
 import { SUPPORTED_EXTENSIONS, isAudioExtension, isVideoExtension } from '@shared/formats';
 
@@ -80,6 +86,7 @@ const SORT_STORAGE_KEY = 'wh3d:sort';
 const VIEW_STORAGE_KEY = 'wh3d:viewMode';
 const WORKSPACE_STORAGE_KEY = 'wh3d:workspace';
 const THEME_STORAGE_KEY = 'wh3d:theme';
+// GLASS TOGGLE: const GLASS_STORAGE_KEY = 'wh3d:glassUi';
 
 function readStoredThemeId(): string {
   try {
@@ -89,6 +96,16 @@ function readStoredThemeId(): string {
     return DEFAULT_THEME_ID;
   }
 }
+
+// GLASS TOGGLE:
+// /** Glass look is ON unless the user switched it off. */
+// function readStoredGlass(): boolean {
+//   try {
+//     return localStorage.getItem(GLASS_STORAGE_KEY) !== 'off';
+//   } catch {
+//     return true;
+//   }
+// }
 
 const WORKSPACES = {
   triage: { label: 'Triage', outer: [18, 50, 32], inner: [40, 60] },
@@ -204,6 +221,7 @@ interface ThumbLoad {
 }
 
 export function App() {
+  useEffect(() => installResizeBlur(), []);
   const [libraries, setLibraries] = useState<LibrarySummary[]>([]);
   const [selectedLibraryId, setSelectedLibraryId] = useState<string | null>(null);
   const [folderTree, setFolderTree] = useState<FolderTreeNode | null>(null);
@@ -309,6 +327,22 @@ export function App() {
       // ignore
     }
   }, []);
+
+  // Glass look is always on for now.
+  const glassUi = true;
+  // GLASS TOGGLE: on/off switch, persisted like the theme itself.
+  // const [glassUi, setGlassUiState] = useState<boolean>(() => readStoredGlass());
+  // const toggleGlassUi = useCallback(() => {
+  //   setGlassUiState((prev) => {
+  //     const next = !prev;
+  //     try {
+  //       localStorage.setItem(GLASS_STORAGE_KEY, next ? 'on' : 'off');
+  //     } catch {
+  //       // ignore
+  //     }
+  //     return next;
+  //   });
+  // }, []);
 
   // Applies the active theme: Mantine's own light/dark contrast via
   // useMantineColorScheme, plus our custom CSS var overrides at :root. Every
@@ -1880,6 +1914,9 @@ export function App() {
   );
 
   return (
+    <>
+    <GlassStyles />
+    {/* GLASS TOGGLE: {glassUi ? <GlassStyles /> : <NormalStyles />} */}
     <AppShell header={{ height: 88 }} padding={0}>
       <AppShell.Header>
         <Stack gap={0} h="100%">
@@ -1935,7 +1972,7 @@ export function App() {
               </ActionIcon>
             </Tooltip>
 
-            <Menu shadow="md" width={160} position="bottom-end">
+            <Menu shadow="md" width={180} position="bottom-end">
               <Menu.Target>
                 <Tooltip label="Theme">
                   <ActionIcon variant="subtle" aria-label="Change theme">
@@ -1943,7 +1980,7 @@ export function App() {
                   </ActionIcon>
                 </Tooltip>
               </Menu.Target>
-              <Menu.Dropdown>
+              <Menu.Dropdown className={glassUi ? GLASS_POPOVER_CLASS : undefined}>
                 {THEMES.map((t) => (
                   <Menu.Item
                     key={t.id}
@@ -1953,6 +1990,16 @@ export function App() {
                     {t.label}
                   </Menu.Item>
                 ))}
+                {/* GLASS TOGGLE:
+                <Menu.Divider />
+                <Menu.Item
+                  closeMenuOnClick={false}
+                  onClick={toggleGlassUi}
+                  rightSection={glassUi ? <IconCheck size={14} /> : null}
+                >
+                  Glass effect
+                </Menu.Item>
+                */}
               </Menu.Dropdown>
             </Menu>
             <Tooltip label="Preferences">
@@ -2158,6 +2205,7 @@ export function App() {
         />
       )}
     </AppShell>
+    </>
   );
 }
 

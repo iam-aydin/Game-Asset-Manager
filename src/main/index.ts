@@ -17,6 +17,8 @@ import { DEFAULT_LOG_LEVEL, initLogger, scopedLogger, setLogLevel } from '@main/
 import { buildMenu, subscribeMenuToUndoQueue } from '@main/menu';
 import * as prefsStore from '@main/preferences/store';
 import { deliverPendingOnReady } from '@main/events';
+// All animation timing, easing and mini-window sizing lives in transition.ts.
+import { animateBounds, MINI_WINDOW } from '@shared/transition';
 
 const isDev = !app.isPackaged;
 const log = scopedLogger('app');
@@ -25,9 +27,6 @@ const log = scopedLogger('app');
 // the renderer's CSP recognizes wh3d-thumb: / wh3d-file: as image / fetch
 // sources.
 registerAssetSchemes();
-const MINI_W = 640;
-const MINI_H = 400;
-const MINI_MARGIN = 24;
 
 interface SavedWindowState {
   bounds: Rectangle;
@@ -37,29 +36,6 @@ interface SavedWindowState {
 }
 
 const savedWindowState = new WeakMap<BrowserWindow, SavedWindowState>();
-const ANIM_MS = 240;
-const easeInOutCubic = (t: number): number =>
-  t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-function animateBounds(win: BrowserWindow, to: Rectangle, ms = ANIM_MS): Promise<void> {
-  return new Promise((resolve) => {
-    const from = win.getBounds();
-    const start = Date.now();
-    const tick = () => {
-      if (win.isDestroyed()) return resolve();
-      const t = Math.min(1, (Date.now() - start) / ms);
-      const k = easeInOutCubic(t);
-      win.setBounds({
-        x: Math.round(from.x + (to.x - from.x) * k),
-        y: Math.round(from.y + (to.y - from.y) * k),
-        width: Math.round(from.width + (to.width - from.width) * k),
-        height: Math.round(from.height + (to.height - from.height) * k)
-      });
-      if (t < 1) setTimeout(tick, 8);
-      else resolve();
-    };
-    tick();
-  });
-}
 
 const animating = new WeakSet<BrowserWindow>();
 
@@ -94,17 +70,16 @@ async function enterMiniMode(win: BrowserWindow): Promise<void> {
 
     const wa = screen.getDisplayMatching(state.bounds).workArea;
     await animateBounds(win, {
-      x: wa.x + wa.width - MINI_W - MINI_MARGIN,
-      y: wa.y + wa.height - MINI_H - MINI_MARGIN,
-      width: MINI_W,
-      height: MINI_H
+      x: wa.x + wa.width - MINI_WINDOW.width - MINI_WINDOW.margin,
+      y: wa.y + wa.height - MINI_WINDOW.height - MINI_WINDOW.margin,
+      width: MINI_WINDOW.width,
+      height: MINI_WINDOW.height
     });
     if (!win.isDestroyed()) win.focus();
   } finally {
     animating.delete(win);
   }
 }
-
 
 async function exitMiniMode(win: BrowserWindow): Promise<void> {
   const state = savedWindowState.get(win);
@@ -145,7 +120,6 @@ async function exitMiniMode(win: BrowserWindow): Promise<void> {
   }
 }
 
-
 function registerWindowIpc(): void {
   // Resolves when the animation has finished, so the renderer can sequence its layout swap.
   ipcMain.handle('window:setMiniMode', async (e, on: boolean) => {
@@ -180,7 +154,6 @@ function createMainWindow(): BrowserWindow {
       nodeIntegration: false,
       sandbox: false
     }
-    
   });
   win.webContents.on('did-start-navigation', (_e, _url, isInPlace, isMainFrame) => {
     if (isMainFrame && !isInPlace) void exitMiniMode(win);
