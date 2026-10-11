@@ -22,7 +22,7 @@ export type AddLibraryResult =
 
 export interface RemoveLibraryRequest {
   id: string;
-  /** When true, also delete the .meshFlask.db and sidecar caches on disk. */
+  /** When true, also delete this library's cached DB, thumbnails and backups from app data. */
   deleteCache?: boolean;
 }
 

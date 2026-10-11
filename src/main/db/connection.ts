@@ -1,7 +1,4 @@
 import Database from 'better-sqlite3';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { looksLikeNetworkMount } from '@shared/paths';
 import { scopedLogger } from '@main/logger';
 import migration001 from './migrations/001_init.sql?raw';
 import migration002 from './migrations/002_fts_triggers.sql?raw';
@@ -16,7 +13,7 @@ import migration010 from './migrations/010_file_camera.sql?raw';
 import migration011 from './migrations/011_content_sha256.sql?raw';
 
 export const SCHEMA_VERSION = 11;
-export const DB_FILENAME = '.meshFlask.db';
+export const DB_FILENAME = 'library.db';
 
 const log = scopedLogger('db');
 
@@ -101,20 +98,16 @@ function applyMigrations(db: Database.Database): void {
   }
 }
 
-export function openLibraryDatabase(libraryRoot: string): Database.Database {
-  const dbPath = join(libraryRoot, DB_FILENAME);
-  const isNew = !existsSync(dbPath);
+export function openLibraryDatabase(dbPath: string): Database.Database {
   const db = new Database(dbPath);
 
-  // SQLite WAL is unsafe over network mounts; fall back to TRUNCATE there.
+  // The DB lives on the local app-data drive, so WAL is always safe.
   // foreign_keys is per-connection and must be re-enabled every open.
-  const journalMode = looksLikeNetworkMount(libraryRoot) ? 'TRUNCATE' : 'WAL';
-  db.pragma(`journal_mode = ${journalMode}`);
+  db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.pragma('synchronous = NORMAL');
 
   applyMigrations(db);
-  void isNew;
   instrumentSlowQueries(db);
   return db;
 }

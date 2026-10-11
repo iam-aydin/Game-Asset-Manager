@@ -3,11 +3,11 @@ import {
   ActionIcon,
   Badge,
   Button,
-  Checkbox,
   Collapse,
   Group,
   Modal,
   SegmentedControl,
+  Slider,
   Stack,
   Tabs,
   Text,
@@ -29,7 +29,6 @@ import {
   IconSun,
   IconTrash
 } from '@tabler/icons-react';
-import { v4 as uuid } from 'uuid';
 import type {
   ExternalAppRegistration,
   LogLevel,
@@ -254,6 +253,11 @@ const MODAL_CSS = `
 .gam-root .gam-seg .mantine-SegmentedControl-label:hover { color: var(--gam-text); }
 .gam-root .gam-seg .mantine-SegmentedControl-label[data-active] { color: var(--gam-on-accent) !important; }
 
+/* Slider */
+.gam-root .mantine-Slider-track::before { background: var(--gam-field); }
+.gam-root .mantine-Slider-bar { background: var(--gam-accent); }
+.gam-root .mantine-Slider-thumb { border-color: var(--gam-accent); background: var(--gam-on-accent); }
+
 /* Checkbox */
 .gam-root .mantine-Checkbox-input {
   background: var(--gam-field);
@@ -444,6 +448,10 @@ interface Props {
    * color scheme attribute on <html>.
    */
   themeId?: string;
+  /** Window opacity, 0.4 to 1. Below 1 the Windows 11 acrylic backdrop shows through. */
+  windowOpacity?: number;
+  /** Called while the opacity slider moves. */
+  onWindowOpacityChange?: (value: number) => void;
   /** Called when a theme card is picked. Wire this to the app's theme switcher. */
   onThemeChange?: (id: ThemeId) => void;
 }
@@ -458,7 +466,9 @@ export function PreferencesModal({
   onClose,
   libraryId,
   themeId,
-  onThemeChange
+  onThemeChange,
+  windowOpacity,
+  onWindowOpacityChange
 }: Props) {
   const { prefs, reload } = usePreferences();
 
@@ -504,7 +514,13 @@ export function PreferencesModal({
           <RenderQualitySection prefs={prefs} />
         </Tabs.Panel>
         <Tabs.Panel value="theme">
-          <ThemeSection prefs={prefs} themeId={themeId} onThemeChange={onThemeChange} />
+          <ThemeSection
+            prefs={prefs}
+            themeId={themeId}
+            onThemeChange={onThemeChange}
+            windowOpacity={windowOpacity}
+            onWindowOpacityChange={onWindowOpacityChange}
+          />
         </Tabs.Panel>
         <Tabs.Panel value="apps">
           <ExternalAppsSection prefs={prefs} onChanged={reload} />
@@ -593,11 +609,15 @@ function RenderQualitySection({ prefs }: { prefs: PreferencesFile }) {
 function ThemeSection({
   prefs,
   themeId,
-  onThemeChange
+  onThemeChange,
+  windowOpacity = 1,
+  onWindowOpacityChange
 }: {
   prefs: PreferencesFile;
   themeId?: string;
   onThemeChange?: (id: ThemeId) => void;
+  windowOpacity?: number;
+  onWindowOpacityChange?: (value: number) => void;
 }) {
   const { colorScheme, setColorScheme } = useMantineColorScheme();
   
@@ -647,6 +667,29 @@ function ThemeSection({
             </button>
           ))}
         </div>
+      </Category>
+
+      <Category title="Window">
+        <Property
+          label="Opacity"
+          hint="Lower values let your desktop show through, like Windows Terminal. Needs Windows 11; 100% is solid."
+          wide
+        >
+          <Group gap="md" wrap="nowrap">
+            <Slider
+              style={{ flex: 1 }}
+              min={40}
+              max={100}
+              step={5}
+              value={Math.round(windowOpacity * 100)}
+              onChange={(v) => onWindowOpacityChange?.(v / 100)}
+              label={(v) => `${v}%`}
+            />
+            <Text size="xs" c={T.text} ta="right" style={{ width: 38, fontFamily: 'monospace' }}>
+              {Math.round(windowOpacity * 100)}%
+            </Text>
+          </Group>
+        </Property>
       </Category>
 
       <UnitsCategory prefs={prefs} />

@@ -1,26 +1,27 @@
 import type { Theme } from './types';
 
 /**
- * Dark theme — the app's current/default look, extracted as a normal
- * themes/ entry instead of being hardcoded. These are Mantine's own default
- * `dark` shade values (indices 4-8 of the standard 10-step dark scale),
- * which is what every var(--mantine-color-dark-N) in the app already
- * resolves to today — so switching TO this theme is a no-op visually.
+ * Dark theme — neutral black built around #151515. The dark-N values are
+ * set BOTH in `colors` and as --mantine-color-dark-N in `cssVars`; the
+ * cssVars are what the components actually paint with (same pattern as
+ * light.ts).
  */
+const BLACK = '#151515';
+
 const dark: Theme = {
   id: 'dark',
   label: 'Dark',
   colorScheme: 'dark',
 
   colors: {
-    'dark-4': '#373A40',
-    'dark-5': '#2C2E33',
-    'dark-6': '#25262b',
-    'dark-7': '#1A1B1E',
-    'dark-8': '#141517',
+    'dark-4': '#2a2a2a', // borders, dividers
+    'dark-5': '#1d1d1d', // hover/active rows
+    'dark-6': BLACK,     // secondary surfaces
+    'dark-7': BLACK,     // toolbar / card backgrounds
+    'dark-8': BLACK,     // primary background
 
-    'text-primary': '#C1C2C5',
-    'text-dimmed': '#909296',
+    'text-primary': '#d4d4d4',
+    'text-dimmed': '#8c8c8c',
     'gray-2': '#e9ecef',
     'gray-3': '#dee2e6',
 
@@ -35,22 +36,24 @@ const dark: Theme = {
   },
 
   cssVars: {
+    '--mantine-color-dark-4': '#2a2a2a',
+    '--mantine-color-dark-5': '#1d1d1d',
+    '--mantine-color-dark-6': BLACK,
+    '--mantine-color-dark-7': BLACK,
+    '--mantine-color-dark-8': BLACK,
+    '--mantine-color-body': BLACK,
+
     '--wh3d-waveform-blend': 'normal',
     '--wh3d-waveform-opacity': '0.35',
-    '--wh3d-viewport-bg': '#101113',
+    '--wh3d-viewport-bg': '#101010',
     '--wh3d-slider-track': 'rgba(255,255,255,0.1)',
-    // Slider knob: restored to the original look (plain white interior,
-    // white border — effectively an all-white circle) rather than the
-    // blue/black knob added for the light theme. AudioPlayer.tsx reads
-    // these two for every slider's thumb styling.
-    '--wh3d-slider-thumb-bg': '#3b5bdb',
-    '--wh3d-waveform-filter': 'brightness(1.2)',
+    '--wh3d-slider-thumb-bg': '#4c6ef5',
     '--wh3d-slider-thumb-border': '#ffffff',
+    '--wh3d-waveform-filter': 'brightness(1.2)',
     '--wh3d-waveform-played': '#4c6ef5',
     '--wh3d-waveform-unplayed': 'rgba(255,255,255,0.25)',
-    '--wh3d-overlay-bg': 'rgba(16,17,19,0.85)',
-    '--wh3d-overlay-border': '#2C2E33',
-    // Audio visualizer bars
+    '--wh3d-overlay-bg': 'rgba(21,21,21,0.88)',
+    '--wh3d-overlay-border': '#2a2a2a',
     '--wh3d-viz-top': '#a5b4fc',
     '--wh3d-viz-mid': '#7c83f5'
   }

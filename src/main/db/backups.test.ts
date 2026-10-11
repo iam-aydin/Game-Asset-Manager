@@ -5,12 +5,16 @@ import { join } from 'node:path';
 import { rotateBackup, __test } from './backups';
 import { DB_FILENAME } from './connection';
 
-const { BACKUPS_DIR, FILE_PREFIX, FILE_SUFFIX } = __test;
+const { FILE_PREFIX, FILE_SUFFIX } = __test;
 
 let root: string;
+let dbPath: string;
+let backupsDir: string;
 
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), 'meshflask-backups-'));
+  root = mkdtempSync(join(tmpdir(), 'gam-backups-'));
+  dbPath = join(root, DB_FILENAME);
+  backupsDir = join(root, 'backups');
 });
 
 afterEach(() => {
@@ -22,43 +26,42 @@ afterEach(() => {
 });
 
 function writeDb(bytes: Buffer | string): void {
-  writeFileSync(join(root, DB_FILENAME), bytes);
+  writeFileSync(dbPath, bytes);
 }
 
 function listBackups(): string[] {
   try {
-    return readdirSync(join(root, BACKUPS_DIR)).sort();
+    return readdirSync(backupsDir).sort();
   } catch {
     return [];
   }
 }
 
 function seedExistingBackups(timestamps: string[]): void {
-  const dir = join(root, BACKUPS_DIR);
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(backupsDir, { recursive: true });
   for (const ts of timestamps) {
-    writeFileSync(join(dir, FILE_PREFIX + ts + FILE_SUFFIX), 'old');
+    writeFileSync(join(backupsDir, FILE_PREFIX + ts + FILE_SUFFIX), 'old');
   }
 }
 
 describe('rotateBackup', () => {
   it('is a no-op when the source db does not exist', () => {
-    rotateBackup(root);
+    rotateBackup(dbPath, backupsDir);
     expect(listBackups()).toHaveLength(0);
   });
 
   it('is a no-op when the source db is zero bytes', () => {
     writeDb('');
-    rotateBackup(root);
+    rotateBackup(dbPath, backupsDir);
     expect(listBackups()).toHaveLength(0);
   });
 
   it('creates a backup copy with the right name shape', () => {
     writeDb('hello-database');
-    rotateBackup(root);
+    rotateBackup(dbPath, backupsDir);
     const backups = listBackups();
     expect(backups).toHaveLength(1);
-    expect(backups[0]).toMatch(/^meshFlask-\d{8}-\d{6}\.db$/);
+    expect(backups[0]).toMatch(/^gam-\d{8}-\d{6}\.db$/);
   });
 
   it('prunes to keep when the existing count is over the limit', () => {
@@ -75,7 +78,7 @@ describe('rotateBackup', () => {
       '20260109-000000'
     ]);
     writeDb('latest');
-    rotateBackup(root, 7);
+    rotateBackup(dbPath, backupsDir, 7);
     const remaining = listBackups();
     expect(remaining).toHaveLength(7);
     // Oldest should have been pruned, newest preserved.
@@ -86,14 +89,13 @@ describe('rotateBackup', () => {
   it('respects a custom keep parameter', () => {
     seedExistingBackups(['20260101-000000', '20260102-000000', '20260103-000000']);
     writeDb('latest');
-    rotateBackup(root, 2);
+    rotateBackup(dbPath, backupsDir, 2);
     expect(listBackups()).toHaveLength(2);
   });
 
   it('does not prune unrelated files in the backups directory', () => {
-    const dir = join(root, BACKUPS_DIR);
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, 'README.txt'), 'do not touch');
+    mkdirSync(backupsDir, { recursive: true });
+    writeFileSync(join(backupsDir, 'README.txt'), 'do not touch');
     seedExistingBackups([
       '20260101-000000',
       '20260102-000000',
@@ -105,8 +107,8 @@ describe('rotateBackup', () => {
       '20260108-000000'
     ]);
     writeDb('latest');
-    rotateBackup(root, 5);
-    const remaining = readdirSync(dir);
+    rotateBackup(dbPath, backupsDir, 5);
+    const remaining = readdirSync(backupsDir);
     expect(remaining.includes('README.txt')).toBe(true);
   });
 });

@@ -2,8 +2,10 @@ import path from 'node:path';
 import { app, net, protocol } from 'electron';
 import { existsSync, statSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { readFile } from 'node:fs/promises';
 import { getOpenLibrary } from '@main/libraries/manager';
-import { thumbAbsPath } from '@main/thumb-pool/storage';
+import { thumbFilePath } from '@main/thumb-pool/storage';
+import { libraryThumbsDir } from '@main/appdata';
 import { isCoverCapableExt, readAudioCover, readAudioCoverThumb } from '@main/audio-cover';
 import type { AudioCover } from '@main/audio-cover';
 import { scopedLogger } from '@main/logger';
@@ -13,6 +15,7 @@ const log = scopedLogger('protocol');
 
 export const SCHEME_THUMB = 'wh3d-thumb';
 export const SCHEME_FILE = 'wh3d-file';
+export const SCHEME_ASSET = 'gam-asset';
 export const SCHEME_COVER = 'wh3d-cover';
 
 /**
@@ -39,6 +42,10 @@ export function registerAssetSchemes(): void {
     {
       scheme: SCHEME_COVER,
       privileges: { standard: true, secure: true, supportFetchAPI: true }
+    },
+    {
+      scheme: SCHEME_ASSET,
+      privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true }
     }
   ]);
 }
@@ -140,7 +147,7 @@ export function registerAssetProtocols(): void {
       if (cover) return coverResponse(cover);
     }
 
-    const abs = thumbAbsPath(lib.entry.mountPath, parsed.fileId);
+    const abs = thumbFilePath(libraryThumbsDir(lib.entry.id), parsed.fileId);
     if (!existsSync(abs)) return notFound('Thumbnail not yet rendered');
     return net.fetch(pathToFileURL(abs).toString());
   });
@@ -213,6 +220,35 @@ export function registerAssetProtocols(): void {
       return notFound('File missing on disk');
     }
     return serveAssetFile(req, abs);
+  });
+
+  // Bundled app assets (the HDRI files) for the packaged build. Chromium
+  // refuses fetch() on file:// URLs, so the renderer asks for
+  // gam-asset://bundle/<file> and we read it out of out/renderer/assets.
+  protocol.handle(SCHEME_ASSET, async (req) => {
+    let name: string;
+    try {
+      name = decodeURIComponent(new URL(req.url).pathname.replace(/^\/+/, ''));
+    } catch {
+      return badRequest('Invalid gam-asset URL');
+    }
+    // A plain file name only (no folders), and only the asset types we ship.
+    if (name !== path.basename(name) || !/\.hdr$/i.test(name)) {
+      return badRequest('Not an allowed asset');
+    }
+    const abs = path.join(app.getAppPath(), 'out', 'renderer', 'assets', name);
+    try {
+      const data = await readFile(abs);
+      return new Response(new Uint8Array(data), {
+        status: 200,
+        headers: {
+          'content-type': 'application/octet-stream',
+          'access-control-allow-origin': '*'
+        }
+      });
+    } catch {
+      return notFound('Asset not found');
+    }
   });
 
   // Sanity: registering the protocol must happen after app is ready.

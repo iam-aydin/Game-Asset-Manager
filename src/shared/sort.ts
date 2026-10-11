@@ -1,18 +1,21 @@
 /**
- * Sortable fields exposed in the grid toolbar. The metadata-derived fields
- * (`vertices`, `triangles`, `bboxVolume`) require the file to have been
- * rendered at least once; files without metadata sort to the end via
- * NULLS LAST.
+ * Sortable fields exposed in the grid toolbar. Everything after `ext` is read
+ * from the metadata stored when a file's thumbnail was rendered, so files
+ * without that value (not rendered yet, or the wrong kind of file, like fps on
+ * a model) sort to the end in either direction via NULLS LAST.
  */
 export const SORT_FIELDS = [
   'filename',
   'mtime',
   'size',
   'ext',
-  'rating',
   'vertices',
   'triangles',
-  'bboxVolume'
+  'resolution',
+  'duration',
+  'audioBitrate',
+  'videoBitrate',
+  'fps'
 ] as const;
 export type SortField = (typeof SORT_FIELDS)[number];
 
@@ -46,8 +49,11 @@ export const SORT_LABELS: Record<SortField, string> = {
   mtime: 'Modified',
   size: 'Size',
   ext: 'Type',
-  rating: 'Rating',
   vertices: 'Vertices',
   triangles: 'Triangles',
-  bboxVolume: 'Volume'
+  resolution: 'Resolution',
+  duration: 'Length',
+  audioBitrate: 'Audio bitrate',
+  videoBitrate: 'Video bitrate',
+  fps: 'Frame Rate'
 };

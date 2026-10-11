@@ -6,7 +6,7 @@ declare module '*.png' {
 }
 declare global {
   interface Window {
-    meshFlask: IpcApi;
+    gam: IpcApi;
   }
 }
 

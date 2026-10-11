@@ -88,6 +88,37 @@ const WORKSPACE_STORAGE_KEY = 'wh3d:workspace';
 const THEME_STORAGE_KEY = 'wh3d:theme';
 // GLASS TOGGLE: const GLASS_STORAGE_KEY = 'wh3d:glassUi';
 
+const WINDOW_OPACITY_STORAGE_KEY = 'gam:windowOpacity';
+const DEFAULT_WINDOW_OPACITY = 0.85;
+const MIN_WINDOW_OPACITY = 0.4;
+
+/**
+ * Theme colors that paint page/panel backgrounds. With window opacity below
+ * 100% these are mixed with transparent so the Windows 11 acrylic backdrop
+ * shows through. Borders (dark-4) and text (dark-0..3) stay solid.
+ */
+const SURFACE_VARS = new Set([
+  '--mantine-color-body',
+  '--mantine-color-dark-5',
+  '--mantine-color-dark-6',
+  '--mantine-color-dark-7',
+  '--mantine-color-dark-8',
+  '--mantine-color-dark-9'
+]);
+
+function readStoredWindowOpacity(): number {
+  try {
+    const raw = localStorage.getItem(WINDOW_OPACITY_STORAGE_KEY);
+    if (raw === null) return DEFAULT_WINDOW_OPACITY;
+    const n = Number(raw);
+    return Number.isFinite(n)
+      ? Math.min(1, Math.max(MIN_WINDOW_OPACITY, n))
+      : DEFAULT_WINDOW_OPACITY;
+  } catch {
+    return DEFAULT_WINDOW_OPACITY;
+  }
+}
+
 function readStoredThemeId(): string {
   try {
     const raw = localStorage.getItem(THEME_STORAGE_KEY);
@@ -319,6 +350,19 @@ export function App() {
   const [themeId, setThemeIdState] = useState<string>(() => readStoredThemeId());
   const { setColorScheme } = useMantineColorScheme();
 
+  const [windowOpacity, setWindowOpacityState] = useState<number>(() =>
+    readStoredWindowOpacity()
+  );
+  const setWindowOpacity = useCallback((v: number) => {
+    const next = Math.min(1, Math.max(MIN_WINDOW_OPACITY, v));
+    setWindowOpacityState(next);
+    try {
+      localStorage.setItem(WINDOW_OPACITY_STORAGE_KEY, String(next));
+    } catch {
+      // ignore
+    }
+  }, []);
+
   const setThemeId = useCallback((id: string) => {
     setThemeIdState(id);
     try {
@@ -359,13 +403,18 @@ export function App() {
       }
     }
     for (const [key, value] of Object.entries(theme.cssVars)) {
-      root.setProperty(key, value);
+      root.setProperty(
+        key,
+        windowOpacity < 1 && SURFACE_VARS.has(key)
+          ? `color-mix(in srgb, ${value} ${Math.round(windowOpacity * 100)}%, transparent)`
+          : value
+      );
     }
 
     // Let non-CSS consumers (Three.js's WebGL clear color, which can't
     // read CSS custom properties directly) know the theme changed live.
     window.dispatchEvent(new Event('wh3d:themechange'));
-  }, [themeId, setColorScheme]);
+  }, [themeId, setColorScheme, windowOpacity]);
   // --------------------------------------------------------------------------
 
   const outerPanelGroupRef = useRef<ImperativePanelGroupHandle>(null);
@@ -850,7 +899,7 @@ export function App() {
         notifications.show({
           color: 'red',
           title: `Library "${event.libraryName}" failed integrity check`,
-          message: `${event.error}. Recent backups are in .meshFlask/backups/. Reporting an issue? Attach a log from Help → Open Logs Folder.`,
+          message: `${event.error}. Recent backups are in the GAM app data folder under libraries/<id>/backups. Reporting an issue? Attach a log from Help → Open Logs Folder.`,
           autoClose: false
         });
         return;
@@ -1259,7 +1308,7 @@ export function App() {
   );
 
   // Folder-level actions from the FolderTree context menu. Route through the
-  // real `ipc` client (window.meshFlask) rather than a nonexistent
+  // real `ipc` client (window.gam) rather than a nonexistent
   // window.api — see the previous fix for revealFolder/rescanFolder/renameFolder.
   const handleRevealFolder = useCallback(
     (folderPath: string) => {
@@ -1847,7 +1896,6 @@ export function App() {
           {displayedFiles.length} {displayedFiles.length === 1 ? 'item' : 'items'}
           {selectedFileIds.size > 0 && ` · ${selectedFileIds.size} selected`}
         </Text>
-        {sortToolbar}
       </Group>
       <FileListView
         libraryId={selectedLibrary.id}
@@ -2032,6 +2080,7 @@ export function App() {
             />
 
             <div style={{ flex: 1 }} />
+            {sortToolbar}
             <Tooltip
               label="Show only files whose exact content (SHA-256) matches at least one other file"
               withinPortal
@@ -2115,6 +2164,8 @@ export function App() {
         libraryId={selectedLibraryId}
         themeId={themeId}
         onThemeChange={setThemeId}
+        windowOpacity={windowOpacity}
+        onWindowOpacityChange={setWindowOpacity}
       />
 
       <BatchRenameModal
@@ -2192,9 +2243,6 @@ export function App() {
           activeCollectionId={selectedCollectionId}
           onBulkAddTag={handleBulkAddTag}
           onBulkRemoveTag={handleBulkRemoveTag}
-          onBulkSetOrientation={handleBulkSetOrientation}
-          onBulkSetRating={handleBulkSetRating}
-          onBulkSetColorLabel={handleBulkSetColorLabel}
           onBulkRerender={handleBulkRerender}
           onBatchRename={() => setBatchRenameOpen(true)}
           onDuplicate={() => void performDuplicate()}

@@ -369,7 +369,6 @@ const modalStyles = {
                   libraryId={libraryId}
                   fileId={file.id}
                   filename={file.filename}
-                  thumbSrc={file.hasThumb ? thumbUrl : null}
                 />
               </Box>
             </Center>

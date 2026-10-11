@@ -107,7 +107,7 @@ const MAX_TRIANGLES_FOR_VOLUME = MAX_TRIANGLES_FOR_VALIDATION;
  *
  * Vertices are transformed to world space so multi-mesh objects (typical
  * 3MFs with translated parts) sum correctly. Units match the geometry input
- * (mm for STL/3MF in the meshFlask convention).
+ * (mm for STL/3MF in the GAM convention).
  *
  * Returns null when no usable mesh is found or the total triangle count is
  * over the same cap that `validateScene` uses, so the worker stays bounded.

@@ -8,7 +8,8 @@ import { IPC } from '@shared/ipc-channels';
 import type { ExternalAppRegistration, PreferencesFile } from '@shared/preferences';
 import * as store from '@main/preferences/store';
 import { getOpenLibrary } from '@main/libraries/manager';
-import { thumbAbsPath } from '@main/thumb-pool/storage';
+import { thumbFilePath } from '@main/thumb-pool/storage';
+import { libraryThumbsDir } from '@main/appdata';
 import { rebuildThumbnailCache, purgeOrphanThumbs, cacheRebuilds } from '@main/cache/management';
 import { DEFAULT_LOG_LEVEL, openLogsFolder, setLogLevel, scopedLogger } from '@main/logger';
 import { runUndo } from '@main/undo/runner';
@@ -198,7 +199,7 @@ export function registerPreferencesIpc(): void {
     shell.showItemInFolder(absPath);
   });
 
-    // Native OS file drag — lets the user drag a tile out of the window and
+  // Native OS file drag - lets the user drag a tile out of the window and
   // drop it onto an external app (Unreal, Unity, Godot, Explorer, ...).
   // Uses ipcMain.on (fire-and-forget), NOT .handle/invoke: startDrag() must
   // begin synchronously while the OS drag gesture from the renderer's
@@ -221,7 +222,7 @@ export function registerPreferencesIpc(): void {
         return;
       }
 
-      const thumbPath = thumbAbsPath(lib.entry.mountPath, fileId);
+      const thumbPath = thumbFilePath(libraryThumbsDir(lib.entry.id), fileId);
       let icon = existsSync(thumbPath)
         ? nativeImage.createFromPath(thumbPath)
         : nativeImage.createEmpty();

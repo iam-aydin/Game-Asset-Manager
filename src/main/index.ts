@@ -1,4 +1,6 @@
+import '@main/bootstrap';
 import { app, BrowserWindow, ipcMain, Menu, screen, shell, type Rectangle } from 'electron';
+import { release } from 'node:os';
 import { join } from 'node:path';
 import { registerLibraryIpc } from '@main/ipc/libraries';
 import { registerFilesIpc } from '@main/ipc/files';
@@ -22,6 +24,26 @@ import { animateBounds, MINI_WINDOW } from '@shared/transition';
 
 const isDev = !app.isPackaged;
 const log = scopedLogger('app');
+
+// Frosted-glass window: Windows 11 22H2+ (build 22621) can draw a system
+// backdrop material behind the window. 'acrylic' blurs whatever is behind the
+// window (other apps, desktop); 'mica' only tints with the wallpaper. Needs
+// Electron 30+. On anything else (Windows 10, macOS, Linux) we keep the normal
+// opaque window, so the app never ends up see-through without blur.
+const GLASS_MATERIAL = 'acrylic' as const;
+const SOLID_BACKGROUND = '#1a1b1e';
+
+function supportsBackdropMaterial(): boolean {
+  if (process.platform !== 'win32') return false;
+  const build = Number(release().split('.')[2]);
+  return Number.isFinite(build) && build >= 22621;
+}
+
+// Master switch. Leave OFF until the renderer paints translucent surfaces and
+// the top bar is themed; with it on and an opaque page, only the native title
+// bar picks up the blur and it looks broken.
+const ENABLE_GLASS = false;
+const glassEnabled = ENABLE_GLASS && supportsBackdropMaterial();
 
 // Custom URL schemes must be registered as privileged BEFORE app is ready so
 // the renderer's CSP recognizes wh3d-thumb: / wh3d-file: as image / fetch
@@ -138,12 +160,17 @@ function registerWindowIpc(): void {
 
 function createMainWindow(): BrowserWindow {
   const win = new BrowserWindow({
+    
     width: 1280,
     height: 820,
     minWidth: 900,
     minHeight: 600,
     show: false,
-    backgroundColor: '#1a1b1e',
+    // Glass: fully transparent window background so the system material shows
+    // through wherever the page itself is translucent. Otherwise: solid.
+    ...(glassEnabled
+      ? { backgroundColor: '#00000000', backgroundMaterial: GLASS_MATERIAL }
+      : { backgroundColor: SOLID_BACKGROUND }),
     title: 'Game Asset Manager',
     // No native File/Edit/View/Window/Help bar on Windows/Linux. macOS keeps
     // its menu because the system menu bar is part of the OS there.
@@ -155,6 +182,7 @@ function createMainWindow(): BrowserWindow {
       sandbox: false
     }
   });
+  log.info('window backdrop', { glass: glassEnabled, material: glassEnabled ? GLASS_MATERIAL : 'none' });
   win.webContents.on('did-start-navigation', (_e, _url, isInPlace, isMainFrame) => {
     if (isMainFrame && !isInPlace) void exitMiniMode(win);
   });

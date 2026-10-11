@@ -222,4 +222,4 @@ batchRename: (libraryId: string, plan: BatchRenameItem[]) =>
   }
 };
 
-contextBridge.exposeInMainWorld('meshFlask', api);
+contextBridge.exposeInMainWorld('gam', api);

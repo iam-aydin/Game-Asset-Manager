@@ -1,12 +1,10 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { DB_FILENAME } from './connection';
 import { scopedLogger } from '@main/logger';
 
 const log = scopedLogger('db-backup');
 
-const BACKUPS_DIR = '.meshFlask/backups';
-const FILE_PREFIX = 'meshFlask-';
+const FILE_PREFIX = 'gam-';
 const FILE_SUFFIX = '.db';
 const DEFAULT_KEEP = 7;
 
@@ -24,37 +22,28 @@ function timestampForFilename(d: Date): string {
 }
 
 /**
- * Copy `<libraryRoot>/.meshFlask.db` into a timestamped slot under
- * `.meshFlask/backups/`, then prune the directory to the `keep` most recent.
- * Filename layout: `meshFlask-YYYYMMDD-HHmmss.db` (sortable as strings).
- *
- * No-op (with debug log) when the library has no DB yet (brand-new mount) or
- * when the file is zero bytes. Failures are caught and logged — backup is a
- * defense-in-depth feature and must never block library open.
+ * Copy the library DB into a timestamped file under `backupsDir`, then prune
+ * to the `keep` most recent. Filename: `gam-YYYYMMDD-HHmmss.db`.
+ * Never throws: a failed backup must not block opening a library.
  */
-export function rotateBackup(libraryRoot: string, keep: number = DEFAULT_KEEP): void {
-  const src = join(libraryRoot, DB_FILENAME);
+export function rotateBackup(dbPath: string, backupsDir: string, keep: number = DEFAULT_KEEP): void {
   try {
-    if (!existsSync(src)) {
-      log.debug('skip backup: no db yet', { libraryRoot });
+    if (!existsSync(dbPath)) {
+      log.debug('skip backup: no db yet', { dbPath });
       return;
     }
-    const srcStat = statSync(src);
+    const srcStat = statSync(dbPath);
     if (srcStat.size === 0) {
-      log.debug('skip backup: db is zero bytes', { libraryRoot });
+      log.debug('skip backup: db is zero bytes', { dbPath });
       return;
     }
-
-    const dir = join(libraryRoot, BACKUPS_DIR);
-    mkdirSync(dir, { recursive: true });
-
-    const dest = join(dir, FILE_PREFIX + timestampForFilename(new Date()) + FILE_SUFFIX);
-    copyFileSync(src, dest);
-    log.info('backup created', { libraryRoot, dest, bytes: srcStat.size });
-
-    pruneOldBackups(dir, keep);
+    mkdirSync(backupsDir, { recursive: true });
+    const dest = join(backupsDir, FILE_PREFIX + timestampForFilename(new Date()) + FILE_SUFFIX);
+    copyFileSync(dbPath, dest);
+    log.info('backup created', { dbPath, dest, bytes: srcStat.size });
+    pruneOldBackups(backupsDir, keep);
   } catch (err) {
-    log.warn('backup failed', { libraryRoot, err: (err as Error).message });
+    log.warn('backup failed', { dbPath, err: (err as Error).message });
   }
 }
 
@@ -65,12 +54,9 @@ function pruneOldBackups(dir: string, keep: number): void {
   } catch {
     return;
   }
-  const ours = entries
-    .filter((n) => n.startsWith(FILE_PREFIX) && n.endsWith(FILE_SUFFIX))
-    .sort(); // timestamp filenames sort chronologically
+  const ours = entries.filter((n) => n.startsWith(FILE_PREFIX) && n.endsWith(FILE_SUFFIX)).sort();
   if (ours.length <= keep) return;
-  const remove = ours.slice(0, ours.length - keep);
-  for (const name of remove) {
+  for (const name of ours.slice(0, ours.length - keep)) {
     try {
       unlinkSync(join(dir, name));
       log.debug('pruned old backup', { name });
@@ -80,5 +66,4 @@ function pruneOldBackups(dir: string, keep: number): void {
   }
 }
 
-// Exported for tests
-export const __test = { BACKUPS_DIR, FILE_PREFIX, FILE_SUFFIX, timestampForFilename };
+export const __test = { FILE_PREFIX, FILE_SUFFIX, timestampForFilename };

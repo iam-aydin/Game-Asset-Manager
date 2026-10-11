@@ -31,7 +31,6 @@ import {
   IconArrowRight,
   IconCamera,
   IconRefresh,
-  IconX,
   IconPinned,
   IconPinnedOff
 } from '@tabler/icons-react';
@@ -710,7 +709,6 @@ function AudioPreview({
   onFullscreen?: () => void;
   isFullscreen?: boolean;
 }) {
-  const thumbSrc = file.hasThumb ? `wh3d-thumb://${libraryId}/${file.id}` : null;
   const autoPlay = activeAudio?.fileId === file.id ? activeAudio.autoPlay : false;
 
   return (
@@ -724,7 +722,6 @@ function AudioPreview({
           libraryId={libraryId}
           fileId={file.id}
           filename={file.filename}
-          thumbSrc={thumbSrc}
           showHero={false}
           autoPlay={autoPlay}
           onMini={onMini}

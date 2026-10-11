@@ -526,9 +526,20 @@ export function createFilesRepo(db: Database.Database, libraryId: string): Files
  */
 function buildOrderClause(sort: SortSpec): string {
   const dir = sort.direction === 'desc' ? 'DESC' : 'ASC';
-  // SQLite handles NULLS LAST/FIRST natively only as `NULLS LAST` syntax.
-  const nulls = sort.direction === 'desc' ? 'NULLS LAST' : 'NULLS LAST';
+  // Files without a value (no metadata yet, or the wrong kind of file) always
+  // sort to the end, in either direction.
+  const nulls = 'NULLS LAST';
   const tiebreak = ` , files.filename COLLATE NOCASE`;
+  // Read a number out of the stored metadata; NULL when the path is missing.
+  const j = (path: string) => `JSON_EXTRACT(files.metadata_json, '${path}')`;
+  const orderBy = (expr: string) => ` ORDER BY ${expr} ${dir} ${nulls}${tiebreak}`;
+
+  // Length in seconds. Videos store video.durationSec; audio files keep their
+  // duration under audio.* (a few spellings exist in older rows). 0 = unknown.
+  const duration =
+    `NULLIF(COALESCE(${j('$.video.durationSec')}, ${j('$.audio.durationSec')}, ` +
+    `${j('$.audio.duration')}, ${j('$.audio.durationSeconds')}, ${j('$.audio.length')}), 0)`;
+
   switch (sort.field) {
     case 'filename':
       return ` ORDER BY files.filename COLLATE NOCASE ${dir}`;
@@ -538,22 +549,35 @@ function buildOrderClause(sort: SortSpec): string {
       return ` ORDER BY files.size_bytes ${dir}${tiebreak}`;
     case 'ext':
       return ` ORDER BY files.ext ${dir}${tiebreak}`;
-    case 'rating':
-      return ` ORDER BY files.rating ${dir}${tiebreak}`;
     case 'vertices':
-      return ` ORDER BY JSON_EXTRACT(files.metadata_json, '$.vertexCount') ${dir} ${nulls}${tiebreak}`;
+      return orderBy(j('$.vertexCount'));
     case 'triangles':
-      return ` ORDER BY JSON_EXTRACT(files.metadata_json, '$.triangleCount') ${dir} ${nulls}${tiebreak}`;
-    case 'bboxVolume':
-      // size = [x, y, z]; volume = product. SQLite JSON_EXTRACT returns the JSON
-      // array elements as numbers when addressed individually.
-      return (
-        ` ORDER BY (` +
-        `COALESCE(JSON_EXTRACT(files.metadata_json, '$.boundingBox.size[0]'), 0) * ` +
-        `COALESCE(JSON_EXTRACT(files.metadata_json, '$.boundingBox.size[1]'), 0) * ` +
-        `COALESCE(JSON_EXTRACT(files.metadata_json, '$.boundingBox.size[2]'), 0)` +
-        `) ${dir} ${nulls}${tiebreak}`
+      return orderBy(j('$.triangleCount'));
+    case 'resolution':
+      // Pixel count. Images store imageWidth/imageHeight, videos video.width/height.
+      return orderBy(
+        `NULLIF(COALESCE(${j('$.imageWidth')} * ${j('$.imageHeight')}, ` +
+          `${j('$.video.width')} * ${j('$.video.height')}), 0)`
       );
+    case 'duration':
+      return orderBy(duration);
+    case 'fps':
+      return orderBy(j('$.video.fps'));
+    case 'videoBitrate':
+      // Bitrate in kbps as probed by ffmpeg.
+      return orderBy(j('$.video.bitrateKbps'));
+    case 'audioBitrate': {
+      // Videos: ffmpeg's audio-stream bitrate. Audio files: the stored bitrate
+      // (bps or kbps, normalised to kbps), else file size / length, the same
+      // fallback the metadata panel uses.
+      const stored = `COALESCE(${j('$.audio.bitrate')}, ${j('$.audio.bitRate')})`;
+      const storedKbps = `CASE WHEN ${stored} > 1000 THEN ${stored} / 1000.0 ELSE ${stored} END`;
+      const computed = `files.size_bytes * 8.0 / 1000.0 / ${duration}`;
+      return orderBy(
+        `COALESCE(${j('$.video.audioBitrateKbps')}, ` +
+          `CASE WHEN ${j('$.thumbSource')} = 'audio' THEN COALESCE(${storedKbps}, ${computed}) END)`
+      );
+    }
   }
 }
 

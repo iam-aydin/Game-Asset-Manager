@@ -16,10 +16,26 @@ import type { HdriId } from '@shared/hdri';
  */
 const cache = new Map<HdriId, Promise<THREE.Texture>>();
 
+/**
+ * In the packaged app the page is a file:// page and Chromium refuses to
+ * fetch() file:// URLs, so bundled files are requested through the gam-asset://
+ * protocol instead (served by the main process). In dev the URL is plain http
+ * and is used as-is.
+ */
+function resolveHdriUrl(url: string): string {
+  if (!url.startsWith('file:')) return url;
+  const name = url.split(/[?#]/)[0].split('/').pop() ?? '';
+  return `gam-asset://bundle/${name}`;
+}
+
 export function loadHdri(id: HdriId, url: string): Promise<THREE.Texture> {
   let pending = cache.get(id);
   if (!pending) {
-    pending = new HDRLoader().loadAsync(url).then((texture) => {
+    // Own LoadingManager on purpose: the default one may carry a global URL
+    // modifier (used to find a model's sibling files) that rewrites these URLs.
+    // Own LoadingManager on purpose: the default one may carry a global URL
+    // modifier (used to find a model's sibling files) that rewrites these URLs.
+    pending = new HDRLoader(new THREE.LoadingManager()).loadAsync(resolveHdriUrl(url)).then((texture) => {
       texture.mapping = THREE.EquirectangularReflectionMapping;
       // Handy to confirm which file really loaded (DevTools console, Ctrl+Shift+I).
       const img = texture.image as { width: number; height: number };

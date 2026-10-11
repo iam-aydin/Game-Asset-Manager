@@ -1,16 +1,21 @@
 import { existsSync, rmSync, statSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, resolve } from 'node:path';
 import { v4 as uuid } from 'uuid';
 import type Database from 'better-sqlite3';
 import type { LibrarySummary } from '@shared/types';
 import {
-  DB_FILENAME,
   insertLibraryRow,
   openLibraryDatabase,
   readLibraryRow,
   runIntegrityCheck
 } from '@main/db/connection';
 import { rotateBackup } from '@main/db/backups';
+import {
+  ensureLibraryDataDir,
+  libraryBackupsDir,
+  libraryDataPath,
+  libraryDbPath
+} from '@main/appdata';
 import { broadcastOrQueue } from '@main/events';
 import { undoQueue } from '@main/undo/queue';
 import { createFilesRepo, type FilesRepo } from '@main/db/repos/files';
@@ -53,6 +58,12 @@ function toSummary(entry: registry.RegistryEntry, online: boolean): LibrarySumma
     online,
     lastSeen: entry.lastSeen
   };
+}
+
+function sameFolder(a: string, b: string): boolean {
+  const x = resolve(a);
+  const y = resolve(b);
+  return process.platform === 'win32' ? x.toLowerCase() === y.toLowerCase() : x === y;
 }
 
 function attachLibrary(entry: registry.RegistryEntry, db: Database.Database): OpenLibrary {
@@ -123,22 +134,27 @@ export function openAllFromRegistry(): LibrarySummary[] {
       summaries.push(toSummary(entry, true));
       continue;
     }
-    const dbPath = join(entry.mountPath, DB_FILENAME);
-    if (!existsSync(dbPath)) {
+    if (!existsSync(entry.mountPath)) {
       log.warn('library mount missing on startup', { id: entry.id, mountPath: entry.mountPath });
       summaries.push(toSummary(entry, false));
       continue;
     }
     try {
+      ensureLibraryDataDir(entry.id);
       // Snapshot the DB before opening — better-sqlite3 takes a WAL lock on
       // open, so doing this first guarantees a clean file copy.
-      rotateBackup(entry.mountPath);
-      const db = openLibraryDatabase(entry.mountPath);
-      const row = readLibraryRow(db);
-      if (!row || row.id !== entry.id) {
+      rotateBackup(libraryDbPath(entry.id), libraryBackupsDir(entry.id));
+      const db = openLibraryDatabase(libraryDbPath(entry.id));
+      let row = readLibraryRow(db);
+      if (!row) {
+        // Registered folder but no DB in app data yet: start a fresh one under the same id.
+        insertLibraryRow(db, { id: entry.id, name: entry.label });
+        row = { id: entry.id, name: entry.label };
+      }
+      if (row.id !== entry.id) {
         log.warn('library id mismatch on registry open', {
           id: entry.id,
-          rowId: row?.id,
+          rowId: row.id,
           mountPath: entry.mountPath
         });
         db.close();
@@ -185,23 +201,25 @@ export function addLibrary(args: {
     return { ok: false, error: `Not a directory: ${mountPath}` };
   }
 
+  // Re-adding a folder that is already registered reuses its id (and its data).
+  const known = registry.listEntries().find((e) => sameFolder(e.mountPath, mountPath));
+  const id = known?.id ?? uuid();
+
   let db: Database.Database;
   try {
-    rotateBackup(mountPath);
-    db = openLibraryDatabase(mountPath);
+    ensureLibraryDataDir(id);
+    rotateBackup(libraryDbPath(id), libraryBackupsDir(id));
+    db = openLibraryDatabase(libraryDbPath(id));
   } catch (e) {
     return { ok: false, error: `Failed to open DB: ${(e as Error).message}` };
   }
 
-  let id: string;
   let name: string;
   try {
     const existing = readLibraryRow(db);
     if (existing) {
-      id = existing.id;
       name = existing.name;
     } else {
-      id = uuid();
       name = args.name?.trim() || basename(mountPath) || 'Library';
       insertLibraryRow(db, { id, name });
     }
@@ -210,8 +228,8 @@ export function addLibrary(args: {
     return { ok: false, error: `Failed to read/write library row: ${(e as Error).message}` };
   }
 
-  // Upsert covers both first-add and re-mounting an existing library at a
-  // new path (the supported way to "move" a library between mounts).
+  // Upsert covers both first-add and re-pointing an existing library at a
+  // new path.
   registry.upsertEntry({ id, label: name, mountPath, lastSeen: Date.now() });
 
   // Detach any prior handle for this id (different mount) and re-attach.
@@ -255,8 +273,8 @@ export function removeLibrary(args: {
 
   if (args.deleteCache && entry) {
     try {
-      rmSync(join(entry.mountPath, DB_FILENAME), { force: true });
-      rmSync(join(entry.mountPath, '.meshFlask'), { recursive: true, force: true });
+      // DB, thumbnails and backups all live in this one app-data folder.
+      rmSync(libraryDataPath(entry.id), { recursive: true, force: true });
     } catch (e) {
       log.error('library cache delete failed', {
         id: args.id,

@@ -26,11 +26,11 @@ export function ViewSortToolbar({ sort, onSortChange, view, onViewChange }: Prop
     <Group gap={6} wrap="nowrap">
       <Select
         size="xs"
-        w={120}
+        w={132}
         value={sort.field}
         onChange={(v) => v && onSortChange({ ...sort, field: v as SortField })}
         data={SORT_FIELDS.map((f) => ({ value: f, label: SORT_LABELS[f] }))}
-        comboboxProps={{ withinPortal: true }}
+        comboboxProps={{ withinPortal: true }} maxDropdownHeight={400}
         allowDeselect={false}
       />
       <Tooltip

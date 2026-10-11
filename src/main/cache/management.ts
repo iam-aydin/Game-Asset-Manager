@@ -3,10 +3,10 @@ import { readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { OpenLibrary } from '@main/libraries/manager';
 import { queueRunner } from '@main/thumb-pool/queue-runner';
+import { libraryThumbsDir } from '@main/appdata';
 import type { CacheProgress } from '@shared/types';
 import { scopedLogger } from '@main/logger';
 
-const THUMBS_DIR = '.meshFlask/thumbs';
 const log = scopedLogger('cache');
 
 function idleProgress(libraryId: string): CacheProgress {
@@ -70,8 +70,9 @@ export class CacheRebuildService extends EventEmitter {
   /**
    * Cancel an in-progress rebuild: drop the queued (unclaimed) jobs so no more
    * renders start. In-flight renders finish on their own — their thumbnails are
-   * harmless extra rows — leaving DB + sidecars consistent. The remaining files
-   * simply have no thumb yet and get picked up by the next scan/open reconcile.
+   * harmless extra rows — leaving DB + thumbnail files consistent. The remaining
+   * files simply have no thumb yet and get picked up by the next scan/open
+   * reconcile.
    */
   cancel(library: OpenLibrary): void {
     const libraryId = library.entry.id;
@@ -128,15 +129,14 @@ export function rebuildThumbnailCache(library: OpenLibrary): void {
 }
 
 /**
- * Walk `<root>/.meshFlask/thumbs/**` and delete any sidecar PNG/WebP whose
+ * Walk the library's thumbs folder in app data and delete any PNG whose
  * `file_id` (encoded in the filename) is no longer present in the DB.
  * Returns the number of files removed.
  *
- * Sidecar layout: `.meshFlask/thumbs/<aa>/<bb>/<file_id>.webp`
+ * Layout: `<AppData>/GAM/libraries/<libraryId>/thumbs/<aa>/<bb>/<file_id>.png`
  */
 export function purgeOrphanThumbs(library: OpenLibrary): { removed: number } {
-  const root = library.resolver.getMountPath();
-  const base = join(root, THUMBS_DIR);
+  const base = libraryThumbsDir(library.entry.id);
   const known = new Set(library.thumbnails.listAllFileIds());
   let removed = 0;
 

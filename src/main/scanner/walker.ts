@@ -29,7 +29,6 @@ export class WalkAbortedError extends Error {
 }
 
 const DEFAULT_IGNORE: ReadonlySet<string> = new Set([
-  '.meshFlask',
   '.git',
   '.svn',
   '.hg',

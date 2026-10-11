@@ -9,7 +9,8 @@ import {
   TRANSIENT_RENDER_ERROR_MESSAGES,
   isTransientRenderError
 } from '@shared/transient-errors';
-import { thumbAbsPath, thumbRelPath, writeThumbnailFile } from './storage';
+import { thumbFilePath, thumbRelPath, writeThumbnailFile } from './storage';
+import { libraryThumbsDir } from '@main/appdata';
 import { thumbPool } from './pool';
 import { FfmpegFrameError, renderVideoThumbnailFfmpeg } from './ffmpeg-thumb';
 import { scopedLogger, time } from '@main/logger';
@@ -121,8 +122,8 @@ export class ThumbQueueRunner extends EventEmitter {
    * Persist a caller-supplied PNG as the thumbnail (skips the worker
    * pipeline). The metadata panel uses this to snapshot the in-UI viewer
    * after the user has rotated the model. Same downstream effects as a
-   * normal render: PNG to sidecar, thumbnails row upserted, error cleared,
-   * 'thumb-rendered' event emitted so the grid refreshes.
+   * normal render: PNG to the thumbs folder, thumbnails row upserted, error
+   * cleared, 'thumb-rendered' event emitted so the grid refreshes.
    */
   async saveCustomThumbnail(
     library: OpenLibrary,
@@ -131,7 +132,7 @@ export class ThumbQueueRunner extends EventEmitter {
   ): Promise<void> {
     const file = library.files.getById(fileId);
     if (!file) return;
-    const thumbAbs = thumbAbsPath(library.entry.mountPath, fileId);
+    const thumbAbs = thumbFilePath(libraryThumbsDir(library.entry.id), fileId);
     await writeThumbnailFile(thumbAbs, png);
     safeDb(library, () => {
       library.thumbnails.upsert({
@@ -260,7 +261,7 @@ export class ThumbQueueRunner extends EventEmitter {
 
     if (finalErr === null && png && metadata) {
       try {
-        const thumbAbs = thumbAbsPath(lib.entry.mountPath, file.id);
+        const thumbAbs = thumbFilePath(libraryThumbsDir(lib.entry.id), file.id);
         await writeThumbnailFile(thumbAbs, png);
         if (!isLibraryDbOpen(lib)) return;
         safeDb(lib, () => {
@@ -281,7 +282,7 @@ export class ThumbQueueRunner extends EventEmitter {
         this.emit('thumb-rendered', lib.entry.id, file.id);
         return;
       } catch (writeErr) {
-        // Writing the sidecar PNG can fail (NAS hiccup, disk full); fall
+        // Writing the thumbnail PNG can fail (disk full, permissions); fall
         // through to the failure handler.
         finalErr = (writeErr as Error).message ?? String(writeErr);
       }
