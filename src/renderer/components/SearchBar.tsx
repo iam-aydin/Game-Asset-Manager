@@ -32,6 +32,10 @@ interface Props {
    *  in one state update. Used by the per-category checkbox. */
   onSetExtensions: (exts: SupportedExtension[], selected: boolean) => void;
   onClearExtensions: () => void;
+  /** Middle-click on the Filter button. Should clear every active filter (file
+   *  types, tags, rating, color labels, duplicates-only). Falls back to
+   *  onClearExtensions when not given. */
+  onClearAllFilters?: () => void;
   /** Active library — drives the inline scope hint so the user can see at
    *  a glance that the search is library-scoped. */
   libraryName: string | null;
@@ -248,6 +252,7 @@ export function SearchBar({
   onToggleExtension,
   onSetExtensions,
   onClearExtensions,
+  onClearAllFilters,
   libraryName,
   matchBadge
 }: Props) {
@@ -342,6 +347,16 @@ export function SearchBar({
             radius="xl"
             rightSection={<IconChevronDown size={12} />}
             style={{ flexShrink: 0 }}
+            // Middle-click clears every filter right away, no questions asked.
+            // Stopping mousedown also keeps the browser's autoscroll circle away.
+            onMouseDown={(e) => {
+              if (e.button === 1) e.preventDefault();
+            }}
+            onAuxClick={(e) => {
+              if (e.button !== 1) return;
+              e.preventDefault();
+              (onClearAllFilters ?? onClearExtensions)();
+            }}
           >
             Filter{activeCount > 0 ? ` (${activeCount})` : ''}
           </Button>

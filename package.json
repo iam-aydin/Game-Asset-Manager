@@ -1,6 +1,6 @@
 {
   "name": "GAM",
-  "version": "0.9.41",
+  "version": "0.9.44",
   "description": "Browser and organizer for 3D models, Images and Audio Files",
   "main": "out/main/index.js",
   "author": "iam-aydin",

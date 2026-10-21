@@ -33,6 +33,7 @@ import {
   IconPlayerPlay,
   IconRepeat,
   IconVolume,
+  IconVolume2,
   IconVolumeOff,
   IconWand
 } from '@tabler/icons-react';
@@ -626,6 +627,13 @@ function FxSlider({
       />
     </div>
   );
+}
+
+// Volume icon follows the level: muted, one wave at 50% or below, two waves above.
+function VolumeIcon({ pct, muted, size }: { pct: number; muted: boolean; size: number }) {
+  if (muted || pct <= 0) return <IconVolumeOff size={size} />;
+  if (pct <= 50) return <IconVolume2 size={size} />;
+  return <IconVolume size={size} />;
 }
 
 export function VideoPlayer({
@@ -1646,7 +1654,7 @@ export function VideoPlayer({
                             : undefined
                       }}
                     >
-                      {muted ? <IconVolumeOff size={16} /> : <IconVolume size={16} />}
+                      <VolumeIcon pct={volumePct} muted={muted} size={16} />
                     </ActionIcon>
                   </Tooltip>
                 </Box>
@@ -1667,7 +1675,7 @@ export function VideoPlayer({
                         backgroundColor: muted ? 'rgba(128, 128, 128, 0.5)' : undefined
                       }}
                     >
-                      {muted ? <IconVolumeOff size={14} /> : <IconVolume size={14} />}
+                      <VolumeIcon pct={volumePct} muted={muted} size={14} />
                     </ActionIcon>
                     <Slider
                       size="xs"
@@ -1873,7 +1881,7 @@ export function VideoPlayer({
             defaults?
           </Text>
           <Group justify="flex-end" gap="xs">
-            <Button variant="subtle" color="gray" onClick={() => setConfirmResetOpen(false)}>
+            <Button variant="default" onClick={() => setConfirmResetOpen(false)}>
               Cancel
             </Button>
             <Button color="red" onClick={confirmResetEffects}>

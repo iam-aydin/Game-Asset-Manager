@@ -50,6 +50,14 @@ const glassEnabled = ENABLE_GLASS && supportsBackdropMaterial();
 // sources.
 registerAssetSchemes();
 
+// Lets Chromium publish the Media Session (title, play / pause, seek) to the
+// Windows media panel in quick settings and to hardware media keys. Must be set
+// before the app is ready.
+app.commandLine.appendSwitch(
+  'enable-features',
+  'HardwareMediaKeyHandling,MediaSessionService'
+);
+
 interface SavedWindowState {
   bounds: Rectangle;
   wasMaximized: boolean;

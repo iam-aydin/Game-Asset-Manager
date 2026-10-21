@@ -2069,6 +2069,13 @@ export function App() {
               onToggleExtension={handleToggleExtension}
               onSetExtensions={handleSetExtensions}
               onClearExtensions={() => setSelectedExtensions(new Set())}
+              onClearAllFilters={() => {
+                setSelectedExtensions(new Set());
+                setSelectedTagIds(new Set());
+                setMinRating(0);
+                setSelectedColorLabels(new Set());
+                setDuplicatesOnly(false);
+              }}
               libraryName={selectedLibrary?.name ?? null}
                             matchBadge={
                 filterActive ? (

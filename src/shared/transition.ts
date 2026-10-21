@@ -169,6 +169,52 @@ export function previewTransitionCss(): string {
   `;
 }
 
+// ─── 2b. Mini player: hide / show the interface (renderer) ──────────────────
+// The eye button in the mini player header collapses everything except the
+// header buttons: the filename and header background slide out to the window
+// edge, the control strip (View / Environment / Grid) slides down and
+// disappears, and the viewport label (Grid: 1 cell = 1 units) shrinks.
+// PreviewPane drives these with plain CSS transitions using the values below.
+
+export const MINI_CHROME_TRANSITION = {
+  durationMs: 280,
+  /** CSS easing (same feel as the expand animation). */
+  cssEasing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+  /** How far the filename slides toward the left edge while fading, in px. */
+  titleSlidePx: 24,
+  /** How far the control strip slides down while it collapses, as a % of its height. */
+  stripSlidePercent: 100,
+  /** Scale the viewport label ends at when the interface is hidden (1 = no shrink). */
+  labelScale: 0.7
+} as const;
+
+/** Builds a CSS `transition` value for the given properties, e.g.
+ *  miniChromeTransition('opacity', 'transform'). */
+export function miniChromeTransition(...props: string[]): string {
+  const { durationMs, cssEasing } = MINI_CHROME_TRANSITION;
+  return props.map((p) => `${p} ${durationMs}ms ${cssEasing}`).join(', ');
+}
+
+/** CSS for the viewport label. Give the label element the class
+ *  `gam-viewport-label`; PreviewPane sets data-mini-chrome="hidden" | "shown"
+ *  on its container. Render once: <style>{miniChromeCss()}</style> */
+export function miniChromeCss(): string {
+  const { labelScale } = MINI_CHROME_TRANSITION;
+  return `
+    [data-mini-chrome] .gam-viewport-label {
+      transform-origin: left bottom;
+      transition: ${miniChromeTransition('transform', 'opacity')};
+    }
+    [data-mini-chrome="hidden"] .gam-viewport-label {
+      transform: scale(${labelScale});
+      opacity: 0.75;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      [data-mini-chrome] .gam-viewport-label { transition: none; }
+    }
+  `;
+}
+
 // ─── 3. Resize blur (renderer) ──────────────────────────────────────────────
 // A full-window frosted layer that hides layout glitches while the window
 // changes size. It appears the moment the window starts resizing (dragging an

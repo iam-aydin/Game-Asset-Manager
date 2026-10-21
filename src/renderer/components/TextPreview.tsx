@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import {
   ActionIcon,
   Box,
@@ -18,9 +18,24 @@ import type { FileRecord } from '@shared/types';
 interface TextPreviewProps {
   libraryId: string;
   file: FileRecord;
+  /** Extra header buttons (e.g. expand / mini player), shown just left of the
+   *  copy button. */
+  actions?: ReactNode;
 }
 
-export function TextPreview({ libraryId, file }: TextPreviewProps) {
+// Every color comes from Mantine theme variables so the viewer follows the
+// selected theme (and light / dark) instead of a fixed black palette.
+const C = {
+  bg: 'var(--mantine-color-body)',
+  headerBg: 'var(--mantine-color-default-hover)',
+  border: 'var(--mantine-color-default-border)',
+  text: 'var(--mantine-color-text)',
+  dimmed: 'var(--mantine-color-dimmed)',
+  codeBg: 'color-mix(in srgb, var(--mantine-color-text) 14%, transparent)',
+  quoteBg: 'color-mix(in srgb, var(--mantine-color-text) 5%, transparent)'
+};
+
+export function TextPreview({ libraryId, file, actions }: TextPreviewProps) {
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -90,9 +105,9 @@ export function TextPreview({ libraryId, file }: TextPreviewProps) {
       <Paper
         withBorder
         h="100%"
-        bg="#0d1117"
+        bg={C.bg}
         style={{
-          borderColor: '#30363d',
+          borderColor: C.border,
           borderRadius: 8,
           overflow: 'hidden',
           display: 'flex',
@@ -105,11 +120,11 @@ export function TextPreview({ libraryId, file }: TextPreviewProps) {
           px="md"
           py={8}
           style={{
-            borderBottom: '1px solid #30363d',
-            background: '#161b22'
+            borderBottom: `1px solid ${C.border}`,
+            background: C.headerBg
           }}
         >
-          <Text size="xs" fw={600} c="gray.4" style={{ fontFamily: 'monospace' }}>
+          <Text size="xs" fw={600} c="dimmed" style={{ fontFamily: 'monospace' }}>
             {file.filename}
           </Text>
 
@@ -124,10 +139,11 @@ export function TextPreview({ libraryId, file }: TextPreviewProps) {
                   { label: 'Raw', value: 'raw' }
                 ]}
                 styles={{
-                  root: { backgroundColor: '#0d1117', border: '1px solid #30363d' }
+                  root: { backgroundColor: C.bg, border: `1px solid ${C.border}` }
                 }}
               />
             )}
+            {actions}
             <Tooltip label={copied ? 'Copied!' : 'Copy content'}>
               <ActionIcon variant="subtle" color="gray" size="sm" onClick={handleCopy}>
                 {copied ? <IconCheck size={14} color="#48bb78" /> : <IconCopy size={14} />}
@@ -153,7 +169,7 @@ export function TextPreview({ libraryId, file }: TextPreviewProps) {
                   'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
                 fontSize: 13,
                 lineHeight: 1.6,
-                color: '#c9d1d9',
+                color: C.text,
                 whiteSpace: 'pre-wrap',
                 wordBreak: 'break-word'
               }}
@@ -184,14 +200,14 @@ function MarkdownRenderer({ content }: { content: string }) {
     return parts.map((part, index) => {
       if (part.startsWith('**') && part.endsWith('**')) {
         return (
-          <strong key={index} style={{ color: '#f0f6fc', fontWeight: 600 }}>
+          <strong key={index} style={{ color: C.text, fontWeight: 600 }}>
             {part.slice(2, -2)}
           </strong>
         );
       }
       if (part.startsWith('*') && part.endsWith('*')) {
         return (
-          <em key={index} style={{ color: '#c9d1d9' }}>
+          <em key={index} style={{ color: C.text }}>
             {part.slice(1, -1)}
           </em>
         );
@@ -201,12 +217,12 @@ function MarkdownRenderer({ content }: { content: string }) {
           <code
             key={index}
             style={{
-              background: 'rgba(110,118,129,0.4)',
+              background: C.codeBg,
               padding: '0.2em 0.4em',
               borderRadius: 6,
               fontSize: '85%',
               fontFamily: 'monospace',
-              color: '#f0f6fc'
+              color: C.text
             }}
           >
             {part.slice(1, -1)}
@@ -218,7 +234,7 @@ function MarkdownRenderer({ content }: { content: string }) {
   };
 
   return (
-    <Stack gap="xs" style={{ color: '#c9d1d9', fontSize: 14, lineHeight: 1.7 }}>
+    <Stack gap="xs" style={{ color: C.text, fontSize: 14, lineHeight: 1.7 }}>
       {lines.map((line, idx) => {
         const trimmed = line.trim();
 
@@ -233,9 +249,9 @@ function MarkdownRenderer({ content }: { content: string }) {
               key={idx}
               size="xl"
               fw={700}
-              c="#f0f6fc"
+              c={C.text}
               pb={4}
-              style={{ borderBottom: '1px solid #21262d', marginTop: 12 }}
+              style={{ borderBottom: `1px solid ${C.border}`, marginTop: 12 }}
             >
               {renderInline(trimmed.replace(/^#\s+/, ''))}
             </Text>
@@ -247,9 +263,9 @@ function MarkdownRenderer({ content }: { content: string }) {
               key={idx}
               size="lg"
               fw={700}
-              c="#f0f6fc"
+              c={C.text}
               pb={4}
-              style={{ borderBottom: '1px solid #21262d', marginTop: 10 }}
+              style={{ borderBottom: `1px solid ${C.border}`, marginTop: 10 }}
             >
               {renderInline(trimmed.replace(/^##\s+/, ''))}
             </Text>
@@ -257,7 +273,7 @@ function MarkdownRenderer({ content }: { content: string }) {
         }
         if (trimmed.startsWith('### ')) {
           return (
-            <Text key={idx} size="md" fw={700} c="#f0f6fc" mt={8}>
+            <Text key={idx} size="md" fw={700} c={C.text} mt={8}>
               {renderInline(trimmed.replace(/^###\s+/, ''))}
             </Text>
           );
@@ -271,9 +287,9 @@ function MarkdownRenderer({ content }: { content: string }) {
               pl="md"
               py={4}
               style={{
-                borderLeft: '4px solid #30363d',
-                color: '#8b949e',
-                background: 'rgba(110,118,129,0.05)',
+                borderLeft: `4px solid ${C.border}`,
+                color: C.dimmed,
+                background: C.quoteBg,
                 borderRadius: '0 6px 6px 0'
               }}
             >
@@ -284,7 +300,7 @@ function MarkdownRenderer({ content }: { content: string }) {
 
         // Regular Paragraphs
         return (
-          <Text key={idx} size="sm" c="#c9d1d9">
+          <Text key={idx} size="sm" c={C.text}>
             {renderInline(trimmed)}
           </Text>
         );

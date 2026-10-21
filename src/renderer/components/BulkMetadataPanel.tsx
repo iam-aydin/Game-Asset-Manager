@@ -28,6 +28,13 @@ import { BulkTagEditor } from './BulkTagEditor';
 import { AddToCollectionMenu } from './AddToCollectionMenu';
 import { RatingWidget } from './RatingWidget';
 import { ColorLabelWidget } from './ColorLabelWidget';
+import { canCompare } from './compare-kind';
+
+/**
+ * Triage, Tags and Orientation are hidden while several files are selected.
+ * Set to true to bring the three bulk editors back.
+ */
+const SHOW_BULK_EDITORS = false;
 
 interface Props {
   libraryId: string;
@@ -143,6 +150,8 @@ export function BulkMetadataPanel({
         ))}
       </Group>
 
+      {SHOW_BULK_EDITORS && (
+        <>
       <Divider />
 
       <Stack gap={6}>
@@ -211,6 +220,8 @@ export function BulkMetadataPanel({
           Sets up axis for all selected (yaw resets to 0°). Per-file yaw lives in the preview.
         </Text>
       </Stack>
+        </>
+      )}
 
       <Divider />
 
@@ -236,7 +247,7 @@ export function BulkMetadataPanel({
           >
             Batch rename…
           </Button>
-          {selectedFiles.length === 2 && (
+          {canCompare(selectedFiles) && (
             <Button
               size="xs"
               variant="light"

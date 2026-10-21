@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Button, Menu, Modal, Stack, TextInput, Group } from '@mantine/core';
 import { IconFolderPlus, IconPlus, IconFolders } from '@tabler/icons-react';
 import type { CollectionRecord, CollectionWithCount } from '@shared/types';
+import { GLASS_POPOVER_CLASS } from './Glasseffect';
 
 interface Props {
   collections: CollectionWithCount[];
@@ -23,7 +24,13 @@ export function AddToCollectionMenu({ collections, fileIds, onAdd, onCreate }: P
 
   return (
     <>
-      <Menu position="bottom-end" shadow="md" withinPortal width={240}>
+      <Menu
+        position="bottom-end"
+        shadow="md"
+        withinPortal
+        width={240}
+        classNames={{ dropdown: GLASS_POPOVER_CLASS }}
+      >
         <Menu.Target>
           <Button
             size="xs"
@@ -94,6 +101,7 @@ function CreateModal({
       title="New collection"
       centered
       size="sm"
+      classNames={{ content: GLASS_POPOVER_CLASS }}
     >
       <Stack gap="md">
         <TextInput

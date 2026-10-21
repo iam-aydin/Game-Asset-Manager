@@ -24,6 +24,7 @@ import {
   IconPlayerPlay,
   IconRepeat,
   IconVolume,
+  IconVolume2,
   IconVolumeOff,
   IconWand,
   IconPictureInPicture,
@@ -31,7 +32,7 @@ import {
   IconArrowsMaximize,
   IconArrowsMinimize
 } from '@tabler/icons-react';
-import { AudioVisualizer, audioVizStore } from './AudioVisualizer';
+import { AudioVisualizer, audioVizStore, type AudioVizStore } from './AudioVisualizer';
 
 interface AudioPlayerProps {
   libraryId: string;
@@ -45,6 +46,15 @@ interface AudioPlayerProps {
   isMini?: boolean;
   onFullscreen?: () => void;
   isFullscreen?: boolean;
+  /**
+   * When several players are on screen at once (Compare), the keyboard
+   * shortcuts (Space, S, A, D, W, X, M, J, K, L, R) only reach the player whose
+   * pane (the closest element with data-key-scope, else the player itself) the
+   * pointer is over, instead of every player at the same time.
+   */
+  scopedKeys?: boolean;
+  /** Own visualizer store (Compare). Defaults to the shared one. */
+  vizStore?: AudioVizStore;
 }
 
 const EQ_MAX_DB = 12;
@@ -238,6 +248,45 @@ function WaveformBars({ peaks, progress }: { peaks: number[]; progress: number }
   );
 }
 
+// Volume icon follows the level: muted, one wave at 50% or below, two waves above.
+function VolumeIcon({ pct, muted, size }: { pct: number; muted: boolean; size: number }) {
+  if (muted || pct <= 0) return <IconVolumeOff size={size} />;
+  if (pct <= 50) return <IconVolume2 size={size} />;
+  return <IconVolume size={size} />;
+}
+
+// ─── Windows media panel (quick settings / lock screen / media keys) ────────
+// The player decodes audio with the Web Audio API, which Chromium does not
+// report as "media playing". A silent looping <audio> element, started and
+// stopped with the real playback, makes the OS media panel appear; the
+// Media Session handlers below then route its buttons back to this player.
+let silentWavUrl: string | null = null;
+const getSilentWavUrl = (): string => {
+  if (silentWavUrl) return silentWavUrl;
+  const sampleRate = 8000;
+  const samples = sampleRate; // 1 second
+  const buf = new ArrayBuffer(44 + samples * 2);
+  const v = new DataView(buf);
+  const w = (o: number, str: string) => {
+    for (let i = 0; i < str.length; i++) v.setUint8(o + i, str.charCodeAt(i));
+  };
+  w(0, 'RIFF');
+  v.setUint32(4, 36 + samples * 2, true);
+  w(8, 'WAVE');
+  w(12, 'fmt ');
+  v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); // PCM
+  v.setUint16(22, 1, true); // mono
+  v.setUint32(24, sampleRate, true);
+  v.setUint32(28, sampleRate * 2, true);
+  v.setUint16(32, 2, true);
+  v.setUint16(34, 16, true);
+  w(36, 'data');
+  v.setUint32(40, samples * 2, true);
+  silentWavUrl = URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+  return silentWavUrl;
+};
+
 export function AudioPlayer({
   libraryId,
   fileId,
@@ -249,7 +298,9 @@ export function AudioPlayer({
   onMini,
   isMini,
   onFullscreen,
-  isFullscreen
+  isFullscreen,
+  scopedKeys = false,
+  vizStore = audioVizStore
 }: AudioPlayerProps) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -554,7 +605,7 @@ export function AudioPlayer({
     pendingPlayRef.current = autoPlay;
     setPendingPlay(autoPlay);
 
-    audioVizStore.set({ analyser: null, isPlaying: false });
+    vizStore.set({ analyser: null, isPlaying: false });
 
     const loadAudio = async () => {
       try {
@@ -570,7 +621,7 @@ export function AudioPlayer({
         audioBufferRef.current = decodedBuffer;
         const graph = buildGraph(ctx);
         graphRef.current = graph;
-        audioVizStore.set({ analyser: graph.analyser, isPlaying: false });
+        vizStore.set({ analyser: graph.analyser, isPlaying: false });
         applyParams();
 
         setDuration(decodedBuffer.duration);
@@ -599,7 +650,7 @@ export function AudioPlayer({
 
     return () => {
       active = false;
-      audioVizStore.set({ analyser: null, isPlaying: false });
+      vizStore.set({ analyser: null, isPlaying: false });
       cancelFrame();
       stopSource(0.25);
       isPlayingRef.current = false;
@@ -802,6 +853,9 @@ export function AudioPlayer({
     return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
   };
 
+  const scopedKeysRef = useRef(scopedKeys);
+  scopedKeysRef.current = scopedKeys;
+
   const keyboardActionsRef = useRef({
     togglePlay,
     seekRelative,
@@ -831,6 +885,14 @@ export function AudioPlayer({
         (tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable)
       ) {
         return;
+      }
+
+      if (scopedKeysRef.current) {
+        const root = rootRef.current;
+        const scope = (root?.closest('[data-key-scope]') as HTMLElement | null) ?? root;
+        const active = document.activeElement;
+        const mine = !!scope && (scope.matches(':hover') || (!!active && scope.contains(active)));
+        if (!mine) return;
       }
 
       const key = e.key.toLowerCase();
@@ -901,8 +963,99 @@ export function AudioPlayer({
   };
 
   useEffect(() => {
-    audioVizStore.set({ isPlaying });
+    vizStore.set({ isPlaying });
   }, [isPlaying]);
+
+  // ── OS media panel integration ────────────────────────────────────────────
+  const mediaActionsRef = useRef({ togglePlay, seekRelative, handleSeek });
+  mediaActionsRef.current = { togglePlay, seekRelative, handleSeek };
+  const silentAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Title + artwork shown in the panel.
+  useEffect(() => {
+    if (!('mediaSession' in navigator)) return;
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: filename,
+        artist: 'Game Asset Manager',
+        artwork: coverReady ? [{ src: resolvedCoverUrl }] : []
+      });
+    } catch {
+      /* MediaMetadata unsupported: ignore */
+    }
+  }, [filename, coverReady, resolvedCoverUrl]);
+
+  // Silent element mirrors play / pause so the OS sees "media is playing".
+  useEffect(() => {
+    if (!('mediaSession' in navigator)) return;
+    let a = silentAudioRef.current;
+    if (!a) {
+      a = new Audio(getSilentWavUrl());
+      a.loop = true;
+      a.volume = 0.01;
+      silentAudioRef.current = a;
+    }
+    if (isPlaying) {
+      void a.play().catch(() => {});
+      navigator.mediaSession.playbackState = 'playing';
+    } else {
+      a.pause();
+      navigator.mediaSession.playbackState = 'paused';
+    }
+  }, [isPlaying]);
+
+  // Timeline in the panel.
+  useEffect(() => {
+    if (!('mediaSession' in navigator) || !duration) return;
+    try {
+      navigator.mediaSession.setPositionState({
+        duration,
+        position: Math.min(currentTime, duration),
+        playbackRate: speed
+      });
+    } catch {
+      /* invalid state: ignore */
+    }
+    // Only on play state / track / speed changes; ticking it every frame is not needed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying, duration, speed]);
+
+  // Buttons in the panel -> this player.
+  useEffect(() => {
+    if (!('mediaSession' in navigator)) return;
+    const ms = navigator.mediaSession;
+    const set = (action: MediaSessionAction, handler: MediaSessionActionHandler | null) => {
+      try {
+        ms.setActionHandler(action, handler);
+      } catch {
+        /* action unsupported: ignore */
+      }
+    };
+    set('play', () => {
+      if (!isPlayingRef.current) mediaActionsRef.current.togglePlay();
+    });
+    set('pause', () => {
+      if (isPlayingRef.current) mediaActionsRef.current.togglePlay();
+    });
+    set('seekbackward', () => mediaActionsRef.current.seekRelative(-1));
+    set('seekforward', () => mediaActionsRef.current.seekRelative(1));
+    set('seekto', (d) => {
+      if (typeof d.seekTime === 'number') mediaActionsRef.current.handleSeek(d.seekTime);
+    });
+    return () => {
+      for (const a of ['play', 'pause', 'seekbackward', 'seekforward', 'seekto'] as const) {
+        set(a, null);
+      }
+      silentAudioRef.current?.pause();
+      silentAudioRef.current = null;
+      try {
+        ms.metadata = null;
+        ms.playbackState = 'none';
+      } catch {
+        /* ignore */
+      }
+    };
+  }, []);
 
   const volumePct = Math.round((isMuted ? 0 : volume) * 100);
   const boosted = !isMuted && volume > 1;
@@ -953,7 +1106,7 @@ export function AudioPlayer({
             pointerEvents: 'none'
           }}
         >
-          <AudioVisualizer bars={44} height="100%" />
+          <AudioVisualizer bars={44} height="100%" store={vizStore} />
         </Box>
       )}
       <Card
@@ -1270,11 +1423,7 @@ export function AudioPlayer({
                         backgroundColor: isMuted || volume === 0 ? 'rgba(128, 128, 128, 0.5)' : undefined
                       }}
                     >
-                      {isMuted || volume === 0 ? (
-                        <IconVolumeOff size={16} />
-                      ) : (
-                        <IconVolume size={16} />
-                      )}
+                      <VolumeIcon pct={volumePct} muted={isMuted || volume === 0} size={16} />
                     </ActionIcon>
                   </Tooltip>
                 </Box>
@@ -1294,11 +1443,7 @@ export function AudioPlayer({
                       backgroundColor: isMuted || volume === 0 ? 'rgba(128, 128, 128, 0.5)' : undefined
                     }}
                   >
-                    {isMuted || volume === 0 ? (
-                      <IconVolumeOff size={14} />
-                    ) : (
-                      <IconVolume size={14} />
-                    )}
+                    <VolumeIcon pct={volumePct} muted={isMuted || volume === 0} size={14} />
                   </ActionIcon>
                   <Slider
                     size="xs"
@@ -1328,7 +1473,6 @@ export function AudioPlayer({
                   color={isMini ? 'indigo' : 'gray'}
                   size="md"
                   aria-label="Mini player"
-                  onPointerDown={(e) => { e.preventDefault(); onMini(); }}
                   onClick={onMini}
                 >
                   {isMini ? <IconPictureInPictureOff size={16} /> : <IconPictureInPicture size={16} />}
@@ -1336,7 +1480,7 @@ export function AudioPlayer({
               </Tooltip>
             )}
             {onFullscreen && (
-              <Tooltip label={isFullscreen ? 'Shrink (T / Esc)' : 'Fullscreen (T)'} withinPortal>
+              <Tooltip label={isFullscreen ? 'Shrink (F / Esc)' : 'Fullscreen (F)'} withinPortal>
                 <ActionIcon
                   variant="subtle"
                   color="gray"
@@ -1369,7 +1513,7 @@ export function AudioPlayer({
             volume) back to defaults?
           </Text>
           <Group justify="flex-end" gap="xs">
-            <Button variant="subtle" color="gray" onClick={() => setConfirmResetOpen(false)}>
+            <Button variant="default" onClick={() => setConfirmResetOpen(false)}>
               Cancel
             </Button>
             <Button color="red" onClick={confirmResetEffects}>

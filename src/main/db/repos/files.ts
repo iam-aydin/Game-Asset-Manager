@@ -349,11 +349,19 @@ export function createFilesRepo(db: Database.Database, libraryId: string): Files
 
       // FTS clause sits in its own join when present so an empty/no query
       // doesn't pay for the virtual table lookup.
+      // Every search term must match either the indexed text (filename,
+      // material names, ...) OR the file's folder path, so `m725` also finds
+      // `M725 Humvee/scene.gltf`. The FTS join below is only used to rank the
+      // results: files that match in the index sort first, folder-only matches
+      // after them.
       const fts = req.query?.trim() ?? '';
+      const terms = searchTerms(fts);
       const ftsExpr = buildFtsExpression(fts);
       let ftsJoin = '';
       if (ftsExpr) {
-        ftsJoin = ` JOIN files_fts ON files_fts.rowid = files.id AND files_fts MATCH ?`;
+        ftsJoin = ` LEFT JOIN (
+          SELECT rowid AS rid, bm25(files_fts) AS rank FROM files_fts WHERE files_fts MATCH ?
+        ) fr ON fr.rid = files.id`;
         params.push(ftsExpr);
       }
 
@@ -363,6 +371,30 @@ export function createFilesRepo(db: Database.Database, libraryId: string): Files
       if (req.collectionId != null) {
         collectionJoin = ` JOIN collection_files cf ON cf.file_id = files.id AND cf.collection_id = ?`;
         params.push(req.collectionId);
+      }
+
+      for (const term of terms) {
+        const esc = term.replace(/[\\%_]/g, (c) => `\\${c}`);
+        // Folder match at the start of a word: start of the path, after a slash,
+        // or after a space, underscore, dash or dot.
+        where.push(`(
+          files.id IN (SELECT rowid FROM files_fts WHERE files_fts MATCH ?)
+          OR files.parent_dir LIKE ? ESCAPE '\\'
+          OR files.parent_dir LIKE ? ESCAPE '\\'
+          OR files.parent_dir LIKE ? ESCAPE '\\'
+          OR files.parent_dir LIKE ? ESCAPE '\\'
+          OR files.parent_dir LIKE ? ESCAPE '\\'
+          OR files.parent_dir LIKE ? ESCAPE '\\'
+        )`);
+        params.push(
+          `"${term}"*`,
+          `${esc}%`,
+          `%/${esc}%`,
+          `% ${esc}%`,
+          `%\\_${esc}%`,
+          `%-${esc}%`,
+          `%.${esc}%`
+        );
       }
 
       if (req.parentDir != null) {
@@ -439,7 +471,7 @@ export function createFilesRepo(db: Database.Database, libraryId: string): Files
           : req.collectionId != null
             ? ' ORDER BY cf.position, files.filename COLLATE NOCASE'
             : ftsExpr
-              ? ' ORDER BY bm25(files_fts), files.filename COLLATE NOCASE'
+              ? ' ORDER BY fr.rank IS NULL, fr.rank, files.filename COLLATE NOCASE'
               : ' ORDER BY files.filename COLLATE NOCASE';
 
       const sql = `
@@ -586,13 +618,17 @@ function buildOrderClause(sort: SortSpec): string {
  * separated term is quoted and prefix-matched, then ANDed together. Special
  * FTS characters in the input are stripped so the query never throws.
  */
-function buildFtsExpression(input: string): string {
-  if (!input) return '';
-  const terms = input
+function searchTerms(input: string): string[] {
+  if (!input) return [];
+  return input
     .trim()
     .split(/\s+/)
     .map((t) => t.replace(/["()*:^]/g, ''))
     .filter((t) => t.length > 0);
+}
+
+function buildFtsExpression(input: string): string {
+  const terms = searchTerms(input);
   if (terms.length === 0) return '';
   return terms.map((t) => `"${t}"*`).join(' AND ');
 }

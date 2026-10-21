@@ -17,7 +17,8 @@ import { BulkMetadataPanel } from './BulkMetadataPanel';
 import { AddToCollectionMenu } from './AddToCollectionMenu';
 import { formatBytes, formatDateTime, formatRelativeTime } from '../util/format';
 import { usePreferences } from '../util/use-preferences';
-import { useSidecarLicense } from '../util/use-sidecar-license';
+import { LicenseSection } from './LicenseSection';
+import { compareKind } from './compare-kind';
 import { ipc } from '../ipc-client';
 
 // Local on purpose: works even if @shared/formats has no video helper yet.
@@ -133,36 +134,6 @@ function SingleFilePanel({
   onRemoveFromCollection: (collectionId: number, fileIds: number[]) => Promise<void> | void;
   onCreateCollection: (name: string) => Promise<CollectionRecord | null>;
 }) {
-  const metadata = useMemo<ExtractedMetadata | null>(() => {
-    if (!file.metadataJson) return null;
-    try {
-      return JSON.parse(file.metadataJson) as ExtractedMetadata;
-    } catch {
-      return null;
-    }
-  }, [file.metadataJson]);
-
-  const isImage = isImageExtension(file.ext);
-  const isAudio = isAudioExtension(file.ext);
-  const isVideo = isVideoExtension(file.ext);
-
-  // Explicitly check for 3D model status
-  const isModel =
-    metadata?.thumbSource === 'model' ||
-    (metadata &&
-      metadata.thumbSource !== 'document' &&
-      !isImage &&
-      !isAudio &&
-      !isVideo &&
-      (metadata.vertexCount > 0 || metadata.meshCount > 0));
-
-  // Width falls back to imageWidth (it used to fall back to imageHeight,
-  // which made images without the detailed `image` block show height x height).
-  const width = metadata?.image?.width ?? metadata?.imageWidth;
-  const height = metadata?.image?.height ?? metadata?.imageHeight;
-
-  const sidecarLicense = useSidecarLicense(libraryId, file.parentDir);
-
   return (
     <Stack gap="sm" p="md" style={{ height: '100%', overflow: 'auto' }}>
       <Group justify="space-between" align="center">
@@ -185,51 +156,9 @@ function SingleFilePanel({
 
       <Divider />
 
-      <Field label="Size" value={formatBytes(file.sizeBytes)} />
+      <FileInfoBlock libraryId={libraryId} file={file} />
 
-      <Field
-        label="Modified"
-        value={`${formatRelativeTime(file.mtimeMs)} · ${formatDateTime(file.mtimeMs)}`}
-      />
-
-      {/* Audio Stats */}
-      {isAudio && (
-        <>
-          <Divider />
-          <AudioStats file={file} metadata={metadata} />
-        </>
-      )}
-
-      {/* Video Stats */}
-      {isVideo && (
-        <>
-          <Divider />
-          <VideoStats libraryId={libraryId} file={file} metadata={metadata} />
-        </>
-      )}
-
-      {/* 3D Model Stats — Only renders for actual 3D model files */}
-      {isModel && metadata && (
-        <>
-          <Divider />
-          <ModelStats metadata={metadata} />
-        </>
-      )}
-
-      {/* Image Stats */}
-      {isImage && metadata && (
-        <>
-          <Divider />
-          <ImageStats metadata={metadata} width={width} height={height} />
-        </>
-      )}
-
-      {!sidecarLicense.loading && sidecarLicense.text && (
-        <>
-          <Divider />
-          <SidecarLicense text={sidecarLicense.text} />
-        </>
-      )}
+      <LicenseSection libraryId={libraryId} file={file} canCreate={compareKind(file) === 'model'} />
 
       <Divider />
 
@@ -273,6 +202,84 @@ function SingleFilePanel({
         )}
       </Group>
     </Stack>
+  );
+}
+
+/**
+ * Size, modified date and the type-specific stats (audio / video / 3D / image)
+ * for one file. Used by the metadata panel and by the Compare window's info
+ * cards, so both always show the same thing.
+ */
+export function FileInfoBlock({ libraryId, file }: { libraryId: string; file: FileRecord }) {
+  const metadata = useMemo<ExtractedMetadata | null>(() => {
+    if (!file.metadataJson) return null;
+    try {
+      return JSON.parse(file.metadataJson) as ExtractedMetadata;
+    } catch {
+      return null;
+    }
+  }, [file.metadataJson]);
+
+  const isImage = isImageExtension(file.ext);
+  const isAudio = isAudioExtension(file.ext);
+  const isVideo = isVideoExtension(file.ext);
+
+  // Explicitly check for 3D model status
+  const isModel =
+    metadata?.thumbSource === 'model' ||
+    (metadata &&
+      metadata.thumbSource !== 'document' &&
+      !isImage &&
+      !isAudio &&
+      !isVideo &&
+      (metadata.vertexCount > 0 || metadata.meshCount > 0));
+
+  // Width falls back to imageWidth (it used to fall back to imageHeight,
+  // which made images without the detailed `image` block show height x height).
+  const width = metadata?.image?.width ?? metadata?.imageWidth;
+  const height = metadata?.image?.height ?? metadata?.imageHeight;
+
+  return (
+    <>
+      <Field label="Size" value={formatBytes(file.sizeBytes)} />
+
+      <Field
+        label="Modified"
+        value={`${formatRelativeTime(file.mtimeMs)} · ${formatDateTime(file.mtimeMs)}`}
+      />
+
+      {/* Audio Stats */}
+      {isAudio && (
+        <>
+          <Divider />
+          <AudioStats file={file} metadata={metadata} />
+        </>
+      )}
+
+      {/* Video Stats */}
+      {isVideo && (
+        <>
+          <Divider />
+          <VideoStats libraryId={libraryId} file={file} metadata={metadata} />
+        </>
+      )}
+
+      {/* 3D Model Stats — Only renders for actual 3D model files */}
+      {isModel && metadata && (
+        <>
+          <Divider />
+          <ModelStats metadata={metadata} />
+        </>
+      )}
+
+      {/* Image Stats */}
+      {isImage && metadata && (
+        <>
+          <Divider />
+          <ImageStats metadata={metadata} width={width} height={height} />
+        </>
+      )}
+    </>
   );
 }
 
@@ -911,24 +918,6 @@ function SourceMetadata({ format }: { format: FormatMetadata }) {
           <Field key={label} label={label} value={value} />
         ))}
       </Stack>
-    </div>
-  );
-}
-
-function SidecarLicense({ text }: { text: string }) {
-  return (
-    <div>
-      <Text size="xs" c="dimmed" tt="uppercase" fw={600} mb={4}>
-        License
-      </Text>
-      <Textarea
-        value={text}
-        readOnly
-        autosize
-        minRows={2}
-        maxRows={10}
-        styles={{ input: { fontFamily: 'monospace', fontSize: 11 } }}
-      />
     </div>
   );
 }

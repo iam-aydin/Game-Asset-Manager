@@ -12,24 +12,32 @@ interface VizState {
   isPlaying: boolean;
 }
 
-let vizState: VizState = { analyser: null, isPlaying: false };
-const listeners = new Set<() => void>();
+export type AudioVizStore = ReturnType<typeof createAudioVizStore>;
 
-export const audioVizStore = {
-  get: (): VizState => vizState,
-  set(partial: Partial<VizState>) {
-    const next = { ...vizState, ...partial };
-    if (next.analyser === vizState.analyser && next.isPlaying === vizState.isPlaying) return;
-    vizState = next;
-    listeners.forEach((l) => l());
-  },
-  subscribe(listener: () => void) {
-    listeners.add(listener);
-    return () => {
-      listeners.delete(listener);
-    };
-  }
-};
+/** Makes an independent store. Compare gives each player its own, so each
+ *  visualizer only shows its own player. */
+export function createAudioVizStore() {
+  let vizState: VizState = { analyser: null, isPlaying: false };
+  const listeners = new Set<() => void>();
+  return {
+    get: (): VizState => vizState,
+    set(partial: Partial<VizState>) {
+      const next = { ...vizState, ...partial };
+      if (next.analyser === vizState.analyser && next.isPlaying === vizState.isPlaying) return;
+      vizState = next;
+      listeners.forEach((l) => l());
+    },
+    subscribe(listener: () => void) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    }
+  };
+}
+
+/** The default store the preview pane's player and visualizer share. */
+export const audioVizStore = createAudioVizStore();
 
 const VIZ_MIN_HZ = 30;
 const VIZ_MAX_HZ = 16000;
@@ -45,10 +53,17 @@ interface AudioVisualizerProps {
   /** Height of the visualizer. Defaults to filling its parent. */
   height?: number | string;
   style?: CSSProperties;
+  /** Which player to show. Defaults to the shared one. */
+  store?: AudioVizStore;
 }
 
-export function AudioVisualizer({ bars = 56, height = '100%', style }: AudioVisualizerProps) {
-  const { analyser, isPlaying } = useSyncExternalStore(audioVizStore.subscribe, audioVizStore.get);
+export function AudioVisualizer({
+  bars = 56,
+  height = '100%',
+  style,
+  store = audioVizStore
+}: AudioVisualizerProps) {
+  const { analyser, isPlaying } = useSyncExternalStore(store.subscribe, store.get);
   // Only here so the effect re-runs (and repaints the idle state) on theme change.
   const colorScheme = useComputedColorScheme('dark');
 

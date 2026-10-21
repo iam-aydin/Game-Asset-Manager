@@ -39,19 +39,31 @@ function clampZoom(value: number): number {
   return Math.min(IMAGE_ZOOM_MAX, Math.max(IMAGE_ZOOM_MIN, value));
 }
 
-// --- 3D preview WASD tuning --------------------------------------------
-const MODEL_KEY_ZOOM_STEP = 1.08;
-const MODEL_KEY_ROTATE_STEP = THREE.MathUtils.degToRad(4);
-const MODEL_KEY_PAN_STEP = 0.1;
-// Zoom limits are multiples of the model's bounding radius, NOT absolute
-// distances. Absolute limits (the old 0.1 / 500) teleported the camera on any
-// model whose scale didn't happen to fit them — e.g. a mansion with radius
-// ~1000 got clamped from 3500 straight down to 500, i.e. inside the mesh.
-const MODEL_MIN_DISTANCE_FACTOR = 0.02;
-const MODEL_MAX_DISTANCE_FACTOR = 50;
-// How close (as a fraction of radius) keyboard zoom-in may get to a surface
-// before it stops instead of tunnelling through it.
-const MODEL_SURFACE_MARGIN_FACTOR = 0.01;
+// --- 3D preview navigation tuning (Unreal-style) ------------------------
+// WASD / Q / E (cursor over viewport): fly, Shift = fast
+// Right mouse button (hold) : adds mouse-look to the fly keys
+// Mouse wheel               : eased zoom along the view direction
+// Middle mouse (hold)       : same as right mouse (mouse-look + fly), shows the speed
+// Wheel while RMB/MMB held  : changes the navigation speed (fly AND zoom)
+// Left mouse drag           : orbit around the pivot, Shift/Ctrl + drag pans
+// F                         : frame the model
+const NAV_FLY_SPEED = 0.6;                       // WASD speed, in model radii per second (at speed x1)
+const NAV_FAST_MULTIPLIER = 3;                   // hold Shift to fly faster
+const NAV_KEY_SMOOTHING = 10;                    // higher = snappier key response
+const NAV_WHEEL_SENSITIVITY = 0.0015;            // wheel delta -> zoom amount
+const NAV_WHEEL_SMOOTHING = 12;                  // higher = wheel eases out faster
+const NAV_MIN_STEP_FACTOR = 0.02;                // minimum zoom reference (x radius), prevents stalling
+const NAV_SURFACE_MARGIN_FACTOR = 0.005;
+const NAV_LOOK_SENSITIVITY = 0.0025;             // radians per pixel of mouse-look
+const NAV_LOOK_POLE_EPS = 0.01;                  // keep the look direction off the exact poles
+const NAV_SPEED_MIN = 0.05;                      // speed multiplier range
+const NAV_SPEED_MAX = 20;
+const NAV_ZOOM_MAX_FORWARD = 0.85;               // max fraction of the surface distance covered per frame (never overshoots)
+const NAV_ZOOM_MAX_BACK = 2;                     // max zoom-out step per frame, in distances
+const NAV_FOCUS_MS = 260;                        // F key: duration of the frame-model animation
+const NAV_FOCUS_MARGIN = 1.1;                    // F key: breathing room around the model
+const NAV_SPEED_WHEEL_SENSITIVITY = 0.002;       // RMB + wheel: per delta unit (exponential)
+const NAV_SPEED_HUD_MS = 1400;                   // how long the speed readout stays visible
 // How long the camera swing takes after clicking an axis on the gizmo.
 const GIZMO_SNAP_MS = 280;
 
@@ -147,6 +159,32 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
   const [isDragging, setIsDragging] = useState(false);
   const imageWrapRef = useRef<HTMLDivElement>(null);
 
+  // Navigation speed multiplier (changed with the middle mouse button).
+  // It scales both WASD fly speed and mouse-wheel zoom. Lives in a ref so it
+  // survives the navigation effect being re-created.
+  const navSpeedRef = useRef(1);
+  const [speedHud, setSpeedHud] = useState<number | null>(null);
+  const speedHudTimerRef = useRef<number | null>(null);
+  // While the right/middle button is held the readout stays up instead of fading.
+  const holdSpeedHudRef = useRef(false);
+  const showSpeedHud = useCallback(() => {
+    setSpeedHud(navSpeedRef.current);
+    if (speedHudTimerRef.current !== null) window.clearTimeout(speedHudTimerRef.current);
+    if (holdSpeedHudRef.current) {
+      speedHudTimerRef.current = null;
+      return;
+    }
+    speedHudTimerRef.current = window.setTimeout(() => {
+      setSpeedHud(null);
+      speedHudTimerRef.current = null;
+    }, NAV_SPEED_HUD_MS);
+  }, []);
+  useEffect(() => {
+    return () => {
+      if (speedHudTimerRef.current !== null) window.clearTimeout(speedHudTimerRef.current);
+    };
+  }, []);
+
   // VIEW MODE (2/4): always-current mode for the async model loader, so a model
   // that finishes loading after the user switched modes still gets the right one.
   const viewModeRef = useRef<LightingStyle>(lightingStyle);
@@ -182,18 +220,26 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
   // Store original/default camera state for 3D reset
   const defaultCameraStateRef = useRef<CameraState | null>(null);
 
-  // Bounding radius of the currently loaded model — drives the zoom limits.
+  // Bounding radius of the currently loaded model — drives the zoom step sizes
+  // and the camera clip planes.
   const modelRadiusRef = useRef(1);
-  // Reused for keyboard zoom-in surface checks (avoids allocating per keypress).
+  // Center of the loaded model (for the dynamic clip planes).
+  const modelCenterRef = useRef(new THREE.Vector3());
+  // Reused for zoom surface checks (avoids allocating per frame).
   const zoomRaycasterRef = useRef(new THREE.Raycaster());
 
-  // Recomputes the model radius and pushes size-relative min/max distances
-  // into OrbitControls, so mouse-wheel zoom respects the same limits.
+  // Recomputes the model radius. There are no zoom distance limits anymore;
+  // only the clip planes adapt to the model size, so you can get really close
+  // or far away without the model being cut off.
   const applyDistanceLimits = (ctx: ViewerCtx, obj: THREE.Object3D) => {
     const r = objectRadius(obj);
     modelRadiusRef.current = r;
-    ctx.controls.minDistance = r * MODEL_MIN_DISTANCE_FACTOR;
-    ctx.controls.maxDistance = r * MODEL_MAX_DISTANCE_FACTOR;
+    modelCenterRef.current.copy(objectCenter(obj));
+    ctx.controls.minDistance = 0;
+    ctx.controls.maxDistance = Infinity;
+    ctx.camera.near = Math.max(r * 0.001, 1e-4);
+    ctx.camera.far = r * 100;
+    ctx.camera.updateProjectionMatrix();
   };
 
   const dragStateRef = useRef<{
@@ -333,6 +379,12 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
+    controls.enableZoom = false; // zoom is handled by our own smooth, never-stalling zoom
+    // Unreal-style: the right button (mouse-look + fly) and the middle button
+    // (speed control) are handled by our own navigation code, so OrbitControls
+    // must ignore both. Left button still orbits (Shift/Ctrl + drag pans).
+    controls.mouseButtons.RIGHT = -1 as unknown as THREE.MOUSE;
+    controls.mouseButtons.MIDDLE = -1 as unknown as THREE.MOUSE;
     controls.addEventListener('change', () => {
       if (suppressChangeRef.current) return;
       for (const cb of cameraListenersRef.current) cb();
@@ -434,8 +486,24 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     canvasEl.addEventListener('pointermove', onGizmoPointerMove);
     canvasEl.addEventListener('pointerleave', onGizmoPointerLeave);
 
+    // Clip planes follow the camera distance, so the model never gets cut off
+    // (or z-fights / flickers) when you fly far away or very close.
+    const updateClipPlanes = () => {
+      if (!ctx.currentObject) return;
+      const r = modelRadiusRef.current;
+      const d = camera.position.distanceTo(modelCenterRef.current);
+      const near = d > r * 1.5 ? Math.max((d - r) * 0.05, r * 0.001) : Math.max(r * 0.001, 1e-4);
+      const far = Math.max(r * 100, (d + r) * 4);
+      if (Math.abs(near - camera.near) > camera.near * 0.01 || Math.abs(far - camera.far) > camera.far * 0.01) {
+        camera.near = near;
+        camera.far = far;
+        camera.updateProjectionMatrix();
+      }
+    };
+
     const tick = () => {
       controls.update();
+      updateClipPlanes();
       renderer.render(scene, camera);
       if (ctx.currentObject) gizmo.render(renderer, camera);
       ctx.rafId = requestAnimationFrame(tick);
@@ -815,97 +883,345 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [plainImageMode]);
 
+  // 3D navigation, Unreal-style:
+  //  - W/A/S/D fly, Q/E down/up, Shift = fast, while the cursor is over the viewport
+  //  - hold RIGHT or MIDDLE mouse: adds mouse-look (pointer lock) on top of the
+  //    fly keys, and shows the current speed
+  //  - mouse wheel: eased, never-stalling zoom along the view direction
+  //    (while RIGHT/MIDDLE is held the wheel changes the navigation speed instead,
+  //    which scales both fly speed and wheel zoom)
+  //  - F: fit the whole model in view, keeping the current viewing angle
   useEffect(() => {
     const show3D = !plainImageMode && !embeddedPngUrl;
     if (!show3D) return;
+    const ctx = ctxRef.current;
+    if (!ctx) return;
 
-    const handleKeyDown = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
-      const tag = target?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) return;
+    const canvas = ctx.renderer.domElement;
+    const keys = new Set<string>();
+    const vel = { fwd: 0, side: 0, vert: 0 };
+    let shiftHeld = false;
+    const flyForward = new THREE.Vector3();
+    const flyRight = new THREE.Vector3();
+    const flyMove = new THREE.Vector3();
+    let zoomImpulse = 0;
+    let raf = 0;
+    let last = performance.now();
 
-      const ctx = ctxRef.current;
-      if (!ctx) return;
+    // Mouse-look / speed-drag state
+    let lookActive = false;
+    let lookButton = -1; // which mouse button started the look (1 = middle, 2 = right)
+    let hovering = false; // cursor is over the 3D viewport
+    const onEnter = () => {
+      hovering = true;
+    };
+    const onLeave = () => {
+      hovering = false;
+    };
+    const lookOffset = new THREE.Vector3();
+    const lookSph = new THREE.Spherical();
 
-      const key = e.key.toLowerCase();
-      if (key === 'w' || key === 's') {
-        e.preventDefault();
+    const viewDir = new THREE.Vector3();
 
-        if (e.shiftKey) {
-          // Shift + W / S -> Move camera and target up / down locally
-          const upVector = new THREE.Vector3(0, 1, 0).applyQuaternion(ctx.camera.quaternion);
-          const distance = ctx.camera.position.distanceTo(ctx.controls.target);
-          const panAmount = MODEL_KEY_PAN_STEP * Math.max(1, distance * 0.1);
-          const shiftVector = upVector.multiplyScalar(key === 'w' ? panAmount : -panAmount);
+    const changeSpeed = (factor: number) => {
+      navSpeedRef.current = Math.min(
+        NAV_SPEED_MAX,
+        Math.max(NAV_SPEED_MIN, navSpeedRef.current * factor)
+      );
+      showSpeedHud();
+    };
 
-          ctx.camera.position.add(shiftVector);
-          ctx.controls.target.add(shiftVector);
-          ctx.controls.update();
-        } else {
-          // W / S -> Zoom in / out (Dolly)
-          const radius = modelRadiusRef.current;
-          const minDist = radius * MODEL_MIN_DISTANCE_FACTOR;
-          const maxDist = radius * MODEL_MAX_DISTANCE_FACTOR;
-          const zoomingIn = key === 'w';
-          const factor = zoomingIn ? 1 / MODEL_KEY_ZOOM_STEP : MODEL_KEY_ZOOM_STEP;
+    // Moves camera AND orbit pivot along the view direction. Step size is based
+    // on the distance to the surface ahead (with a floor), so it never stalls.
+    const zoomAlongView = (amount: number) => {
+      const obj = ctx.currentObject;
+      if (!obj) return;
+      const radius = modelRadiusRef.current;
+      ctx.camera.getWorldDirection(viewDir);
 
-          const offset = ctx.camera.position.clone().sub(ctx.controls.target);
-          const currentDist = offset.length();
-          let newDist = currentDist * factor;
+      const raycaster = zoomRaycasterRef.current;
+      raycaster.set(ctx.camera.position, viewDir);
+      const hit = raycaster
+        .intersectObject(obj, true)
+        .find((h) => (h.object as THREE.Mesh).isMesh);
 
-          // Zooming in: don't tunnel through geometry. Cast along the view
-          // direction (camera -> target) and stop just short of the first
-          // surface instead of flying inside the mesh.
-          if (zoomingIn && ctx.currentObject && currentDist > 0) {
-            const viewDir = offset.clone().negate().normalize();
-            const raycaster = zoomRaycasterRef.current;
-            raycaster.set(ctx.camera.position, viewDir);
-            const hit = raycaster
-              .intersectObject(ctx.currentObject, true)
-              .find((h) => (h.object as THREE.Mesh).isMesh);
-            if (hit) {
-              const stopAt = Math.max(0, hit.distance - radius * MODEL_SURFACE_MARGIN_FACTOR);
-              const wantedTravel = currentDist - newDist;
-              if (wantedTravel > stopAt) newDist = currentDist - stopAt;
-            }
-          }
+      const ref = Math.max(
+        hit ? hit.distance : ctx.camera.position.distanceTo(objectCenter(obj)),
+        radius * NAV_MIN_STEP_FACTOR
+      );
+      const move = ref * amount;
+      ctx.camera.position.addScaledVector(viewDir, move);
 
-          // Clamp to the size-relative limits — but never move the camera in
-          // the OPPOSITE direction of what was pressed. If we're already past
-          // a limit (e.g. a saved camera), hold position rather than jump.
-          newDist = zoomingIn
-            ? Math.min(currentDist, Math.max(minDist, newDist))
-            : Math.max(currentDist, Math.min(maxDist, newDist));
-
-          if (newDist > 0) {
-            offset.setLength(newDist);
-            ctx.camera.position.copy(ctx.controls.target).add(offset);
-            ctx.controls.update();
-          }
-        }
-      } else if (key === 'a' || key === 'd') {
-        e.preventDefault();
-        const deltaTheta = key === 'a' ? MODEL_KEY_ROTATE_STEP : -MODEL_KEY_ROTATE_STEP;
-        const offset = ctx.camera.position.clone().sub(ctx.controls.target);
-        const spherical = new THREE.Spherical().setFromVector3(offset);
-        spherical.theta += deltaTheta;
-        offset.setFromSpherical(spherical);
-        ctx.camera.position.copy(ctx.controls.target).add(offset);
-        ctx.camera.lookAt(ctx.controls.target);
-        ctx.controls.update();
+      // Orbit around the surface you're looking at; otherwise keep the old distance.
+      const remaining = hit ? hit.distance - move : null;
+      if (remaining !== null && remaining > radius * NAV_SURFACE_MARGIN_FACTOR) {
+        ctx.controls.target.copy(ctx.camera.position).addScaledVector(viewDir, remaining);
+      } else {
+        ctx.controls.target.addScaledVector(viewDir, move);
       }
     };
 
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [plainImageMode, embeddedPngUrl]);
+    // Turns the camera in place (camera position stays put, the orbit pivot
+    // swings with the view so orbiting afterwards still feels right).
+    const lookBy = (dx: number, dy: number) => {
+      lookOffset.copy(ctx.controls.target).sub(ctx.camera.position);
+      if (lookOffset.lengthSq() < 1e-12) {
+        lookOffset.set(0, 0, -Math.max(modelRadiusRef.current, 1e-3));
+      }
+      lookSph.setFromVector3(lookOffset);
+      lookSph.theta -= dx * NAV_LOOK_SENSITIVITY; // mouse right -> look right
+      lookSph.phi = Math.min(
+        Math.PI - NAV_LOOK_POLE_EPS,
+        Math.max(NAV_LOOK_POLE_EPS, lookSph.phi + dy * NAV_LOOK_SENSITIVITY) // mouse down -> look down
+      );
+      lookOffset.setFromSpherical(lookSph);
+      ctx.controls.target.copy(ctx.camera.position).add(lookOffset);
+      ctx.controls.update();
+    };
 
-  // Middle-mouse click handler to reset view
-  const handleMouseDown = (e: React.MouseEvent) => {
-    if (e.button === 1) { // Middle click
+    // F: smoothly move to a distance where the whole model fits, centered on
+    // the model, looking from the SAME direction as right now.
+    let focusAnim: {
+      t0: number;
+      fromPos: THREE.Vector3;
+      toPos: THREE.Vector3;
+      fromTgt: THREE.Vector3;
+      toTgt: THREE.Vector3;
+    } | null = null;
+    const cancelFocus = () => {
+      focusAnim = null;
+    };
+    const focusModel = () => {
+      const obj = ctx.currentObject;
+      if (!obj) return;
+      const center = objectCenter(obj).clone();
+      const r = Math.max(modelRadiusRef.current, 1e-6);
+      const dir = ctx.camera.position.clone().sub(ctx.controls.target);
+      if (dir.lengthSq() < 1e-12) dir.set(0, 0, 1);
+      dir.normalize();
+      const vfov = THREE.MathUtils.degToRad(ctx.camera.fov);
+      const hfov = 2 * Math.atan(Math.tan(vfov / 2) * ctx.camera.aspect);
+      const half = Math.min(vfov, hfov) / 2;
+      const dist = (r / Math.sin(half)) * NAV_FOCUS_MARGIN * ctx.camera.zoom;
+      focusAnim = {
+        t0: performance.now(),
+        fromPos: ctx.camera.position.clone(),
+        toPos: center.clone().addScaledVector(dir, dist),
+        fromTgt: ctx.controls.target.clone(),
+        toTgt: center
+      };
+    };
+
+    const startLook = (button: number) => {
+      if (lookActive || !ctx.currentObject) return;
+      lookActive = true;
+      lookButton = button;
+      holdSpeedHudRef.current = true;
+      showSpeedHud();
+      // Cancel a running gizmo swing (it listens for OrbitControls' 'start').
+      ctx.controls.dispatchEvent({ type: 'start' } as never);
+      try {
+        const p = canvas.requestPointerLock() as unknown as Promise<void> | undefined;
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+      } catch {
+        /* pointer lock not available: mouse-look still works while the cursor moves */
+      }
+    };
+    const endLook = () => {
+      if (!lookActive) return;
+      lookActive = false;
+      lookButton = -1;
+      keys.clear();
+      holdSpeedHudRef.current = false;
+      showSpeedHud(); // let the readout fade out now
+      if (document.pointerLockElement === canvas) document.exitPointerLock();
+    };
+
+    const onPointerDown = (e: PointerEvent) => {
+      cancelFocus();
+      if (e.button === 2 || e.button === 1) {
+        e.preventDefault();
+        if (e.buttons & 1) return; // left button is already orbiting: don't mix the two
+        startLook(e.button);
+      }
+    };
+    // While looking, a left click must not start an orbit at the same time
+    // (that is what made the view fight itself). Runs before OrbitControls.
+    const onWindowPointerDownCapture = (e: PointerEvent) => {
+      if (lookActive && e.button === 0 && e.target === canvas) {
+        e.stopPropagation();
+        e.preventDefault();
+      }
+    };
+    const onPointerUp = (e: PointerEvent) => {
+      if (lookActive && e.button === lookButton) endLook();
+    };
+    const onMouseMove = (e: MouseEvent) => {
+      if (lookActive) lookBy(e.movementX, e.movementY);
+    };
+    const onPointerLockChange = () => {
+      // Esc (or the browser) can drop the lock while the button is still down.
+      if (lookActive && document.pointerLockElement !== canvas && document.pointerLockElement) {
+        endLook();
+      }
+    };
+    const onContextMenu = (e: Event) => e.preventDefault();
+
+    const isTyping = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      return t?.tagName === 'INPUT' || t?.tagName === 'TEXTAREA' || !!t?.isContentEditable;
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      shiftHeld = e.shiftKey;
+      if (e.ctrlKey || e.metaKey || e.altKey || isTyping(e)) return;
+      const k = e.key.toLowerCase();
+
+      // F: frame the model (Unreal's "focus")
+      if (k === 'f' && !e.repeat && ctx.currentObject) {
+        e.preventDefault();
+        focusModel();
+        return;
+      }
+
+      // Fly keys work while the cursor is over the viewport (or while the right
+      // mouse button is held, which also gives you mouse-look).
+      if (!lookActive && !hovering) return;
+      if (k.length === 1 && 'wasdqe'.includes(k)) {
+        e.preventDefault();
+        cancelFocus();
+        keys.add(k);
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      keys.delete(e.key.toLowerCase());
+      shiftHeld = e.shiftKey;
+    };
+    const onBlur = () => {
+      keys.clear();
+      shiftHeld = false;
+      endLook();
+    };
+
+    const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      resetView();
-    }
+      cancelFocus();
+      const dy = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY;
+      if (lookActive) {
+        // Unreal: wheel while flying = fly speed
+        changeSpeed(Math.exp(-dy * NAV_SPEED_WHEEL_SENSITIVITY));
+        return;
+      }
+      zoomImpulse = Math.max(-1.5, Math.min(1.5, zoomImpulse - dy * NAV_WHEEL_SENSITIVITY));
+    };
+
+    const axis = (pos: string, neg: string) => (keys.has(pos) ? 1 : 0) - (keys.has(neg) ? 1 : 0);
+
+    const tick = (now: number) => {
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+
+      // Smooth the key input so movement eases in and out.
+      const blend = 1 - Math.exp(-dt * NAV_KEY_SMOOTHING);
+      vel.fwd += (axis('w', 's') - vel.fwd) * blend;
+      vel.side += (axis('d', 'a') - vel.side) * blend;
+      vel.vert += (axis('e', 'q') - vel.vert) * blend;
+      if (Math.abs(vel.fwd) < 1e-3) vel.fwd = 0;
+      if (Math.abs(vel.side) < 1e-3) vel.side = 0;
+      if (Math.abs(vel.vert) < 1e-3) vel.vert = 0;
+
+      let moved = false;
+
+      if (focusAnim) {
+        const t = Math.min(1, (now - focusAnim.t0) / NAV_FOCUS_MS);
+        const eased = 1 - Math.pow(1 - t, 3);
+        ctx.camera.position.lerpVectors(focusAnim.fromPos, focusAnim.toPos, eased);
+        ctx.controls.target.lerpVectors(focusAnim.fromTgt, focusAnim.toTgt, eased);
+        if (t >= 1) focusAnim = null;
+        moved = true;
+      }
+
+      if (vel.fwd !== 0 || vel.side !== 0 || vel.vert !== 0) {
+        // Unreal-style fly: W/S forward/back, A/D left/right, E/Q up/down.
+        // Speed depends on model size (not distance), so it never stalls.
+        const speed =
+          modelRadiusRef.current *
+          NAV_FLY_SPEED *
+          navSpeedRef.current *
+          (shiftHeld ? NAV_FAST_MULTIPLIER : 1) *
+          dt;
+        ctx.camera.getWorldDirection(flyForward);
+        flyRight.crossVectors(flyForward, ctx.camera.up).normalize();
+        flyMove
+          .set(0, 0, 0)
+          .addScaledVector(flyForward, vel.fwd * speed)
+          .addScaledVector(flyRight, vel.side * speed)
+          .addScaledVector(ctx.camera.up, vel.vert * speed);
+        ctx.camera.position.add(flyMove);
+        ctx.controls.target.add(flyMove);
+        moved = true;
+      }
+
+      // Mouse wheel (eased), scaled by the speed multiplier
+      const wheelPart = zoomImpulse * (1 - Math.exp(-dt * NAV_WHEEL_SMOOTHING));
+      zoomImpulse -= wheelPart;
+      if (Math.abs(zoomImpulse) < 1e-4) zoomImpulse = 0;
+      // Clamped so a high speed multiplier can't jump through the model or
+      // fling the camera out of the clip range in a single frame.
+      const zoomAmount = Math.min(
+        NAV_ZOOM_MAX_FORWARD,
+        Math.max(-NAV_ZOOM_MAX_BACK, wheelPart * navSpeedRef.current)
+      );
+      if (Math.abs(zoomAmount) > 1e-6) {
+        zoomAlongView(zoomAmount);
+        moved = true;
+      }
+
+      if (moved) ctx.controls.update();
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('pointerdown', onWindowPointerDownCapture, true);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onBlur);
+    document.addEventListener('pointerlockchange', onPointerLockChange);
+    canvas.addEventListener('pointerdown', onPointerDown);
+    canvas.addEventListener('pointerenter', onEnter);
+    canvas.addEventListener('pointerleave', onLeave);
+    canvas.addEventListener('contextmenu', onContextMenu);
+    canvas.addEventListener('wheel', onWheel, { passive: false });
+
+    return () => {
+      cancelAnimationFrame(raf);
+      endLook();
+      window.removeEventListener('pointerdown', onWindowPointerDownCapture, true);
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onBlur);
+      document.removeEventListener('pointerlockchange', onPointerLockChange);
+      canvas.removeEventListener('pointerdown', onPointerDown);
+      canvas.removeEventListener('pointerenter', onEnter);
+      canvas.removeEventListener('pointerleave', onLeave);
+      canvas.removeEventListener('contextmenu', onContextMenu);
+      canvas.removeEventListener('wheel', onWheel);
+    };
+  }, [plainImageMode, embeddedPngUrl, renderQuality, showSpeedHud]);
+
+  // Middle button: in the 3D view it works like the right button (mouse-look +
+  // fly, handled in the navigation effect above). Here we only block the browser's autoscroll,
+  // and the plain image preview keeps middle-click-to-reset.
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if (e.button !== 1) return;
+    e.preventDefault();
+    if (plainImageMode) resetView();
   };
 
   const handleAuxClick = (e: React.MouseEvent) => {
@@ -1022,6 +1338,7 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
       )}
       {gridStep !== null && !embeddedPngUrl && !plainImageMode && (
         <Text
+          className="gam-viewport-label"
           size="xs"
           c="dimmed"
           style={{
@@ -1035,6 +1352,24 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
           }}
         >
           Grid: 1 cell = {gridStep} units
+        </Text>
+      )}
+      {speedHud !== null && !embeddedPngUrl && !plainImageMode && (
+        <Text
+          size="xs"
+          c="dimmed"
+          style={{
+            position: 'absolute',
+            top: 8,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            background: 'var(--wh3d-overlay-bg, rgba(16, 17, 19, 0.85))',
+            padding: '2px 10px',
+            borderRadius: 3,
+            pointerEvents: 'none'
+          }}
+        >
+          Speed: ×{speedHud.toFixed(2)}
         </Text>
       )}
       {loading && (

@@ -79,7 +79,75 @@ export async function loadModel(
   return obj;
 }
 
+/**
+ * glTF files with embedded buffers (`"uri": "data:application/octet-stream;base64,..."`)
+ * make three.js call fetch() on a data: URL. The app's Content-Security-Policy
+ * blocks that (connect-src has no data:), so the whole model failed to load.
+ * Data URIs already hold the bytes, so FileLoader decodes them in place and
+ * never touches the network. Nothing in the CSP has to be loosened.
+ */
+let dataUriPatched = false;
+
+function decodeDataUri(uri: string, responseType: string): unknown {
+  const comma = uri.indexOf(',');
+  if (comma < 0) throw new Error('Malformed data URI');
+  const meta = uri.slice(5, comma);
+  const payload = uri.slice(comma + 1);
+  const isBase64 = /;base64$/i.test(meta);
+  const mime = meta.replace(/;base64$/i, '').split(';')[0] || 'application/octet-stream';
+
+  let bytes: Uint8Array;
+  if (isBase64) {
+    const bin = atob(payload);
+    bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  } else {
+    bytes = new TextEncoder().encode(decodeURIComponent(payload));
+  }
+
+  switch (responseType) {
+    case 'arraybuffer':
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    case 'blob':
+      return new Blob([bytes as BlobPart], { type: mime });
+    case 'json':
+      return JSON.parse(new TextDecoder().decode(bytes));
+    default:
+      return new TextDecoder().decode(bytes);
+  }
+}
+
+function allowDataUris(): void {
+  if (dataUriPatched) return;
+  dataUriPatched = true;
+  const original = THREE.FileLoader.prototype.load;
+  THREE.FileLoader.prototype.load = function (
+    this: THREE.FileLoader,
+    url: string,
+    onLoad?: (data: string | ArrayBuffer) => void,
+    onProgress?: (event: ProgressEvent) => void,
+    onError?: (err: unknown) => void
+  ) {
+    if (typeof url === 'string' && url.startsWith('data:')) {
+      this.manager.itemStart(url);
+      queueMicrotask(() => {
+        try {
+          onLoad?.(decodeDataUri(url, this.responseType) as string | ArrayBuffer);
+        } catch (err) {
+          onError?.(err);
+          this.manager.itemError(url);
+        } finally {
+          this.manager.itemEnd(url);
+        }
+      });
+      return undefined as unknown as ReturnType<typeof original>;
+    }
+    return original.call(this, url, onLoad, onProgress, onError);
+  } as typeof original;
+}
+
 function loadGLTF(buffer: ArrayBuffer, resourceContext: ResourceContext): Promise<THREE.Object3D> {
+  allowDataUris();
   return new Promise((resolve, reject) => {
     const loader = new GLTFLoader();
 

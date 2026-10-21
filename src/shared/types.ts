@@ -653,6 +653,16 @@ export interface IpcApi {
     appId: string | null,
     profileId?: string | null
   ): Promise<void>;
+  /**
+   * Write (create or overwrite) a license file next to the files in `parentDir`.
+   * `fileName` is a bare file name, never a path.
+   */
+  writeSidecarLicense(
+    libraryId: string,
+    parentDir: string,
+    fileName: string,
+    text: string
+  ): Promise<{ ok: true } | { ok: false; error: string }>;
   /** Show this file in Finder/Explorer (per-file equivalent of revealLibrary). */
   revealFile(libraryId: string, fileId: number): Promise<void>;
   startFileDrag(libraryId: string, fileId: number): void;

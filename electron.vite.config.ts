@@ -31,6 +31,13 @@ export default defineConfig({
   renderer: {
     root: 'src/renderer',
     plugins: [react()],
+    // Pin the dev server to IPv4 loopback so the Electron window and Vite
+    // always agree on the address (avoids localhost -> ::1 mismatches).
+    server: {
+      host: '127.0.0.1',
+      port: 5173,
+      strictPort: true
+    },
     resolve: {
       alias: {
         '@shared': resolve('src/shared'),
