@@ -48,6 +48,7 @@ export const IPC = {
   startFileDrag: 'files:startDrag',
   batchRename: 'files:batchRename',
   setFileNotes: 'files:setNotes',
+  writeSidecarLicense: 'files:writeSidecarLicense',
   rebuildThumbCache: 'cache:rebuild',
   getCacheStatus: 'cache:getStatus',
   cancelCacheRebuild: 'cache:cancelRebuild',

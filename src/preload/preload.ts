@@ -170,6 +170,10 @@ batchRename: (libraryId: string, plan: BatchRenameItem[]) =>
     ipcRenderer.invoke(IPC.batchRename, libraryId, plan) as Promise<BatchRenameResult>,
   setFileNotes: (libraryId: string, fileId: number, notes: string) =>
     ipcRenderer.invoke(IPC.setFileNotes, libraryId, fileId, notes) as Promise<void>,
+    writeSidecarLicense: (libraryId: string, parentDir: string, fileName: string, text: string) =>
+    ipcRenderer.invoke(IPC.writeSidecarLicense, libraryId, parentDir, fileName, text) as Promise<
+      { ok: true } | { ok: false; error: string }
+    >,
   rebuildThumbCache: (libraryId: string) =>
     ipcRenderer.invoke(IPC.rebuildThumbCache, libraryId) as Promise<void>,
   getCacheStatus: (libraryId: string) =>

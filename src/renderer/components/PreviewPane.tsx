@@ -50,7 +50,7 @@ import {
   GLASS_BUTTON_CLASS,
   GLASS_RING_BUTTON_CLASS,
   GLASS_RING_CLASS
-} from './glasseffect';
+} from './Glasseffect';
 import { flushSync } from 'react-dom';
 import {
   MINI_CHROME_TRANSITION,
@@ -122,10 +122,10 @@ type PreviewLayout = 'normal' | 'expanded' | 'full';
 
 // Helper to identify document/text extensions
 const isTextExtension = (ext: string): boolean =>
-  ['md', 'txt', 'json', 'log', 'yaml', 'yml', 'ini', 'cfg', 'markdown'].includes(
+  ['md', 'txt', 'json', 'log', 'yaml', 'yml', 'ini', 'cfg', 'markdown', 'html', 'htm', 'xhtml'].includes(
     ext.replace(/^\./, '').toLowerCase()
   );
-
+  
 interface Props {
   onMaximize?: () => void;
   libraryId: string | null;

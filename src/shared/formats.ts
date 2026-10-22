@@ -32,7 +32,9 @@ export const VIDEO_EXTENSIONS = [
 
 export const TEXT_EXTENSIONS = [
   'txt',
-  'md'
+  'md',
+  'ini',
+  'html'
 ] as const;
 
 export const SUPPORTED_EXTENSIONS = [

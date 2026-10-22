@@ -127,6 +127,35 @@ function serveAssetFile(req: Request, abs: string): Promise<Response> | Response
   return net.fetch(pathToFileURL(abs).toString());
 }
 
+/**
+ * CSP for HTML pages shown in the preview iframe. Sent as a response header so
+ * the page gets its own policy instead of inheriting the app's script-src 'self'.
+ * Scripts may run (inline or from the library) but nothing can touch the
+ * network, frames, forms or plugins.
+ */
+const HTML_PREVIEW_CSP = [
+  'sandbox allow-scripts',
+  "default-src 'none'",
+  "script-src 'unsafe-inline' wh3d-file:",
+  'img-src wh3d-file: data:',
+  "style-src wh3d-file: 'unsafe-inline'",
+  'font-src wh3d-file: data:',
+  'media-src wh3d-file: data:',
+  "connect-src 'none'",
+  "object-src 'none'",
+  "frame-src 'none'",
+  "form-action 'none'",
+  "base-uri 'none'"
+].join('; ');
+
+function withHtmlCsp(abs: string, res: Response): Response {
+  if (!/\.html?$/i.test(abs)) return res;
+  const headers = new Headers(res.headers);
+  headers.set('content-type', 'text/html; charset=utf-8');
+  headers.set('content-security-policy', HTML_PREVIEW_CSP);
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+}
+
 export function registerAssetProtocols(): void {
   protocol.handle(SCHEME_THUMB, async (req) => {
     const parsed = parse(req.url);
@@ -198,7 +227,8 @@ export function registerAssetProtocols(): void {
         });
         return notFound('File missing on disk');
       }
-      return serveAssetFile(req, abs);
+      // .html pages also get their own CSP header (used by the HTML preview).
+      return withHtmlCsp(abs, await serveAssetFile(req, abs));
     }
 
     const parsed = parse(req.url);

@@ -307,3 +307,66 @@ export function installResizeBlur(): () => void {
     el.remove();
   };
 }
+
+// ─── 4. Text preview right-click menu (renderer) ────────────────────────────
+// The menu pops in (fades, grows from the corner nearest the cursor, slides a
+// few px) and plays the same animation backwards when it closes.
+// TextContextMenu renders <style>{contextMenuCss()}</style> itself.
+
+export const CONTEXT_MENU_TRANSITION = {
+  durationMs: 140,
+  /** CSS easing (fast start, soft landing). */
+  cssEasing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+  /** Menu starts at this scale and grows to 1. */
+  enterScale: 0.94,
+  /** Menu starts this many px higher and slides down. */
+  enterOffsetPx: -4,
+  /** Size of the small "Ctrl + C" line relative to the label (1 = same size). */
+  hintScale: 0.78
+} as const;
+
+export function contextMenuCss(): string {
+  const { durationMs, cssEasing, enterScale, enterOffsetPx, hintScale } = CONTEXT_MENU_TRANSITION;
+  return `
+    @keyframes gam-ctx-in {
+      from { opacity: 0; transform: translateY(${enterOffsetPx}px) scale(${enterScale}); }
+      to   { opacity: 1; transform: none; }
+    }
+    @keyframes gam-ctx-out {
+      from { opacity: 1; transform: none; }
+      to   { opacity: 0; transform: translateY(${enterOffsetPx}px) scale(${enterScale}); }
+    }
+    .gam-ctx-menu {
+      min-width: 160px;
+      padding: 6px;
+      font-size: 13px;
+      animation: gam-ctx-in ${durationMs}ms ${cssEasing} both;
+    }
+    .gam-ctx-menu[data-state='closing'] {
+      animation: gam-ctx-out ${durationMs}ms ${cssEasing} both;
+      pointer-events: none;
+    }
+    .gam-ctx-item {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      padding: 6px 10px;
+      border-radius: 10px;
+      cursor: pointer;
+      outline: none;
+      transition: background 120ms ease;
+    }
+    .gam-ctx-item:hover,
+    .gam-ctx-item:focus-visible {
+      background: color-mix(in srgb, currentColor 12%, transparent);
+    }
+    .gam-ctx-hint {
+      font-size: calc(1em * ${hintScale});
+      opacity: 0.6;
+      letter-spacing: 0.02em;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .gam-ctx-menu, .gam-ctx-menu[data-state='closing'] { animation-duration: 1ms; }
+    }
+  `;
+}

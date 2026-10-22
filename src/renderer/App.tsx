@@ -76,6 +76,7 @@ import { FolderRenameModal } from './components/FolderRenameModal';
 // out below; search for "GLASS TOGGLE" to bring it back. NormalLook.tsx exports
 // the same names, so the switch renders one or the other.
 import { GlassStyles, GLASS_POPOVER_CLASS } from './components/Glasseffect';
+import { ScrollbarStyles } from './components/ScrollbarStyles';
 // GLASS TOGGLE: import { GlassStyles as NormalStyles } from './components/NormalLook';
 import { ipc } from './ipc-client';
 import { SUPPORTED_EXTENSIONS, isAudioExtension, isVideoExtension } from '@shared/formats';
@@ -1964,6 +1965,7 @@ export function App() {
   return (
     <>
     <GlassStyles />
+    <ScrollbarStyles />
     {/* GLASS TOGGLE: {glassUi ? <GlassStyles /> : <NormalStyles />} */}
     <AppShell header={{ height: 88 }} padding={0}>
       <AppShell.Header>

@@ -1,6 +1,7 @@
 import { ipcMain, shell } from 'electron';
 import { existsSync, statSync } from 'node:fs';
-import { copyFile, rename } from 'node:fs/promises';
+import { copyFile, rename, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { IPC } from '@shared/ipc-channels';
 import { broadcastLibraryEvent } from '@main/events';
 import type {
@@ -68,12 +69,69 @@ async function reverseRename(
 
 export function registerFilesIpc(): void {
   ipcMain.handle(
-    IPC.listFolders,
-    async (_e, req: ListFoldersRequest): Promise<FolderTreeNode | null> => {
-      const lib = getOpenLibrary(req.libraryId);
-      if (!lib) return null;
-      const records = lib.files.listFoldersWithCounts();
-      return buildFolderTree(records, lib.entry.label);
+    IPC.writeSidecarLicense,
+    async (
+      _e,
+      libraryId: string,
+      parentDir: string,
+      fileName: string,
+      text: string
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
+      const lib = getOpenLibrary(libraryId);
+      if (!lib) return { ok: false, error: `Library ${libraryId} not open` };
+      if (typeof parentDir !== 'string' || typeof fileName !== 'string' || typeof text !== 'string') {
+        return { ok: false, error: 'Invalid arguments' };
+      }
+
+      // fileName must be a bare name, never a path.
+      if (!fileName || /[\\/:]/.test(fileName) || fileName.includes('..')) {
+        return { ok: false, error: 'Invalid file name' };
+      }
+      // parentDir is relative to the library root: no absolute paths, no "..".
+      const parentSegments = parentDir.split(/[\\/]/).filter(Boolean);
+      if (/^[a-zA-Z]:/.test(parentDir) || parentSegments.some((s) => s === '..')) {
+        return { ok: false, error: 'Invalid folder' };
+      }
+
+      // Only plain-text style files (license files without an extension are fine).
+      const dot = fileName.lastIndexOf('.');
+      const ext = dot < 0 ? '' : fileName.slice(dot + 1).toLowerCase();
+      const TEXT_EXTS = ['txt', 'md', 'markdown', 'ini', 'html', 'htm', 'xhtml', 'json', 'log', 'yaml', 'yml', 'cfg'];
+      const isLicenseName = /^(license|licence|copying|notice)/i.test(fileName);
+      if (!(ext ? TEXT_EXTS.includes(ext) : isLicenseName)) {
+        return { ok: false, error: `Saving .${ext || '(no extension)'} files is not allowed` };
+      }
+
+      const cleanParent = parentSegments.join('/');
+      const relPath = cleanParent ? `${cleanParent}/${fileName}` : fileName;
+      const abs = lib.resolver.toAbsolute(relPath);
+      if (!existsSync(dirname(abs))) {
+        return { ok: false, error: `Folder not found: ${cleanParent || '(library root)'}` };
+      }
+
+      try {
+        await writeFile(abs, text, 'utf8');
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
+
+      // Refresh size / modified time in the DB right away (best effort; the
+      // watcher would catch it shortly anyway).
+      try {
+        const stat = statSync(abs);
+        lib.files.upsert({
+          relPath,
+          parentDir: cleanParent,
+          filename: fileName,
+          ext,
+          sizeBytes: stat.size,
+          mtimeMs: Math.floor(stat.mtimeMs)
+        });
+      } catch {
+        // ignore
+      }
+      broadcast({ kind: 'files-changed', libraryId });
+      return { ok: true };
     }
   );
 

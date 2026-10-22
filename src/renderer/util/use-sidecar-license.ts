@@ -22,6 +22,14 @@ const CANDIDATE_NAMES = CASE_INSENSITIVE_FS
 /** Name used when the user creates a license from the app. */
 export const NEW_LICENSE_FILENAME = 'license.txt';
 
+const LICENSE_NAMES_LOWER = new Set(CANDIDATE_NAMES.map((n) => n.toLowerCase()));
+
+/** True when a file name is one of the license names this hook looks for
+ *  (case-insensitive: LICENSE, license.txt, License.md ...). */
+export function isLicenseFilename(filename: string): boolean {
+  return LICENSE_NAMES_LOWER.has(filename.toLowerCase());
+}
+
 interface FoundLicense {
   text: string;
   /** The file name it was found under (so editing writes back to the same file). */
@@ -33,8 +41,39 @@ interface FoundLicense {
 // Cleared implicitly on app reload; that's fine, it's just a perf cache.
 const folderCache = new Map<string, FoundLicense | null>();
 
+// Every mounted useSidecarLicense instance listens here, so a save made in one
+// place (metadata panel, text viewer) shows up in all the others right away.
+type LicenseListener = (key: string, value: FoundLicense | null) => void;
+const listeners = new Set<LicenseListener>();
+
 function cacheKey(libraryId: string, parentDir: string): string {
   return `${libraryId}::${parentDir}`;
+}
+
+function setCached(key: string, value: FoundLicense | null): void {
+  folderCache.set(key, value);
+  for (const listener of listeners) listener(key, value);
+}
+
+/**
+ * Tell every open license view that a license FILE was just saved by someone
+ * who already knows its exact name, e.g. the text viewer editing license.txt
+ * itself. It only updates the cache when that file is the one the folder's
+ * license lookup resolves to (another candidate name wins otherwise).
+ */
+export function publishLicense(
+  libraryId: string,
+  parentDir: string,
+  text: string,
+  name: string
+): void {
+  const key = cacheKey(libraryId, parentDir);
+  const cached = folderCache.get(key);
+  // Nothing cached yet: the next lookup will read the new file anyway.
+  if (cached === undefined) return;
+  // A different candidate file is the folder's license; leave it alone.
+  if (cached && cached.name.toLowerCase() !== name.toLowerCase()) return;
+  setCached(key, { text, name: cached ? cached.name : name });
 }
 
 /**
@@ -45,7 +84,8 @@ function cacheKey(libraryId: string, parentDir: string): string {
  * supported model extension).
  *
  * `update` tells the hook a license was just saved (created or edited), so the
- * panel shows it right away without another lookup.
+ * panel shows it right away without another lookup. Every other component
+ * using this hook for the same folder updates too.
  */
 export function useSidecarLicense(
   libraryId: string,
@@ -103,12 +143,25 @@ export function useSidecarLicense(
     })();
   }, [libraryId, parentDir]);
 
+  // Follow saves made through another instance of this hook (or publishLicense).
+  useEffect(() => {
+    const key = cacheKey(libraryId, parentDir);
+    const listener: LicenseListener = (changedKey, value) => {
+      if (changedKey !== key) return;
+      // The saved value is newer than any lookup still in flight.
+      requestIdRef.current++;
+      setFound(value);
+      setLoading(false);
+    };
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+    };
+  }, [libraryId, parentDir]);
+
   const update = useCallback(
     (text: string, name: string) => {
-      const result = { text, name };
-      folderCache.set(cacheKey(libraryId, parentDir), result);
-      setFound(result);
-      setLoading(false);
+      setCached(cacheKey(libraryId, parentDir), { text, name });
     },
     [libraryId, parentDir]
   );
