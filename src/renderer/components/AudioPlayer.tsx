@@ -1,38 +1,62 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { PlayerGlassStyles, PLAYER_GLASS_CLASS, PLAYER_GLASS_POPOVER_CLASS } from './PlayerGlass';
 import {
   ActionIcon,
   Box,
   Button,
   Card,
+  Divider,
   Group,
   Image,
   Loader,
-  Menu,
   Modal,
   Popover,
   Slider,
   Stack,
   Text,
   Tooltip,
-  UnstyledButton
+  UnstyledButton,
+  useComputedColorScheme
 } from '@mantine/core';
 import {
-  IconAdjustmentsHorizontal,
-  IconGauge,
   IconPlayerPause,
   IconPlayerPlay,
   IconRepeat,
-  IconVolume,
-  IconVolume2,
-  IconVolumeOff,
-  IconWand,
   IconPictureInPicture,
   IconPictureInPictureOff,
   IconArrowsMaximize,
   IconArrowsMinimize
 } from '@tabler/icons-react';
-import { AudioVisualizer, audioVizStore, type AudioVizStore } from './AudioVisualizer';
+import { VIDEO_COMPACT_BAR, videoCompactBarCss } from '@shared/transition';
+import { useAutoHideBar } from '../util/autohide';
+import { PlaybackIndicators, VolumeIcon, usePlaybackIndicators } from './PlaybackIndicators';
+import {
+  Dim,
+  EffectSection,
+  EqControls,
+  FxSlider,
+  PlayerSettingsMenu,
+  ReverbControls
+} from './PlayerMenu';
+import {
+  EQ_HEADROOM,
+  PITCH_MAX_ST,
+  PITCH_MIN_ST,
+  SPEED_PRESETS,
+  buildReverbImpulse,
+  createPitchCorrector,
+  fxPresetsStore,
+  sliderThumbStyle,
+  useReverbParams,
+  type PitchCorrector,
+  type PitchMode,
+  type ModularSettings,
+  DEFAULT_MODULAR,
+  anyModular,
+  normalizeModular,
+  rollModular
+} from './playerShared';
 
 interface AudioPlayerProps {
   libraryId: string;
@@ -40,7 +64,19 @@ interface AudioPlayerProps {
   filename: string;
   coverUrl?: string; // Optional cover image URL or custom protocol path
   autoPlay?: boolean;
+  /**
+   * Visualizer "stage" layout.
+   *  - 'above' (default): the player renders the visualizer itself, above the bar.
+   *  - 'none': bar only, no visualizer.
+   * Without `stageHeight` the player fills its parent: the stage takes the whole
+   * area and the bar floats over the bottom of it (preview pane, Compare).
+   */
+  stage?: 'above' | 'none';
+  /** Fixed stage height in px. The stage then sits in the normal flow above the bar. */
+  stageHeight?: number;
+  /** @deprecated Use `stage`. `showHero={false}` means `stage="none"`. */
   showHero?: boolean;
+  /** @deprecated Use `stageHeight`. */
   heroHeight?: number;
   onMini?: () => void;
   isMini?: boolean;
@@ -53,36 +89,49 @@ interface AudioPlayerProps {
    * pointer is over, instead of every player at the same time.
    */
   scopedKeys?: boolean;
-  /** Own visualizer store (Compare). Defaults to the shared one. */
-  vizStore?: AudioVizStore;
+  /** Mini player "hide interface" state (same as VideoPlayer). Pass true / false
+   *  from PreviewPane; leave undefined (Compare view etc.) for the old layout. */
+  compact?: boolean;
+  /** Shown at the left / right end of the compact bar. Only rendered in compact mode. */
+  compactStartSlot?: React.ReactNode;
+  compactEndSlot?: React.ReactNode;
 }
 
-const EQ_MAX_DB = 12;
-const EQ_HEADROOM = 0.25;
+// CSS variables read by the collapse animation in transition.ts: the size the
+// element collapses from, and its spacing (which collapses too).
+const collapseVars = (max: string, mr = '0px', ml = '0px') =>
+  ({
+    '--gam-collapse-max': max,
+    '--gam-collapse-mr': mr,
+    '--gam-collapse-ml': ml
+  }) as React.CSSProperties;
 
 const VOLUME_MAX_PCT = 200;
 const VOLUME_SNAP_LOW = 94;
 const VOLUME_SNAP_HIGH = 125;
 
-const SPEED_PRESETS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 3, 4];
-
-const getSpeedColor = (s: number): string | undefined => {
-  if (s < 1) return '#2e7d32'; // Dark Green
-  if (s === 1) return undefined; // Non-colored / Default
-  if (s <= 1.75) return '#857e22'; // Custom Yellow
-  if (s === 2) return '#c15000'; // Custom Dark Orange
-  if (s === 3) return '#8b0000'; // Dark Red
-  if (s === 4) return '#e03131'; // Red
-  return undefined;
-};
+// Stage (visualizer) layout when it fills the parent.
+const STAGE_INSET = 12; // px of space above / left / right of the visualizer
+const STAGE_BAR_GAP = 8; // px between stage and bar when the bar has no padding of its own
+const BAR_MAX_WIDTH = 640;
+// Wheel: one mouse notch is ~100 delta; touchpads send many small ones.
+const WHEEL_STEP_DELTA = 100;
+const WHEEL_VOLUME_STEP = 5;
+// A press that moves more than this is a drag, not a click.
+const CLICK_SLOP_PX = 5;
 
 const VIZ_FFT = 4096;
 const WAVEFORM_BARS = 72;
 
-const sliderThumbStyle = {
-  backgroundColor: 'var(--wh3d-slider-thumb-bg, #4c6ef5)',
-  border: '2px solid var(--wh3d-slider-thumb-border, #000000)'
-};
+// One back-to-back piece of a modular playback chain (see startPlayback).
+interface ModIter {
+  start: number; // AudioContext time this piece starts
+  offset: number; // where in the file it starts
+  dur: number; // how long it lasts, in AudioContext seconds
+  rate: number; // effective file-seconds per second (speed * pitch)
+  roll: { p: number; s: number; v: number; st: number }; // the random pitch / speed / volume it was given
+  source: AudioBufferSourceNode;
+}
 
 let sharedAudioCtx: AudioContext | null = null;
 
@@ -96,12 +145,14 @@ const getSharedAudioContext = (): AudioContext => {
 
 interface PersistedAudioEffects {
   speed: number;
-  pitch: number;
+  pitch: number; // semitones for whichever pitch mode is on
+  pitchMode: PitchMode;
   reverbWet: number;
   subBass: number;
   bass: number;
   treble: number;
   isLooping: boolean;
+  modular: ModularSettings;
   // Volume used to live only in component state, so it reset to 100% every
   // time the player remounted (switching tracks, reopening the app). It's
   // now part of the persisted blob like every other effect. Mute is kept
@@ -112,12 +163,14 @@ interface PersistedAudioEffects {
 const DEFAULT_AUDIO_EFFECTS: PersistedAudioEffects = {
   speed: 1,
   pitch: 0,
+  pitchMode: 'shift',
   reverbWet: 0,
   subBass: 0,
   bass: 0,
   treble: 0,
   isLooping: true,
-  volume: 1
+  volume: 1,
+  modular: { ...DEFAULT_MODULAR }
 };
 
 const STORAGE_KEY = 'wh3d_audio_player_effects';
@@ -126,7 +179,10 @@ const loadPersistedEffects = (): PersistedAudioEffects => {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
-      return { ...DEFAULT_AUDIO_EFFECTS, ...JSON.parse(saved) };
+      const parsed = JSON.parse(saved);
+      // Pitch correction was removed: pitch always changes pitch AND speed together.
+      parsed.pitchMode = 'shift';
+      return { ...DEFAULT_AUDIO_EFFECTS, ...parsed, modular: normalizeModular(parsed.modular) };
     }
   } catch (e) {
     console.error('Failed to load audio effects from localStorage:', e);
@@ -165,26 +221,13 @@ interface AudioGraph {
   master: GainNode;
   dry: GainNode;
   wet: GainNode;
+  convolver: ConvolverNode;
   analyser: AnalyserNode;
+  pitchFx: PitchCorrector;
 }
-
-const createImpulseResponse = (ctx: AudioContext, durationSec = 2.5, decay = 2.5) => {
-  const sampleRate = ctx.sampleRate;
-  const length = Math.floor(sampleRate * durationSec);
-  const impulse = ctx.createBuffer(2, length, sampleRate);
-  for (let channel = 0; channel < 2; channel++) {
-    const channelData = impulse.getChannelData(channel);
-    for (let i = 0; i < length; i++) {
-      channelData[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, decay);
-    }
-  }
-  return impulse;
-};
 
 const effectiveRate = (speed: number, pitchSemitones: number) =>
   speed * Math.pow(2, pitchSemitones / 12);
-
-const formatDb = (v: number) => `${v > 0 ? '+' : ''}${v} dB`;
 
 const getMonoChannelData = (buffer: AudioBuffer): Float32Array => {
   if (buffer.numberOfChannels === 1) return buffer.getChannelData(0);
@@ -248,13 +291,6 @@ function WaveformBars({ peaks, progress }: { peaks: number[]; progress: number }
   );
 }
 
-// Volume icon follows the level: muted, one wave at 50% or below, two waves above.
-function VolumeIcon({ pct, muted, size }: { pct: number; muted: boolean; size: number }) {
-  if (muted || pct <= 0) return <IconVolumeOff size={size} />;
-  if (pct <= 50) return <IconVolume2 size={size} />;
-  return <IconVolume size={size} />;
-}
-
 // ─── Windows media panel (quick settings / lock screen / media keys) ────────
 // The player decodes audio with the Web Audio API, which Chromium does not
 // report as "media playing". A silent looping <audio> element, started and
@@ -287,22 +323,174 @@ const getSilentWavUrl = (): string => {
   return silentWavUrl;
 };
 
+// ─── Visualizer (canvas) ────────────────────────────────────────────────────
+// Lives in this file; the player passes it its own analyser and play state.
+const VIZ_MIN_HZ = 30;
+const VIZ_MAX_HZ = 16000;
+// Fallbacks match the dark theme. The active theme overrides them through
+// --wh3d-viz-top / --wh3d-viz-mid (see dark.ts / light.ts).
+const VIZ_TOP_FALLBACK = '#a5b4fc';
+const VIZ_MID_FALLBACK = '#7c83f5';
+
+function VisualizerCanvas({
+  bars,
+  analyser,
+  isPlaying
+}: {
+  bars: number;
+  analyser: AnalyserNode | null;
+  isPlaying: boolean;
+}) {
+  // Only here so the effect re-runs (and repaints the idle state) on theme change.
+  const colorScheme = useComputedColorScheme('dark');
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const barsRef = useRef(new Float32Array(bars));
+  const dataRef = useRef(new Uint8Array(2048));
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return undefined;
+
+    if (barsRef.current.length !== bars) {
+      barsRef.current = new Float32Array(bars);
+    }
+
+    // Draws one frame. Returns true while it still needs to keep animating.
+    const draw = (): boolean => {
+      const dpr = window.devicePixelRatio || 1;
+      const w = Math.floor(canvas.clientWidth * dpr);
+      const h = Math.floor(canvas.clientHeight * dpr);
+      if (w === 0 || h === 0) return false;
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+      }
+      const c = canvas.getContext('2d');
+      if (!c) return false;
+
+      const values = barsRef.current;
+      const live = isPlaying && !!analyser;
+
+      let binHz = 1;
+      if (live && analyser) {
+        if (dataRef.current.length !== analyser.frequencyBinCount) {
+          dataRef.current = new Uint8Array(analyser.frequencyBinCount);
+        }
+        analyser.getByteFrequencyData(dataRef.current);
+        binHz = analyser.context.sampleRate / analyser.fftSize;
+      }
+      const data = dataRef.current;
+      const ratio = VIZ_MAX_HZ / VIZ_MIN_HZ;
+
+      let animating = live;
+      for (let i = 0; i < bars; i++) {
+        let target = 0;
+        if (live) {
+          // Bars are spaced logarithmically so bass gets as much room as treble
+          const f0 = VIZ_MIN_HZ * Math.pow(ratio, i / bars);
+          const f1 = VIZ_MIN_HZ * Math.pow(ratio, (i + 1) / bars);
+          const b0 = Math.floor(f0 / binHz);
+          const b1 = Math.max(b0 + 1, Math.ceil(f1 / binHz));
+          let sum = 0;
+          let count = 0;
+          for (let b = b0; b < b1 && b < data.length; b++) {
+            sum += data[b];
+            count++;
+          }
+          const raw = count ? sum / count / 255 : 0;
+          target = Math.min(1, raw * (1 + (i / bars) * 0.8)); // slight tilt so highs stay visible
+        }
+        // Instant attack, smooth fall
+        values[i] = Math.max(target, values[i] * 0.88);
+        if (values[i] < 0.004) values[i] = 0;
+        if (values[i] > 0) animating = true;
+      }
+
+      c.clearRect(0, 0, w, h);
+      const gap = Math.max(2, Math.round(3 * dpr));
+      const barW = (w - gap * (bars - 1)) / bars;
+      const mid = h / 2;
+      const maxHalf = mid - 2 * dpr;
+
+      // Theme colors, read each frame so a theme switch shows up immediately.
+      const styles = getComputedStyle(canvas);
+      const vizTop = styles.getPropertyValue('--wh3d-viz-top').trim() || VIZ_TOP_FALLBACK;
+      const vizMid = styles.getPropertyValue('--wh3d-viz-mid').trim() || VIZ_MID_FALLBACK;
+
+      const grad = c.createLinearGradient(0, 0, 0, h);
+      grad.addColorStop(0, vizTop);
+      grad.addColorStop(0.5, vizMid);
+      grad.addColorStop(1, vizTop);
+      c.fillStyle = grad;
+
+      for (let i = 0; i < bars; i++) {
+        const half = Math.max(dpr, values[i] * maxHalf);
+        const x = i * (barW + gap);
+        const y = mid - half;
+        if (typeof c.roundRect === 'function') {
+          c.beginPath();
+          c.roundRect(x, y, barW, half * 2, Math.min(barW / 2, half));
+          c.fill();
+        } else {
+          c.fillRect(x, y, barW, half * 2);
+        }
+      }
+
+      return animating;
+    };
+
+    let frame: number | null = null;
+    const loop = () => {
+      frame = draw() ? requestAnimationFrame(loop) : null;
+    };
+    frame = requestAnimationFrame(loop);
+
+    // Redraw the idle state when resized
+    let ro: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(() => {
+        if (frame === null) draw();
+      });
+      ro.observe(canvas);
+    }
+
+    return () => {
+      if (frame !== null) cancelAnimationFrame(frame);
+      ro?.disconnect();
+    };
+  }, [analyser, isPlaying, bars, colorScheme]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      aria-hidden="true"
+      style={{ display: 'block', width: '100%', height: '100%' }}
+    />
+  );
+}
+
 export function AudioPlayer({
   libraryId,
   fileId,
   filename,
   coverUrl,
   autoPlay = false,
-  showHero = true,
-  heroHeight = 260,
+  stage,
+  stageHeight,
+  showHero,
+  heroHeight,
   onMini,
   isMini,
   onFullscreen,
   isFullscreen,
   scopedKeys = false,
-  vizStore = audioVizStore
+  compact,
+  compactStartSlot,
+  compactEndSlot
 }: AudioPlayerProps) {
   const [isPlaying, setIsPlaying] = useState(false);
+  // Published by the audio graph once a file has decoded; drives the stage canvas.
+  const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [pendingPlay, setPendingPlay] = useState(autoPlay);
   const pendingPlayRef = useRef(autoPlay);
@@ -320,19 +508,70 @@ export function AudioPlayer({
   const resolvedCoverUrl = coverUrl || `wh3d-cover://${libraryId}/${fileId}`;
 
   const [speed, setSpeed] = useState(() => audioEffectsStore.get().speed);
-  const [pitch, setPitch] = useState(() => audioEffectsStore.get().pitch);
+  const [pitchMode, setPitchMode] = useState<PitchMode>(() => audioEffectsStore.get().pitchMode);
+  const [pitchSt, setPitchSt] = useState(() => audioEffectsStore.get().pitch);
+  // Pitch shifter: pitch AND speed change together (tape-style).
+  // Pitch correction: pitch changes, speed stays the same (the pitch node).
+  const pitch = pitchMode !== 'correct' ? pitchSt : 0;
+  const correctSt = pitchMode === 'correct' ? pitchSt : 0;
   const [reverbWet, setReverbWet] = useState(() => audioEffectsStore.get().reverbWet);
   const [subBass, setSubBass] = useState(() => audioEffectsStore.get().subBass);
   const [bass, setBass] = useState(() => audioEffectsStore.get().bass);
   const [treble, setTreble] = useState(() => audioEffectsStore.get().treble);
   const [isLooping, setIsLooping] = useState(() => audioEffectsStore.get().isLooping);
+  const [modular, setModular] = useState<ModularSettings>(() => audioEffectsStore.get().modular);
 
   const [confirmResetOpen, setConfirmResetOpen] = useState(false);
 
   // Panel Popover States
-  const [eqOpen, setEqOpen] = useState(false);
-  const [effectsOpen, setEffectsOpen] = useState(false);
+  // One menu now holds speed, pitch, EQ and reverb.
+  const [fxOpen, setFxOpen] = useState(false);
   const [volumeOpen, setVolumeOpen] = useState(false);
+
+  // ---- Stage layout ----
+  // `showHero` / `heroHeight` still work: showHero={false} -> no stage.
+  const hasStage = (stage ?? (showHero === false ? 'none' : 'above')) === 'above';
+  const fixedStageH = stageHeight ?? heroHeight;
+  // No fixed height: the player fills its parent and the bar floats over the stage.
+  const fillStage = hasStage && fixedStageH === undefined;
+
+  // ---- Play / pause circle + status pill (shared with VideoPlayer) ----
+  // ONE instance, rendered once inside the stage.
+  const pi = usePlaybackIndicators();
+  // Latest values for fast wheel spins and for effects that must not re-run.
+  const volumeRef = useRef(volume);
+  volumeRef.current = volume;
+  const volumeOpenRef = useRef(volumeOpen);
+  volumeOpenRef.current = volumeOpen;
+
+  // ---- Compact mode (mini player with the interface hidden) ----
+  // Same behaviour as VideoPlayer: the bar collapses to just the seek slider,
+  // floats over the visualizer, and auto-hides after 1 s without mouse movement.
+  const compactAware = compact !== undefined;
+  const isCompact = !!compact;
+  const scrubbingRef = useRef(false);
+  const menusOpenRef = useRef(false);
+  menusOpenRef.current = fxOpen || volumeOpen || confirmResetOpen;
+
+  const bar = useAutoHideBar({
+    compact: isCompact,
+    hideMs: VIDEO_COMPACT_BAR.autoHideMs,
+    enterDelayMs: VIDEO_COMPACT_BAR.durationMs,
+    isBusy: () => menusOpenRef.current || scrubbingRef.current
+  });
+
+  // A menu closing restarts the countdown.
+  useEffect(() => {
+    bar.rearm();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fxOpen, volumeOpen, confirmResetOpen]);
+
+  // Any mouse movement anywhere brings the bar back.
+  useEffect(() => {
+    if (!isCompact) return undefined;
+    window.addEventListener('mousemove', bar.poke);
+    return () => window.removeEventListener('mousemove', bar.poke);
+  }, [isCompact, bar.poke]);
 
   // Probe the cover off-screen first (window.Image, because Mantine's Image is
   // imported in this file). If it 404s — no embedded artwork — the slot never
@@ -357,8 +596,7 @@ export function AudioPlayer({
 
   // Refs for click outside & timer tracking
   const seekbarRef = useRef<HTMLDivElement | null>(null);
-  const eqButtonRef = useRef<HTMLButtonElement | null>(null);
-  const effectsButtonRef = useRef<HTMLButtonElement | null>(null);
+  const fxButtonRef = useRef<HTMLButtonElement | null>(null);
   const volumeButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const autoCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -372,17 +610,16 @@ export function AudioPlayer({
 
   const resetSeekbarTimer = () => {
     clearAutoCloseTimer();
-    if (eqOpen || effectsOpen || volumeOpen) {
+    if (fxOpen || volumeOpen) {
       autoCloseTimerRef.current = setTimeout(() => {
-        setEqOpen(false);
-        setEffectsOpen(false);
+        setFxOpen(false);
         setVolumeOpen(false);
       }, 7000);
     }
   };
 
   useEffect(() => {
-    if (!eqOpen && !effectsOpen && !volumeOpen) return;
+    if (!fxOpen && !volumeOpen) return;
 
     const handleGlobalMouseDown = (e: MouseEvent) => {
       const target = e.target as Node | null;
@@ -393,11 +630,7 @@ export function AudioPlayer({
         if (popover.contains(target)) return;
       }
 
-      if (
-        eqButtonRef.current?.contains(target) ||
-        effectsButtonRef.current?.contains(target) ||
-        volumeButtonRef.current?.contains(target)
-      ) {
+      if (fxButtonRef.current?.contains(target) || volumeButtonRef.current?.contains(target)) {
         return;
       }
 
@@ -406,33 +639,17 @@ export function AudioPlayer({
       }
 
       clearAutoCloseTimer();
-      setEqOpen(false);
-      setEffectsOpen(false);
+      setFxOpen(false);
       setVolumeOpen(false);
     };
 
     window.addEventListener('mousedown', handleGlobalMouseDown);
     return () => window.removeEventListener('mousedown', handleGlobalMouseDown);
-  }, [eqOpen, effectsOpen, volumeOpen]);
-
-  const toggleEq = () => {
-    clearAutoCloseTimer();
-    setEffectsOpen(false);
-    setVolumeOpen(false);
-    setEqOpen((prev) => !prev);
-  };
-
-  const toggleEffects = () => {
-    clearAutoCloseTimer();
-    setEqOpen(false);
-    setVolumeOpen(false);
-    setEffectsOpen((prev) => !prev);
-  };
+  }, [fxOpen, volumeOpen]);
 
   const toggleVolume = () => {
     clearAutoCloseTimer();
-    setEqOpen(false);
-    setEffectsOpen(false);
+    setFxOpen(false);
     setVolumeOpen((prev) => !prev);
   };
 
@@ -443,6 +660,24 @@ export function AudioPlayer({
   useEffect(() => {
     return () => clearAutoCloseTimer();
   }, []);
+
+  // I / F shortcuts: close the menus with no fade-out BEFORE the window resizes.
+  const [instantClose, setInstantClose] = useState(false);
+  const closeMenusNow = () => {
+    clearAutoCloseTimer();
+    flushSync(() => {
+      setInstantClose(true);
+      setFxOpen(false);
+      setVolumeOpen(false);
+    });
+    requestAnimationFrame(() => setInstantClose(false));
+  };
+
+  // Safety net: a mode change from a button (not the keyboard) also closes the menus.
+  useEffect(() => {
+    setFxOpen(false);
+    setVolumeOpen(false);
+  }, [isMini, isFullscreen, compact]);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const audioBufferRef = useRef<AudioBuffer | null>(null);
@@ -455,13 +690,72 @@ export function AudioPlayer({
   const isPlayingRef = useRef<boolean>(false);
   const animFrameRef = useRef<number | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  // The visualizer stage (click = play / pause, wheel = volume) and the bar wrapper.
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const barWrapRef = useRef<HTMLDivElement | null>(null);
 
-  const paramsRef = useRef({ volume, isMuted, speed, pitch, reverbWet, subBass, bass, treble, isLooping });
-  paramsRef.current = { volume, isMuted, speed, pitch, reverbWet, subBass, bass, treble, isLooping };
+  // Room kept under the stage for the full-size bar (fill layout only). Ignored
+  // while compact, so the stage grows into that space as the bar collapses.
+  const [barH, setBarH] = useState(0);
+  useLayoutEffect(() => {
+    const el = barWrapRef.current;
+    if (!el || !fillStage || isCompact) return undefined;
+    const update = () => setBarH(el.offsetHeight);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [fillStage, isCompact]);
+
+  // Modular playback: a chain of sources, each with its own random pitch + speed.
+  const iterQueueRef = useRef<ModIter[]>([]);
+  const modChainRef = useRef(false);
+  const rollRef = useRef({ p: 1, s: 1, v: 1, st: 0 });
+
+  const paramsRef = useRef({
+    volume,
+    isMuted,
+    speed,
+    pitch,
+    correctSt,
+    pitchSt,
+    pitchCorrect: pitchMode === 'correct',
+    modular,
+    reverbWet,
+    subBass,
+    bass,
+    treble,
+    isLooping
+  });
+  paramsRef.current = {
+    volume,
+    isMuted,
+    speed,
+    pitch,
+    correctSt,
+    pitchSt,
+    pitchCorrect: pitchMode === 'correct',
+    modular,
+    reverbWet,
+    subBass,
+    bass,
+    treble,
+    isLooping
+  };
 
   const getPosition = () => {
     const ctx = audioCtxRef.current;
     if (!ctx || !isPlayingRef.current) return positionRef.current;
+    if (modChainRef.current) {
+      const q = iterQueueRef.current;
+      let it = q[0];
+      for (const c of q) if (c.start <= ctx.currentTime) it = c;
+      // Queue empty = the last piece finished (non-loop): report the end.
+      if (!it) return audioBufferRef.current?.duration ?? positionRef.current;
+      const mp = it.offset + Math.max(0, ctx.currentTime - it.start) * it.rate;
+      const tot = audioBufferRef.current?.duration ?? 0;
+      return tot > 0 ? Math.min(mp, tot) : mp;
+    }
     const elapsed = (ctx.currentTime - anchorRef.current) * rateRef.current;
     const rawPos = positionRef.current + elapsed;
     const total = audioBufferRef.current?.duration ?? 0;
@@ -473,6 +767,34 @@ export function AudioPlayer({
   };
 
   const stopSource = (fadeSec = 0) => {
+    if (iterQueueRef.current.length > 0) {
+      const ctx0 = audioCtxRef.current;
+      const fade =
+        fadeSec > 0 && ctx0 && graphRef.current && isPlayingRef.current ? fadeSec : 0;
+      for (const it of iterQueueRef.current) {
+        const src0 = it.source;
+        src0.onended = null;
+        if (fade > 0 && ctx0) {
+          try {
+            src0.stop(ctx0.currentTime + fade);
+          } catch {}
+          setTimeout(() => {
+            try {
+              src0.disconnect();
+            } catch {}
+          }, fade * 1000 + 50);
+        } else {
+          try {
+            src0.stop();
+          } catch {}
+          try {
+            src0.disconnect();
+          } catch {}
+        }
+      }
+      iterQueueRef.current = [];
+    }
+    modChainRef.current = false;
     const s = sourceNodeRef.current;
     const ctx = audioCtxRef.current;
     const g = graphRef.current;
@@ -524,13 +846,16 @@ export function AudioPlayer({
     const t = ctx.currentTime;
 
     g.master.gain.cancelScheduledValues(t);
-    g.master.gain.setTargetAtTime(p.isMuted ? 0 : p.volume, t, 0.01);
+    g.master.gain.setTargetAtTime(p.isMuted ? 0 : p.modular.volumeOn ? 1 : p.volume, t, 0.01);
     g.dry.gain.setTargetAtTime(1 - p.reverbWet, t, 0.01);
     g.wet.gain.setTargetAtTime(p.reverbWet, t, 0.01);
 
     g.sub.gain.setTargetAtTime(p.subBass, t, 0.02);
     g.bass.gain.setTargetAtTime(p.bass, t, 0.02);
     g.treble.gain.setTargetAtTime(p.treble, t, 0.02);
+    g.pitchFx.setSemitones(
+      p.modular.pitchOn ? 0 : p.pitchCorrect ? p.pitchSt : 0
+    );
 
     const maxBoost = Math.max(0, p.subBass, p.bass, p.treble);
     g.preamp.gain.setTargetAtTime(Math.pow(10, -(maxBoost * EQ_HEADROOM) / 20), t, 0.02);
@@ -538,6 +863,7 @@ export function AudioPlayer({
 
   const buildGraph = (ctx: AudioContext): AudioGraph => {
     const preamp = ctx.createGain();
+    const pitchFx = createPitchCorrector(ctx);
 
     const sub = ctx.createBiquadFilter();
     sub.type = 'lowshelf';
@@ -561,9 +887,10 @@ export function AudioPlayer({
     const dry = ctx.createGain();
     const wet = ctx.createGain();
     const convolver = ctx.createConvolver();
-    convolver.buffer = createImpulseResponse(ctx);
+    convolver.buffer = buildReverbImpulse(ctx, fxPresetsStore.reverbParams());
 
-    preamp.connect(sub);
+    preamp.connect(pitchFx.input);
+    pitchFx.output.connect(sub);
     sub.connect(bassFilter);
     bassFilter.connect(trebleFilter);
     trebleFilter.connect(master);
@@ -583,7 +910,18 @@ export function AudioPlayer({
     convolver.connect(wet);
     wet.connect(limiter);
 
-    return { preamp, sub, bass: bassFilter, treble: trebleFilter, master, dry, wet, analyser };
+    return {
+      preamp,
+      sub,
+      bass: bassFilter,
+      treble: trebleFilter,
+      master,
+      dry,
+      wet,
+      convolver,
+      analyser,
+      pitchFx
+    };
   };
 
   useEffect(() => {
@@ -595,6 +933,7 @@ export function AudioPlayer({
     isPlayingRef.current = false;
     positionRef.current = 0;
     audioBufferRef.current = null;
+    graphRef.current?.pitchFx.dispose();
     graphRef.current = null;
     setDuration(0);
     setCurrentTime(0);
@@ -605,7 +944,7 @@ export function AudioPlayer({
     pendingPlayRef.current = autoPlay;
     setPendingPlay(autoPlay);
 
-    vizStore.set({ analyser: null, isPlaying: false });
+    setAnalyser(null);
 
     const loadAudio = async () => {
       try {
@@ -621,7 +960,7 @@ export function AudioPlayer({
         audioBufferRef.current = decodedBuffer;
         const graph = buildGraph(ctx);
         graphRef.current = graph;
-        vizStore.set({ analyser: graph.analyser, isPlaying: false });
+        setAnalyser(graph.analyser);
         applyParams();
 
         setDuration(decodedBuffer.duration);
@@ -635,7 +974,7 @@ export function AudioPlayer({
         if (pendingPlayRef.current) {
           pendingPlayRef.current = false;
           setPendingPlay(false);
-          await startPlayback(0);
+          await startPlayback(0, true);
         }
       } catch (err) {
         console.error('Failed to load or decode audio file:', err);
@@ -650,14 +989,26 @@ export function AudioPlayer({
 
     return () => {
       active = false;
-      vizStore.set({ analyser: null, isPlaying: false });
       cancelFrame();
       stopSource(0.25);
       isPlayingRef.current = false;
+      graphRef.current?.pitchFx.dispose();
       graphRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [libraryId, fileId, autoPlay]);
+
+  // Reverb preset / Custom values changed: rebuild the reverb tail. The short delay
+  // keeps a Custom slider drag from rebuilding it on every tick.
+  const reverbParams = useReverbParams();
+  useEffect(() => {
+    const g = graphRef.current;
+    if (!g) return undefined;
+    const id = window.setTimeout(() => {
+      g.convolver.buffer = buildReverbImpulse(g.ctx, reverbParams);
+    }, 120);
+    return () => window.clearTimeout(id);
+  }, [reverbParams]);
 
   const tick = () => {
     if (!isPlayingRef.current) return;
@@ -678,7 +1029,94 @@ export function AudioPlayer({
     animFrameRef.current = requestAnimationFrame(tick);
   };
 
-  const startPlayback = async (offset: number) => {
+  // ---- Modular pitch / volume / speed ----------------------------------------
+  // The sound plays as a chain of back-to-back sources (gapless, scheduled on the
+  // audio clock). Each piece gets its own random pitch / volume / speed. A modular
+  // option replaces the regular control while it is on.
+  const rollNow = () => {
+    const r = rollModular(paramsRef.current.modular);
+    return { p: r.p, s: r.s, v: r.v, st: 12 * Math.log2(r.p) };
+  };
+
+  const iterParams = (roll: { p: number; s: number; v: number; st: number }) => {
+    const p = paramsRef.current;
+    const m = p.modular;
+    const baseSt = m.pitchOn ? roll.st : p.pitchSt;
+    // Modular pitch is never corrected (it sounds robotic); otherwise the checkbox decides.
+    const corrOn = !m.pitchOn && p.pitchCorrect;
+    const shiftSt = corrOn ? 0 : baseSt;
+    const spd = m.speedOn ? roll.s : p.speed;
+    return {
+      srcRate: spd,
+      detune: shiftSt * 100,
+      effRate: effectiveRate(spd, shiftSt),
+      gain: m.volumeOn ? roll.v : 1
+    };
+  };
+
+  const scheduleIter = (
+    ctx: AudioContext,
+    buffer: AudioBuffer,
+    graph: AudioGraph,
+    startAt: number,
+    offset: number,
+    roll: { p: number; s: number; v: number; st: number }
+  ): ModIter => {
+    const ip = iterParams(roll);
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    src.playbackRate.value = ip.srcRate;
+    src.detune.value = ip.detune;
+    src.loop = false;
+    // Per-piece gain = the random volume (the master gain keeps the regular volume).
+    const g = ctx.createGain();
+    g.gain.value = ip.gain;
+    src.connect(g);
+    g.connect(graph.preamp);
+    src.addEventListener('ended', () => {
+      try {
+        g.disconnect();
+      } catch {}
+    });
+    src.start(startAt, offset);
+    const it: ModIter = {
+      start: startAt,
+      offset,
+      dur: Math.max(0.01, (buffer.duration - offset) / ip.effRate),
+      rate: ip.effRate,
+      roll,
+      source: src
+    };
+    iterQueueRef.current.push(it);
+    return it;
+  };
+
+  // A piece finished: the next one is already playing. Make it the current roll
+  // and schedule one more behind it (when looping).
+  const onIterEnded = (it: ModIter) => {
+    const q = iterQueueRef.current;
+    const idx = q.indexOf(it);
+    if (idx === -1) return;
+    q.splice(idx, 1);
+    const ctx = audioCtxRef.current;
+    const buffer = audioBufferRef.current;
+    const graph = graphRef.current;
+    if (!ctx || !buffer || !graph || !isPlayingRef.current || !modChainRef.current) return;
+    while (paramsRef.current.isLooping && q.length < 2) {
+      const last = q[q.length - 1];
+      const startAt = Math.max(ctx.currentTime, last ? last.start + last.dur : ctx.currentTime);
+      const next = scheduleIter(ctx, buffer, graph, startAt, 0, rollNow());
+      next.source.onended = () => onIterEnded(next);
+      sourceNodeRef.current = next.source;
+    }
+    const cur = q[0];
+    if (cur) {
+      rollRef.current = cur.roll;
+      applyParams();
+    }
+  };
+
+  const startPlayback = async (offset: number, reroll = false) => {
     const ctx = audioCtxRef.current;
     const buffer = audioBufferRef.current;
     const graph = graphRef.current;
@@ -696,6 +1134,27 @@ export function AudioPlayer({
     cancelFrame();
 
     applyParams();
+
+    if (anyModular(paramsRef.current.modular)) {
+      if (reroll) rollRef.current = rollNow();
+      applyParams();
+      modChainRef.current = true;
+      const first = scheduleIter(ctx, buffer, graph, ctx.currentTime, offset, rollRef.current);
+      first.source.onended = () => onIterEnded(first);
+      sourceNodeRef.current = first.source;
+      if (paramsRef.current.isLooping) {
+        const second = scheduleIter(ctx, buffer, graph, first.start + first.dur, 0, rollNow());
+        second.source.onended = () => onIterEnded(second);
+      }
+      rateRef.current = first.rate;
+      positionRef.current = offset;
+      anchorRef.current = ctx.currentTime;
+      isPlayingRef.current = true;
+      setIsPlaying(true);
+      animFrameRef.current = requestAnimationFrame(tick);
+      return;
+    }
+    modChainRef.current = false;
 
     const { speed: s, pitch: p, isLooping: loop } = paramsRef.current;
     const source = ctx.createBufferSource();
@@ -736,17 +1195,20 @@ export function AudioPlayer({
       const next = !pendingPlayRef.current;
       pendingPlayRef.current = next;
       setPendingPlay(next);
+      pi.flashIndicator(next ? 'play' : 'pause');
       return;
     }
 
     if (isPlayingRef.current) {
       pausePlayback();
+      pi.flashIndicator('pause');
     } else {
       const total = audioBufferRef.current?.duration ?? 0;
       if (positionRef.current >= total) {
         positionRef.current = 0;
       }
-      void startPlayback(positionRef.current);
+      void startPlayback(positionRef.current, true);
+      pi.flashIndicator('play');
     }
   };
 
@@ -767,15 +1229,36 @@ export function AudioPlayer({
     const currentPos = getPosition();
     const targetPos = Math.max(0, Math.min(total, currentPos + direction * step));
     handleSeek(targetPos);
+    pi.flashHud({
+      kind: direction === -1 ? 'back' : 'forward',
+      text: `${direction === -1 ? '−' : '+'}${step}s`
+    });
   };
 
+  // Reads a ref so fast wheel spins never use a stale volume. When the volume
+  // actually changes, the status pill comes from the volume effect below; when
+  // it is already at an end, hitLimit() drives the shake / shrink reaction.
   const adjustVolumeRelative = (deltaPct: number) => {
+    const cur = Math.round(volumeRef.current * 100);
+    const pct = Math.max(0, Math.min(VOLUME_MAX_PCT, cur + deltaPct));
+    if (pct === cur) {
+      if (!volumeOpenRef.current) {
+        if (deltaPct > 0 && cur >= VOLUME_MAX_PCT) {
+          pi.hitLimit('volume', 'max', {
+            kind: 'volume',
+            text: `${VOLUME_MAX_PCT}%`,
+            pct: VOLUME_MAX_PCT,
+            boosted: true
+          });
+        } else if (deltaPct < 0 && cur <= 0) {
+          pi.hitLimit('volume', 'min', { kind: 'volume', text: '0%', pct: 0 });
+        }
+      }
+      return;
+    }
+    volumeRef.current = pct / 100;
     setIsMuted(false);
-    setVolume((prevVol) => {
-      const currentPct = Math.round(prevVol * 100);
-      const newPct = Math.max(0, Math.min(VOLUME_MAX_PCT, currentPct + deltaPct));
-      return newPct / 100;
-    });
+    setVolume(pct / 100);
   };
 
   const changeSpeedStep = (direction: 'down' | 'up' | 'reset') => {
@@ -794,13 +1277,23 @@ export function AudioPlayer({
       }
     });
 
-    if (direction === 'down') {
-      const nextIdx = Math.max(0, closestIdx - 1);
-      setSpeed(SPEED_PRESETS[nextIdx]);
-    } else if (direction === 'up') {
-      const nextIdx = Math.min(SPEED_PRESETS.length - 1, closestIdx + 1);
-      setSpeed(SPEED_PRESETS[nextIdx]);
+    // Already at the fastest / slowest preset: pill reacts instead.
+    if (direction === 'up' && closestIdx === SPEED_PRESETS.length - 1) {
+      pi.hitLimit('speed', 'max', { kind: 'speed', text: `${speed}x` });
+      return;
     }
+    if (direction === 'down' && closestIdx === 0) {
+      pi.hitLimit('speed', 'min', { kind: 'speed', text: `${speed}x` });
+      return;
+    }
+
+    setSpeed(
+      SPEED_PRESETS[
+        direction === 'down'
+          ? Math.max(0, closestIdx - 1)
+          : Math.min(SPEED_PRESETS.length - 1, closestIdx + 1)
+      ]
+    );
   };
 
   // Windows-style hover-to-scroll: each control reacts to the wheel only
@@ -816,7 +1309,7 @@ export function AudioPlayer({
   };
 
   useEffect(() => {
-    if (sourceNodeRef.current) {
+    if (sourceNodeRef.current && !modChainRef.current) {
       sourceNodeRef.current.loop = isLooping;
     }
     audioEffectsStore.set({ isLooping });
@@ -828,7 +1321,7 @@ export function AudioPlayer({
     // PersistedAudioEffects above. isMuted intentionally stays local/session
     // only.
     audioEffectsStore.set({ volume, reverbWet, subBass, bass, treble });
-  }, [volume, isMuted, reverbWet, subBass, bass, treble]);
+  }, [volume, isMuted, reverbWet, subBass, bass, treble, correctSt]);
 
   useEffect(() => {
     const ctx = audioCtxRef.current;
@@ -839,13 +1332,71 @@ export function AudioPlayer({
     rateRef.current = effectiveRate(speed, pitch);
 
     const src = sourceNodeRef.current;
-    if (src && ctx && isPlayingRef.current) {
+    if (modChainRef.current && ctx && isPlayingRef.current) {
+      // Modular chain: the pieces were scheduled with the old values, so restart from here.
+      void startPlayback(getPosition());
+    } else if (src && ctx && isPlayingRef.current) {
       src.playbackRate.setValueAtTime(speed, ctx.currentTime);
       src.detune.setValueAtTime(pitch * 100, ctx.currentTime);
     }
 
-    audioEffectsStore.set({ speed, pitch });
+    audioEffectsStore.set({ speed });
   }, [speed, pitch]);
+
+  useEffect(() => {
+    audioEffectsStore.set({ pitch: pitchSt, pitchMode });
+  }, [pitchSt, pitchMode]);
+
+  useEffect(() => {
+    audioEffectsStore.set({ modular });
+  }, [modular]);
+
+  // Turning modular on / off (or flipping pitch correction while it is on) restarts
+  // the sound from where it is, so the change is heard right away.
+  useEffect(() => {
+    const anyMod = anyModular(modular);
+    if (isPlayingRef.current && (modChainRef.current || anyMod)) {
+      void startPlayback(getPosition(), anyMod);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modular.pitchOn, modular.volumeOn, modular.speedOn, pitchMode]);
+
+  // ---- Status pill: shows whenever speed / loop / volume / mute CHANGES, no
+  // matter where the change came from (keyboard, menu, scroll, slider). Each
+  // effect compares against the previous value, so the first render never
+  // shows the pill.
+  const prevSpeedRef = useRef(speed);
+  useEffect(() => {
+    if (prevSpeedRef.current === speed) return;
+    prevSpeedRef.current = speed;
+    pi.flashHud({ kind: 'speed', text: `${speed}x` });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [speed]);
+
+  const prevLoopRef = useRef(isLooping);
+  useEffect(() => {
+    if (prevLoopRef.current === isLooping) return;
+    prevLoopRef.current = isLooping;
+    pi.flashHud({ kind: isLooping ? 'loop-on' : 'loop-off', text: isLooping ? 'Loop on' : 'Loop off' });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLooping]);
+
+  const prevShownVolRef = useRef(isMuted ? 0 : volume);
+  useEffect(() => {
+    const shown = isMuted ? 0 : volume;
+    if (prevShownVolRef.current === shown) return;
+    prevShownVolRef.current = shown;
+    // The volume popover has its own slider, so no pill while it is open.
+    if (volumeOpenRef.current) return;
+    const pct = Math.round(shown * 100);
+    pi.flashHud({
+      kind: 'volume',
+      text: shown === 0 ? 'Muted' : `${pct}%`,
+      pct,
+      boosted: shown > 1
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [volume, isMuted]);
 
   const formatTime = (timeSec: number) => {
     const mins = Math.floor(timeSec / 60);
@@ -876,6 +1427,42 @@ export function AudioPlayer({
     };
   });
 
+  // Scroll wheel over the STAGE = volume in 5% steps, same as hovering the
+  // video in VideoPlayer. The control bar is a sibling of the stage, so its
+  // per-button wheel behaviour is untouched. Native non-passive listener so
+  // preventDefault works.
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return undefined;
+    let acc = 0; // touchpads send many tiny deltas; a mouse notch is ~100
+    const onWheel = (e: WheelEvent) => {
+      if ((e.target as HTMLElement | null)?.closest('[data-vp-controls]')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      acc += e.deltaY;
+      const steps = Math.trunc(Math.abs(acc) / WHEEL_STEP_DELTA);
+      if (steps === 0) return;
+      const dir = acc < 0 ? 1 : -1; // scroll up = louder
+      acc -= Math.sign(acc) * steps * WHEEL_STEP_DELTA;
+      keyboardActionsRef.current.adjustVolumeRelative(dir * steps * WHEEL_VOLUME_STEP);
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [hasStage]);
+
+  // Left click on the stage = play / pause. A press that travelled (a drag,
+  // like the preview's up / down gesture) is not a click.
+  const stageDownRef = useRef<{ x: number; y: number } | null>(null);
+  const handleStageMouseDown = (e: React.MouseEvent) => {
+    stageDownRef.current = { x: e.clientX, y: e.clientY };
+  };
+  const handleStageClick = (e: React.MouseEvent) => {
+    const d = stageDownRef.current;
+    stageDownRef.current = null;
+    if (d && Math.hypot(e.clientX - d.x, e.clientY - d.y) > CLICK_SLOP_PX) return;
+    keyboardActionsRef.current.togglePlay();
+  };
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -896,6 +1483,15 @@ export function AudioPlayer({
       }
 
       const key = e.key.toLowerCase();
+
+      // I (mini / compact) and F (fullscreen): close any open menu first.
+      if (
+        (key === 'i' || key === 'f') &&
+        !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey &&
+        menusOpenRef.current
+      ) {
+        closeMenusNow();
+      }
 
       if (e.code === 'Space') {
         e.preventDefault();
@@ -952,19 +1548,21 @@ export function AudioPlayer({
   const confirmResetEffects = () => {
     const defaults = audioEffectsStore.reset();
     setSpeed(defaults.speed);
-    setPitch(defaults.pitch);
+    setPitchMode('shift');
+    setPitchSt(0);
     setReverbWet(defaults.reverbWet);
     setSubBass(defaults.subBass);
     setBass(defaults.bass);
     setTreble(defaults.treble);
     setIsLooping(defaults.isLooping);
+    setModular({ ...defaults.modular });
     setVolume(defaults.volume);
+    setIsMuted(false);
     setConfirmResetOpen(false);
+    // The speed/loop/volume effects above each flash their own pill after the
+    // next render; this later call replaces them with a single "reset" pill.
+    window.setTimeout(() => pi.flashHud({ kind: 'reset', text: 'Settings reset' }), 60);
   };
-
-  useEffect(() => {
-    vizStore.set({ isPlaying });
-  }, [isPlaying]);
 
   // ── OS media panel integration ────────────────────────────────────────────
   const mediaActionsRef = useRef({ togglePlay, seekRelative, handleSeek });
@@ -1071,11 +1669,6 @@ export function AudioPlayer({
     setVolume(1);
   };
 
-  const eqBands = [
-    { label: 'Sub Bass', hint: '~60 Hz', value: subBass, set: setSubBass },
-    { label: 'Bass', hint: '~150 Hz', value: bass, set: setBass },
-    { label: 'Treble', hint: '~6 kHz', value: treble, set: setTreble }
-  ];
   const eqActive = subBass !== 0 || bass !== 0 || treble !== 0;
 
   const resetEq = () => {
@@ -1084,56 +1677,90 @@ export function AudioPlayer({
     setTreble(0);
   };
 
-  const speedColor = getSpeedColor(speed);
+  // Visualizer stage. It owns click, wheel and the ONE set of indicators.
+  // Fill layout: absolutely positioned, leaving room for the bar underneath
+  // (all of it while compact, so it grows as the bar collapses).
+  // Fixed layout: a normal block of `fixedStageH` px above the bar.
+  const stageStyle: React.CSSProperties = fillStage
+    ? {
+        position: 'absolute',
+        top: STAGE_INSET,
+        left: STAGE_INSET,
+        right: STAGE_INSET,
+        bottom: isCompact ? 0 : barH + (compactAware ? 0 : STAGE_BAR_GAP),
+        transition: `bottom ${VIDEO_COMPACT_BAR.durationMs}ms ${VIDEO_COMPACT_BAR.cssEasing}`,
+        cursor: 'pointer'
+      }
+    : {
+        position: 'relative',
+        height: fixedStageH,
+        marginBottom: 10,
+        cursor: 'pointer'
+      };
 
-  return (
-    <Box
-      ref={rootRef}
-      onMouseDown={handleMouseDown}
-      onAuxClick={handleAuxClick}
-      style={{ position: 'relative', width: '100%' }}
+  const stageNode = hasStage ? (
+    <div
+      ref={stageRef}
+      onMouseDown={handleStageMouseDown}
+      onClick={handleStageClick}
+      style={stageStyle}
     >
-      <PlayerGlassStyles />
-      {showHero && (
-        <Box
-          style={{
-            position: 'absolute',
-            left: 0,
-            right: 0,
-            bottom: 'calc(100% + 10px)',
-            height: heroHeight,
-            zIndex: 2,
-            pointerEvents: 'none'
-          }}
-        >
-          <AudioVisualizer bars={44} height="100%" store={vizStore} />
-        </Box>
-      )}
+      <VisualizerCanvas bars={44} analyser={analyser} isPlaying={isPlaying} />
+      <PlaybackIndicators api={pi} />
+    </div>
+  ) : null;
+
+  const barNode = (
+    <>
+      <style>{videoCompactBarCss()}</style>
+      <Box
+        p={compactAware ? 'xs' : 0}
+        data-vp-controls
+        data-compact={isCompact ? 'true' : 'false'}
+        data-shown={bar.shown ? 'true' : 'false'}
+        className={VIDEO_COMPACT_BAR.boxClassName}
+        onMouseEnter={bar.onMouseEnter}
+        onMouseLeave={bar.onMouseLeave}
+      >
       <Card
         withBorder={false}
         radius="lg"
         p="xs"
-        className={PLAYER_GLASS_CLASS}
+        className={`${PLAYER_GLASS_CLASS} ${VIDEO_COMPACT_BAR.barClassName}`}
+        data-compact={isCompact ? 'true' : 'false'}
         style={{ width: '100%' }}
       >
-        <Group wrap="nowrap" gap="md" align="center">
+        <Group wrap="nowrap" gap={0} align="center">
+          {/* Start slot (compact mode only) */}
+          <div className={VIDEO_COMPACT_BAR.revealClassName} style={{ marginRight: 8 }}>
+            {compactStartSlot}
+          </div>
           {/* Cover art — only rendered when the file actually has embedded artwork */}
           {coverReady && (
-            <Box
-              style={{
-                width: 42,
-                height: 42,
-                borderRadius: 8,
-                overflow: 'hidden',
-                flexShrink: 0,
-                border: '1px solid var(--mantine-color-dark-4)'
-              }}
+            <div
+              className={VIDEO_COMPACT_BAR.collapseClassName}
+              style={{ flexShrink: 0, ...collapseVars('42px', '16px') }}
             >
-              <Image src={resolvedCoverUrl} w={42} h={42} fit="cover" alt={filename} />
-            </Box>
+              <Box
+                style={{
+                  width: 42,
+                  height: 42,
+                  borderRadius: 8,
+                  overflow: 'hidden',
+                  flexShrink: 0,
+                  border: '1px solid var(--mantine-color-dark-4)'
+                }}
+              >
+                <Image src={resolvedCoverUrl} w={42} h={42} fit="cover" alt={filename} />
+              </Box>
+            </div>
           )}
 
           {/* Play Button */}
+          <div
+            className={VIDEO_COMPACT_BAR.collapseClassName}
+            style={{ flexShrink: 0, ...collapseVars('56px', '16px') }}
+          >
           <ActionIcon
             variant="filled"
             color="indigo"
@@ -1155,9 +1782,13 @@ export function AudioPlayer({
               <IconPlayerPlay size={20} style={{ marginLeft: 2 }} />
             )}
           </ActionIcon>
+          </div>
 
           {/* File Name & Time Counter */}
-          <Box style={{ flexShrink: 1, flexGrow: 0, minWidth: 0, maxWidth: 180, overflow: 'hidden' }}>
+          <Box
+            className={VIDEO_COMPACT_BAR.collapseClassName}
+            style={{ flexShrink: 1, flexGrow: 0, minWidth: 0, overflow: 'hidden', ...collapseVars('180px', '16px') }}
+          >
             <Text size="xs" fw={700} truncate>
               {filename}
             </Text>
@@ -1169,6 +1800,7 @@ export function AudioPlayer({
           {/* Center: Waveform + Interactive Seekbar */}
           <Box
             ref={seekbarRef}
+            className="gam-vp-seek"
             onMouseDown={resetSeekbarTimer}
             style={{
               flex: '1 1 140px',
@@ -1180,7 +1812,15 @@ export function AudioPlayer({
             }}
           >
             {waveformPeaks.length > 0 && (
-              <Box style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+              <Box
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  pointerEvents: 'none',
+                  opacity: isCompact ? 0 : 1,
+                  transition: 'opacity 300ms ease'
+                }}
+              >
                 <WaveformBars peaks={waveformPeaks} progress={duration ? currentTime / duration : 0} />
               </Box>
             )}
@@ -1190,7 +1830,15 @@ export function AudioPlayer({
               max={duration || 100}
               step={0.1}
               value={currentTime}
-              onChange={handleSeek}
+              onChange={(val) => {
+                scrubbingRef.current = true;
+                handleSeek(val);
+                // Show where the click / drag landed (e.g. 1:32) in the status pill.
+                pi.flashHud({ kind: 'seek', text: formatTime(val) });
+              }}
+              onChangeEnd={() => {
+                scrubbingRef.current = false;
+              }}
               label={formatTime}
               color="indigo"
               style={{ width: '100%', zIndex: 1 }}
@@ -1202,6 +1850,10 @@ export function AudioPlayer({
           </Box>
 
           {/* Controls */}
+          <div
+            className={VIDEO_COMPACT_BAR.collapseClassName}
+            style={{ flexShrink: 0, ...collapseVars('340px', '0px', '16px') }}
+          >
           <Group gap="xs" wrap="nowrap" style={{ flexShrink: 0 }}>
             {/* Repeat / Loop Toggle — hover + scroll: up turns it on, down turns it off */}
             <Tooltip label={isLooping ? 'Loop: On (scroll to toggle)' : 'Loop: Off (scroll to toggle)'} withinPortal>
@@ -1217,185 +1869,65 @@ export function AudioPlayer({
               </ActionIcon>
             </Tooltip>
 
-            {/* Speed Selection — hover + scroll steps through the presets */}
-            <Menu shadow="md" width={100} position="top">
-              <Menu.Target>
-                <Tooltip label={`Speed: ${speed}x (J/K/L, or scroll)`} withinPortal>
-                  <ActionIcon
-                    variant={speed !== 1 ? 'filled' : 'subtle'}
-                    color={speedColor ?? 'gray'}
-                    size="md"
-                    onWheel={onWheelAdjust((dir) => changeSpeedStep(dir === 1 ? 'up' : 'down'))}
-                  >
-                    <IconGauge size={16} />
-                  </ActionIcon>
-                </Tooltip>
-              </Menu.Target>
-              <Menu.Dropdown>
-                {SPEED_PRESETS.map((s) => {
-                  const isSelected = speed === s;
-                  const itemColor = getSpeedColor(s);
-                  return (
-                    <Menu.Item
-                      key={s}
-                      onClick={() => setSpeed(s)}
-                      disabled={isSelected}
-                      style={{
-                        opacity: isSelected ? 0.45 : 1,
-                        backgroundColor: isSelected ? 'rgba(255, 255, 255, 0.08)' : undefined,
-                        cursor: isSelected ? 'default' : 'pointer'
-                      }}
-                    >
-                      <Text size="xs" fw={isSelected ? 700 : 500} c={itemColor}>
-                        {s}x
-                      </Text>
-                    </Menu.Item>
-                  );
-                })}
-              </Menu.Dropdown>
-            </Menu>
-
-            {/* EQ Popover */}
-            <Popover
-              width={240}
-              position="top"
-              shadow="md"
-              withArrow={false}
-              opened={eqOpen}
-              onChange={setEqOpen}
+            {/* One menu: Speed, Pitch, Equalizer, Reverb (shared with VideoPlayer) */}
+            <PlayerSettingsMenu
+              speed={speed}
+              onSpeed={setSpeed}
+              modular={modular}
+              onModular={setModular}
+              extraActive={eqActive || reverbWet > 0 || pitchSt !== 0}
+              opened={fxOpen}
+              onOpenedChange={(open) => {
+                clearAutoCloseTimer();
+                if (open) setVolumeOpen(false);
+                setFxOpen(open);
+              }}
+              watchRef={rootRef}
+              buttonRef={fxButtonRef}
               closeOnClickOutside={false}
-              classNames={{ dropdown: PLAYER_GLASS_POPOVER_CLASS }}
-            >
-              <Popover.Target>
-                <Tooltip label="Equalizer" withinPortal>
-                  <ActionIcon
-                    ref={eqButtonRef}
-                    variant={eqActive ? 'filled' : 'subtle'}
-                    color={eqActive ? 'teal' : 'gray'}
-                    size="md"
-                    aria-label="Equalizer"
-                    onClick={toggleEq}
+              instantClose={instantClose}
+              onWheelSpeed={(dir) => changeSpeedStep(dir === 1 ? 'up' : 'down')}
+              extraSections={(acc) => (
+                <>
+                  <Divider my={4} />
+                  <EffectSection
+                    title="Audio Effects"
+                    open={acc.isOpen('audio')}
+                    onToggle={() => acc.toggle('audio')}
+                    active={eqActive || reverbWet > 0 || pitchSt !== 0}
+                    onReset={() => {
+                      setPitchSt(0);
+                      setReverbWet(0);
+                      resetEq();
+                    }}
                   >
-                    <IconAdjustmentsHorizontal size={16} />
-                  </ActionIcon>
-                </Tooltip>
-              </Popover.Target>
-              <Popover.Dropdown>
-                <Stack gap="sm">
-                  <Group justify="space-between">
-                    <Text size="xs" fw={600}>
-                      Equalizer
-                    </Text>
-                    <UnstyledButton onClick={resetEq} disabled={!eqActive}>
-                      <Text size="xs" c={eqActive ? 'teal' : 'dimmed'}>
-                        Reset
-                      </Text>
-                    </UnstyledButton>
-                  </Group>
-                  {/* Each band reacts to the wheel only while hovered, so the
-                      three sliders can be adjusted independently. */}
-                  {eqBands.map((band) => (
-                    <div
-                      key={band.label}
-                      onWheel={onWheelAdjust((dir) =>
-                        band.set(Math.max(-EQ_MAX_DB, Math.min(EQ_MAX_DB, band.value + dir)))
-                      )}
-                    >
-                      <Group justify="space-between" mb={2}>
-                        <Text size="xs" c="dimmed">
-                          {band.label} ({band.hint})
-                        </Text>
-                        <Text size="xs" c={band.value !== 0 ? 'teal' : 'dimmed'} style={{ fontFamily: 'monospace' }}>
-                          {formatDb(band.value)}
-                        </Text>
-                      </Group>
-                      <Slider
-                        size="xs"
-                        min={-EQ_MAX_DB}
-                        max={EQ_MAX_DB}
+                    <Dim off={modular.pitchOn}>
+                      <FxSlider
+                        label="Pitch"
+                        display={`${pitchSt > 0 ? '+' : ''}${pitchSt} st`}
+                        value={pitchSt}
+                        min={PITCH_MIN_ST}
+                        max={PITCH_MAX_ST}
                         step={1}
-                        value={band.value}
-                        onChange={band.set}
-                        label={formatDb}
+                        color="violet"
+                        onChange={setPitchSt}
                         marks={[{ value: 0 }]}
-                        color="teal"
-                        styles={{ thumb: sliderThumbStyle }}
                       />
-                    </div>
-                  ))}
-                </Stack>
-              </Popover.Dropdown>
-            </Popover>
-
-            {/* Audio Effects Popover (Pitch & Reverb) */}
-            <Popover
-              width={220}
-              position="top"
-              shadow="md"
-              withArrow={false}
-              opened={effectsOpen}
-              onChange={setEffectsOpen}
-              closeOnClickOutside={false}
-              classNames={{ dropdown: PLAYER_GLASS_POPOVER_CLASS }}
-            >
-              <Popover.Target>
-                <Tooltip label="Audio Effects" withinPortal>
-                  <ActionIcon
-                    ref={effectsButtonRef}
-                    variant={pitch !== 0 || reverbWet > 0 ? 'filled' : 'subtle'}
-                    color={pitch !== 0 || reverbWet > 0 ? 'violet' : 'gray'}
-                    size="md"
-                    onClick={toggleEffects}
-                  >
-                    <IconWand size={16} />
-                  </ActionIcon>
-                </Tooltip>
-              </Popover.Target>
-              <Popover.Dropdown>
-                <Stack gap="xs">
-                  <Text size="xs" fw={600}>
-                    Audio Effects
-                  </Text>
-                  {/* Pitch and Reverb each only respond to the wheel while
-                      hovered, so scrolling one never touches the other. */}
-                  <div onWheel={onWheelAdjust((dir) => setPitch((p) => Math.max(-12, Math.min(12, p + dir))))}>
-                    <Text size="xs" c="dimmed">
-                      Pitch ({pitch > 0 ? `+${pitch}` : pitch} st)
-                    </Text>
-                    <Slider
-                      size="xs"
-                      min={-12}
-                      max={12}
-                      step={1}
-                      value={pitch}
-                      onChange={(val) => setPitch(val)}
-                      color="violet"
-                      styles={{ thumb: sliderThumbStyle }}
+                    </Dim>
+                    <Divider />
+                    <ReverbControls wet={reverbWet} onWet={setReverbWet} />
+                    <Divider />
+                    <EqControls
+                      values={{ subBass, bass, treble }}
+                      onChange={(v) => {
+                        setSubBass(v.subBass);
+                        setBass(v.bass);
+                        setTreble(v.treble);
+                      }}
                     />
-                  </div>
-                  <div
-                    onWheel={onWheelAdjust((dir) =>
-                      setReverbWet((v) => Math.round(Math.max(0, Math.min(1, v + dir * 0.05)) * 100) / 100)
-                    )}
-                  >
-                    <Text size="xs" c="dimmed">
-                      Reverb ({Math.round(reverbWet * 100)}%)
-                    </Text>
-                    <Slider
-                      size="xs"
-                      min={0}
-                      max={1}
-                      step={0.05}
-                      value={reverbWet}
-                      onChange={(val) => setReverbWet(val)}
-                      label={(val) => `${Math.round(val * 100)}%`}
-                      color="violet"
-                      styles={{ thumb: sliderThumbStyle }}
-                    />
-                  </div>
-                </Stack>
-              </Popover.Dropdown>
-            </Popover>
+                  </EffectSection>                </>
+              )}
+            />
 
             {/* Volume Control Popover — hover the icon (or the open panel) and scroll */}
             <Popover
@@ -1406,6 +1938,7 @@ export function AudioPlayer({
               opened={volumeOpen}
               onChange={setVolumeOpen}
               closeOnClickOutside={false}
+              transitionProps={instantClose ? { duration: 0, exitDuration: 0 } : undefined}
               classNames={{ dropdown: PLAYER_GLASS_POPOVER_CLASS }}
             >
               <Popover.Target>
@@ -1432,11 +1965,9 @@ export function AudioPlayer({
                 style={{ padding: '8px 12px' }}
                 onWheel={onWheelAdjust((dir) => adjustVolumeRelative(dir * 5))}
               >
+                <Dim off={modular.volumeOn}>
                 <Group gap="xs" wrap="nowrap">
-                  <ActionIcon
-                    variant="subtle"
-                    size="sm"
-                    onClick={toggleMute}
+                  <ActionIcon variant="subtle" size="sm" onClick={toggleMute}
                     aria-label={isMuted ? 'Unmute' : 'Mute'}
                     style={{
                       color: isMuted || volume === 0 ? '#fd6b6b' : undefined,
@@ -1464,6 +1995,7 @@ export function AudioPlayer({
                     <Text size="xs" c="dimmed">Reset</Text>
                   </UnstyledButton>
                 </Group>
+                </Dim>
               </Popover.Dropdown>
             </Popover>
             {onMini && (
@@ -1494,19 +2026,61 @@ export function AudioPlayer({
             )}
             
           </Group>
+          </div>
+
+          {/* End slot (compact mode only) */}
+          <div className={VIDEO_COMPACT_BAR.revealClassName} style={{ marginLeft: 8 }}>
+            {compactEndSlot}
+          </div>
         </Group>
       </Card>
+      </Box>
+    </>
+  );
+
+  return (
+    <Box
+      ref={rootRef}
+      onMouseDown={handleMouseDown}
+      onAuxClick={handleAuxClick}
+      style={
+        fillStage
+          ? { position: 'relative', width: '100%', height: '100%', minHeight: 0, overflow: 'hidden' }
+          : { position: 'relative', width: '100%' }
+      }
+    >
+      <PlayerGlassStyles />
+      {stageNode}
+      {fillStage ? (
+        // Bar floats over the bottom of the stage, centered, max 640 px wide.
+        <div
+          ref={barWrapRef}
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            bottom: 0,
+            zIndex: 3,
+            display: 'flex',
+            justifyContent: 'center'
+          }}
+        >
+          <Box style={{ width: '100%', maxWidth: BAR_MAX_WIDTH }}>{barNode}</Box>
+        </div>
+      ) : (
+        barNode
+      )}
 
       {/* Reset Confirmation Modal */}
-<Modal
-  opened={confirmResetOpen}
-  onClose={() => setConfirmResetOpen(false)}
-  title="Reset Audio Effects"
-  centered
-  size="sm"
-  classNames={{ content: PLAYER_GLASS_POPOVER_CLASS }}
-  overlayProps={{ backgroundOpacity: 0.35, blur: 3 }}
->
+      <Modal
+        opened={confirmResetOpen}
+        onClose={() => setConfirmResetOpen(false)}
+        title="Reset Audio Effects"
+        centered
+        size="sm"
+        classNames={{ content: PLAYER_GLASS_POPOVER_CLASS }}
+        overlayProps={{ backgroundOpacity: 0.35, blur: 3 }}
+      >
         <Stack gap="md">
           <Text size="sm">
             Are you sure you want to reset all audio effects (speed, pitch, EQ, reverb, loop,

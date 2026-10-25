@@ -1,0 +1,151 @@
+import { useId } from 'react';
+
+/**
+ * Glass folders. The color follows the theme (--wh3d-folder-accent, falling back
+ * to the theme's indigo accent), tinted red on the left and blue on the right,
+ * the same tint idea as the glass effect. Change RED / BLUE / MIX to taste.
+ */
+const ACCENT = 'var(--wh3d-folder-accent, var(--mantine-color-indigo-4))';
+const RED = '#ff2d55';
+const BLUE = '#3b5bdb';
+/** How much of the theme color is kept (the rest is the red / blue tint). */
+const MIX = 62;
+
+const LEFT = `color-mix(in srgb, ${ACCENT} ${MIX}%, ${RED})`;
+const RIGHT = `color-mix(in srgb, ${ACCENT} ${MIX}%, ${BLUE})`;
+const LEFT_DARK = `color-mix(in srgb, ${LEFT} 58%, black)`;
+const RIGHT_DARK = `color-mix(in srgb, ${RIGHT} 58%, black)`;
+const GLOW = `color-mix(in srgb, ${ACCENT} 45%, transparent)`;
+
+function useUid() {
+  return useId().replace(/[^a-zA-Z0-9]/g, '');
+}
+
+/** Large folder used on the tiles in the grid. */
+export function GlassFolderBig() {
+  const id = useUid();
+  const tint = `url(#${id}t)`;
+  const tintDark = `url(#${id}d)`;
+  const sheen = `url(#${id}s)`;
+  const edge = `url(#${id}e)`;
+  return (
+    <svg
+      viewBox="0 0 200 160"
+      style={{
+        width: '100%',
+        height: 'auto',
+        display: 'block',
+        filter: `drop-shadow(0 6px 7px rgba(0, 0, 0, 0.45)) drop-shadow(0 0 9px ${GLOW})`
+      }}
+    >
+      <defs>
+        <linearGradient id={`${id}t`} x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0" style={{ stopColor: LEFT }} />
+          <stop offset="1" style={{ stopColor: RIGHT }} />
+        </linearGradient>
+        <linearGradient id={`${id}d`} x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0" style={{ stopColor: LEFT_DARK }} />
+          <stop offset="1" style={{ stopColor: RIGHT_DARK }} />
+        </linearGradient>
+        <linearGradient id={`${id}s`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#ffffff" stopOpacity="0.55" />
+          <stop offset="0.45" stopColor="#ffffff" stopOpacity="0.12" />
+          <stop offset="1" stopColor="#ffffff" stopOpacity="0.03" />
+        </linearGradient>
+        <linearGradient id={`${id}e`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#ffffff" stopOpacity="0.9" />
+          <stop offset="1" stopColor="#ffffff" stopOpacity="0.2" />
+        </linearGradient>
+      </defs>
+
+      {/* back panel with the tab (seen through the front glass) */}
+      <path
+        d="M12 22 Q12 10 24 10 H76 Q84 10 90 17 L96 24 H176 Q188 24 188 36 V136 Q188 146 176 146 H24 Q12 146 12 136 Z"
+        fill={tintDark}
+        fillOpacity="0.92"
+        stroke="rgba(255, 255, 255, 0.35)"
+        strokeWidth="1"
+      />
+
+      {/* front glass panel */}
+      <path
+        d="M8 52 Q8 40 20 40 H180 Q192 40 192 52 V138 Q192 150 180 150 H20 Q8 150 8 138 Z"
+        fill={tint}
+        fillOpacity="0.6"
+      />
+      <path
+        d="M8 52 Q8 40 20 40 H180 Q192 40 192 52 V138 Q192 150 180 150 H20 Q8 150 8 138 Z"
+        fill={sheen}
+      />
+      {/* diagonal shine */}
+      <path
+        d="M8 52 Q8 40 20 40 H118 L66 150 H20 Q8 150 8 138 Z"
+        fill="#ffffff"
+        fillOpacity="0.1"
+      />
+      {/* glass edge light */}
+      <path
+        d="M8 52 Q8 40 20 40 H180 Q192 40 192 52 V138 Q192 150 180 150 H20 Q8 150 8 138 Z"
+        fill="none"
+        stroke={edge}
+        strokeWidth="2"
+      />
+      <path d="M22 44 H178" stroke="rgba(255, 255, 255, 0.7)" strokeWidth="1.2" fill="none" />
+      <path d="M22 146 H178" stroke="rgba(255, 255, 255, 0.22)" strokeWidth="1.2" fill="none" />
+
+      {/* etched game-controller emblem */}
+      <g fill="rgba(255, 255, 255, 0.22)" stroke="rgba(255, 255, 255, 0.55)" strokeWidth="1">
+        <rect x="68" y="86" width="64" height="36" rx="3" />
+        <rect x="108" y="76" width="4" height="10" />
+        <rect x="108" y="72" width="12" height="4" />
+        <rect x="116" y="64" width="4" height="8" />
+      </g>
+      <g fill="rgba(255, 255, 255, 0.8)">
+        <rect x="77" y="102" width="18" height="4" />
+        <rect x="84" y="95" width="4" height="18" />
+        <rect x="106" y="102" width="5" height="5" />
+        <rect x="117" y="102" width="5" height="5" />
+      </g>
+    </svg>
+  );
+}
+
+/** Small folder used in the left tree and the list-view folder strip. */
+export function GlassFolderMini({ open = false }: { open?: boolean }) {
+  const id = useUid();
+  return (
+    <svg width="20" height="16" viewBox="0 0 20 16" style={{ flexShrink: 0, overflow: 'visible' }}>
+      <defs>
+        <linearGradient id={`${id}t`} x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0" style={{ stopColor: LEFT }} />
+          <stop offset="1" style={{ stopColor: RIGHT }} />
+        </linearGradient>
+        <linearGradient id={`${id}d`} x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0" style={{ stopColor: LEFT_DARK }} />
+          <stop offset="1" style={{ stopColor: RIGHT_DARK }} />
+        </linearGradient>
+        <linearGradient id={`${id}s`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#ffffff" stopOpacity="0.6" />
+          <stop offset="1" stopColor="#ffffff" stopOpacity="0.05" />
+        </linearGradient>
+      </defs>
+      <path
+        d="M1 3 Q1 1.5 2.5 1.5 H7 Q8 1.5 8.6 2.3 L9.4 3.3 H17.5 Q19 3.3 19 4.8 V13 Q19 14.5 17.5 14.5 H2.5 Q1 14.5 1 13 Z"
+        fill={`url(#${id}d)`}
+        stroke="rgba(255, 255, 255, 0.3)"
+        strokeWidth="0.6"
+      />
+      <path
+        d="M1.5 6.2 Q1.5 5 2.7 5 H17.3 Q18.5 5 18.5 6.2 V13 Q18.5 14.5 17 14.5 H3 Q1.5 14.5 1.5 13 Z"
+        fill={`url(#${id}t)`}
+        fillOpacity={open ? 0.85 : 0.62}
+      />
+      <path
+        d="M1.5 6.2 Q1.5 5 2.7 5 H17.3 Q18.5 5 18.5 6.2 V13 Q18.5 14.5 17 14.5 H3 Q1.5 14.5 1.5 13 Z"
+        fill={`url(#${id}s)`}
+        stroke="rgba(255, 255, 255, 0.55)"
+        strokeWidth="0.7"
+      />
+    </svg>
+  );
+}

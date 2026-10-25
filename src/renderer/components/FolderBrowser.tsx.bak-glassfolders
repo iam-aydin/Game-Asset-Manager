@@ -1,0 +1,209 @@
+import { useMemo, useState } from 'react';
+import { ActionIcon, Badge, Group, Menu, Text, Tooltip } from '@mantine/core';
+import {
+  IconArrowUp,
+  IconEdit,
+  IconFolder,
+  IconFolderOpen,
+  IconRefresh,
+  IconStar,
+  IconStarFilled
+} from '@tabler/icons-react';
+import type { FolderTreeNode } from '@shared/types';
+
+interface Props {
+  /** The folder currently being browsed (its children are shown as tiles). */
+  node: FolderTreeNode | null;
+  canGoUp: boolean;
+  onUp: () => void;
+  onOpen: (path: string) => void;
+  isFavorite: (path: string) => boolean;
+  onToggleFavorite: (path: string) => void;
+  onRename: (path: string) => void;
+  onReveal: (path: string) => void;
+  onRescan: (path: string) => void;
+}
+
+const TILE_WIDTH = 210;
+const MAX_HEIGHT = 150;
+
+/**
+ * Subfolders of the current folder, shown as clickable tiles above the files.
+ * Replaces the left-sidebar folder tree.
+ */
+export function FolderBrowser({
+  node,
+  canGoUp,
+  onUp,
+  onOpen,
+  isFavorite,
+  onToggleFavorite,
+  onRename,
+  onReveal,
+  onRescan
+}: Props) {
+  const [menu, setMenu] = useState({ opened: false, x: 0, y: 0, path: '', name: '' });
+  const closeMenu = () => setMenu((m) => ({ ...m, opened: false }));
+
+  const folders = useMemo(
+    () =>
+      [...(node?.children ?? [])].sort((a, b) =>
+        a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+      ),
+    [node]
+  );
+
+  if (folders.length === 0 && !canGoUp) return null;
+
+  return (
+    <div
+      style={{
+        flexShrink: 0,
+        borderBottom: '1px solid var(--mantine-color-dark-4)',
+        background: 'var(--mantine-color-dark-7)'
+      }}
+    >
+      <Group h={32} px={12} gap={8} wrap="nowrap">
+        <Tooltip label="Up one folder">
+          <ActionIcon
+            size="sm"
+            variant="default"
+            onClick={onUp}
+            disabled={!canGoUp}
+            aria-label="Up one folder"
+          >
+            <IconArrowUp size={14} />
+          </ActionIcon>
+        </Tooltip>
+        <Text size="xs" c="dimmed">
+          {folders.length} {folders.length === 1 ? 'folder' : 'folders'}
+        </Text>
+      </Group>
+
+      {folders.length > 0 && (
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: 8,
+            padding: '0 12px 10px',
+            maxHeight: MAX_HEIGHT,
+            overflowY: 'auto'
+          }}
+        >
+          {folders.map((f) => {
+            const fav = isFavorite(f.path);
+            return (
+              <div
+                key={f.path}
+                role="button"
+                tabIndex={0}
+                title={f.path}
+                onClick={() => onOpen(f.path)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') onOpen(f.path);
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setMenu({ opened: true, x: e.clientX, y: e.clientY, path: f.path, name: f.name });
+                }}
+                style={{
+                  width: TILE_WIDTH,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '8px 8px',
+                  borderRadius: 6,
+                  cursor: 'pointer',
+                  boxSizing: 'border-box',
+                  background: 'var(--mantine-color-dark-6)',
+                  border: '1px solid var(--mantine-color-dark-4)'
+                }}
+              >
+                <IconFolder size={22} color="var(--mantine-color-yellow-5)" style={{ flexShrink: 0 }} />
+                <Text size="sm" truncate style={{ flex: 1, minWidth: 0 }}>
+                  {f.name}
+                </Text>
+                <Badge size="xs" variant="light" color="gray" style={{ flexShrink: 0 }}>
+                  {f.recursiveFileCount}
+                </Badge>
+                <ActionIcon
+                  size="xs"
+                  variant="transparent"
+                  color={fav ? 'yellow' : 'gray'}
+                  aria-label={fav ? 'Remove from favorites' : 'Add to favorites'}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onToggleFavorite(f.path);
+                  }}
+                >
+                  {fav ? <IconStarFilled size={14} /> : <IconStar size={14} />}
+                </ActionIcon>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <Menu
+        opened={menu.opened}
+        onChange={(open) => {
+          if (!open) closeMenu();
+        }}
+        position="bottom-start"
+        floatingStrategy="fixed"
+        offset={0}
+        withinPortal
+        shadow="md"
+        width={200}
+      >
+        <Menu.Target>
+          <div
+            style={{
+              position: 'fixed',
+              top: menu.y,
+              left: menu.x,
+              width: 1,
+              height: 1,
+              pointerEvents: 'none'
+            }}
+          />
+        </Menu.Target>
+        <Menu.Dropdown>
+          <Menu.Label>{menu.name || 'Folder'}</Menu.Label>
+          <Menu.Item
+            leftSection={<IconEdit size={14} />}
+            onClick={() => {
+              const p = menu.path;
+              closeMenu();
+              onRename(p);
+            }}
+          >
+            Rename...
+          </Menu.Item>
+          <Menu.Item
+            leftSection={<IconFolderOpen size={14} />}
+            onClick={() => {
+              const p = menu.path;
+              closeMenu();
+              onReveal(p);
+            }}
+          >
+            Show in folder
+          </Menu.Item>
+          <Menu.Divider />
+          <Menu.Item
+            leftSection={<IconRefresh size={14} />}
+            onClick={() => {
+              const p = menu.path;
+              closeMenu();
+              onRescan(p);
+            }}
+          >
+            Rescan folder
+          </Menu.Item>
+        </Menu.Dropdown>
+      </Menu>
+    </div>
+  );
+}

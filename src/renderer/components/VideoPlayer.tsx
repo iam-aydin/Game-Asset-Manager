@@ -1,21 +1,17 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import {
   ActionIcon,
   Alert,
-  Badge,
   Box,
   Button,
   Card,
   Center,
-  Collapse,
   Divider,
   Group,
   Loader,
-  Menu,
   Modal,
   Popover,
-  ScrollArea,
-  SegmentedControl,
   Slider,
   Stack,
   Switch,
@@ -27,17 +23,51 @@ import {
   IconAlertTriangle,
   IconArrowsMaximize,
   IconArrowsMinimize,
-  IconChevronRight,
-  IconGauge,
   IconPlayerPause,
   IconPlayerPlay,
-  IconRepeat,
-  IconVolume,
-  IconVolume2,
-  IconVolumeOff,
-  IconWand
+  IconRepeat
 } from '@tabler/icons-react';
 import { PlayerGlassStyles, PLAYER_GLASS_CLASS, PLAYER_GLASS_POPOVER_CLASS } from './PlayerGlass';
+import { useVerticalDragGesture } from '../util/gestures';
+import { VIDEO_COMPACT_BAR, videoCompactBarCss } from '@shared/transition';
+import {
+  BOOST_COLOR,
+  PlaybackIndicators,
+  VolumeIcon,
+  usePlaybackIndicators
+} from './PlaybackIndicators';
+import {
+  EffectSection,
+  FxSlider,
+  GlassScroll,
+  Dim,
+  EqControls,
+  GlassSegmented,
+  PlayerSettingsMenu,
+  ReverbControls
+} from './PlayerMenu';
+import {
+  EQ_HEADROOM,
+  PITCH_MAX_ST,
+  PITCH_MIN_ST,
+  SPEED_PRESETS,
+  buildReverbImpulse,
+  createPitchCorrector,
+  fxPresetsStore,
+  useMenuMaxHeight,
+  useReverbParams,
+  sliderThumbStyle,
+  type PitchCorrector,
+  type PitchMode,
+  type ModularSettings,
+  DEFAULT_MODULAR,
+  anyModular,
+  normalizeModular,
+  rollModular
+} from './playerShared';
+
+/** The preview's display modes. PreviewPane owns the real state. */
+export type PreviewMode = 'normal' | 'expand' | 'fullscreen' | 'mini';
 
 interface VideoPlayerProps {
   libraryId: string;
@@ -55,164 +85,45 @@ interface VideoPlayerProps {
   onFullscreen?: () => void;
   /** Mini player (I key). Passed by PreviewPane. */
   onMini?: () => void;
+  /** Switch the preview to a specific mode (PreviewPane implements this).
+   *  'normal' means "leave mini / go back to wherever it was". Used by the
+   *  double-click, the F / T keys and the drag up / down gesture. */
+  onSetMode?: (mode: PreviewMode) => void;
   isMini?: boolean;
+  /** Compact mode = the mini player's "hide title bar" state. The control bar
+   *  collapses to just the seek slider (no glass box), floats over the video and
+   *  auto-hides after 2 s without mouse movement. PreviewPane should also hide
+   *  its own header while this is true. */
+  compact?: boolean;
+  /** Shown at the left / right end of the compact bar (PreviewPane passes its
+   *  pin button and its hide-title-bar (eye) button). Only rendered in compact mode. */
+  compactStartSlot?: React.ReactNode;
+  compactEndSlot?: React.ReactNode;
 }
-
-const SPEED_PRESETS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 3, 4];
-
-const EQ_MAX_DB = 12;
-const EQ_HEADROOM = 0.25;
 
 // Same volume range/snap as AudioPlayer. Above 100% goes through a Web Audio gain node.
 const VOLUME_MAX_PCT = 200;
 const VOLUME_SNAP_LOW = 94;
 const VOLUME_SNAP_HIGH = 125;
 
-// Orange used for "volume boosted above 100%".
-const BOOST_COLOR = '#ff922b';
+// Background tint for "volume boosted above 100%" (the orange itself is BOOST_COLOR).
 const BOOST_BG = 'rgba(255, 146, 43, 0.18)';
 
-const sliderThumbStyle = {
-  backgroundColor: 'var(--wh3d-slider-thumb-bg, #4c6ef5)',
-  border: '2px solid var(--wh3d-slider-thumb-border, #000000)'
-};
+// Drag distance for the up / down gesture: see ../util/gestures (default 70px).
 
-// ---- Menu sizing: menus flex to the room above the control bar --------------
-// When the app window (or the floating preview window) is small, a menu taller
-// than the space above the control bar would be clipped at the top of the
-// window. Each menu measures that space and caps its height; the content then
-// scrolls inside a glass scrollbar (GlassScroll). Any menu added later can use
-// the same two pieces: useMenuMaxHeight() + <GlassScroll>.
+// Two clicks on the picture count as a double-click (-> fullscreen, like the F key) only when
+// they are this close together in time and place.
+const DOUBLE_CLICK_MS = 300;
+const DOUBLE_CLICK_SLOP_PX = 8;
 
-const MENU_OFFSET = 8; // Mantine popover default offset from its target
-const MENU_EDGE_MARGIN = 10; // breathing room kept at the top of the window
-const MENU_MIN_H = 64;
-
-function useMenuMaxHeight(
-  open: boolean,
-  anchorRef: React.RefObject<HTMLElement | null>,
-  watchRef: React.RefObject<HTMLElement | null>
-): number {
-  const [maxH, setMaxH] = useState(480);
-  useLayoutEffect(() => {
-    if (!open) return;
-    const measure = () => {
-      const el = anchorRef.current;
-      if (!el) return;
-      const top = el.getBoundingClientRect().top;
-      setMaxH(Math.max(MENU_MIN_H, Math.floor(top - MENU_OFFSET - MENU_EDGE_MARGIN)));
-    };
-    measure();
-    window.addEventListener('resize', measure);
-    // Also re-measure when the player itself changes size (floating window resize).
-    const ro = new ResizeObserver(measure);
-    if (watchRef.current) ro.observe(watchRef.current);
-    return () => {
-      window.removeEventListener('resize', measure);
-      ro.disconnect();
-    };
-  }, [open, anchorRef, watchRef]);
-  return maxH;
-}
-
-// Thin translucent track + glowing indigo/violet glass thumb.
-const glassScrollStyles = {
-  scrollbar: {
-    background: 'rgba(128, 128, 128, 0.14)',
-    border: '1px solid rgba(255, 255, 255, 0.08)',
-    borderRadius: 999,
-    zIndex: 5
-  },
-  thumb: {
-    background: 'linear-gradient(180deg, rgba(120, 150, 255, 0.75), rgba(150, 110, 250, 0.6))',
-    border: '1px solid rgba(255, 255, 255, 0.28)',
-    borderRadius: 999,
-    boxShadow: '0 0 8px rgba(76, 110, 245, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.35)'
-  }
-} as const;
-
-/** Scrolls its content only when taller than `maxHeight`. The scrollbar sits in
- *  the menu's own padding (`bleed` px), so nothing shifts when it appears. */
-function GlassScroll({
-  maxHeight,
-  bleed = 7,
-  children
-}: {
-  maxHeight: number;
-  bleed?: number;
-  children: React.ReactNode;
-}) {
-  return (
-    <ScrollArea.Autosize
-      mah={Math.max(48, Math.floor(maxHeight))}
-      type="auto"
-      scrollbarSize={5}
-      scrollHideDelay={600}
-      styles={glassScrollStyles}
-      style={{ marginRight: -bleed }}
-    >
-      <div style={{ paddingRight: bleed }}>{children}</div>
-    </ScrollArea.Autosize>
-  );
-}
-
-// ---- Glass segmented control (Fit / Stretch / Actual / Custom, Rotate) -------
-// Translucent track + a glowing glass "pill" for the active option, so it
-// matches the player's glass look in both dark and light themes.
-
-const glassSegmentedStyles = {
-  root: {
-    background: 'rgba(128, 128, 128, 0.14)',
-    border: '1px solid rgba(255, 255, 255, 0.10)',
-    backdropFilter: 'blur(10px)',
-    WebkitBackdropFilter: 'blur(10px)',
-    borderRadius: 10,
-    padding: 3,
-    boxShadow: 'inset 0 1px 0 rgba(255, 255, 255, 0.06)'
-  },
-  indicator: {
-    background:
-      'linear-gradient(135deg, rgba(92, 124, 250, 0.55), rgba(132, 94, 247, 0.45))',
-    border: '1px solid rgba(255, 255, 255, 0.22)',
-    borderRadius: 8,
-    boxShadow: '0 2px 10px rgba(76, 110, 245, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.25)',
-    backdropFilter: 'blur(6px)',
-    WebkitBackdropFilter: 'blur(6px)'
-  },
-  control: {
-    border: 'none'
-  },
-  label: {
-    fontSize: 11,
-    fontWeight: 600,
-    padding: '4px 6px',
-    cursor: 'pointer',
-    transition: 'color 160ms ease'
-  }
-} as const;
-
-function GlassSegmented({
-  value,
-  onChange,
-  data
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  data: { value: string; label: string }[];
-}) {
-  return (
-    <SegmentedControl
-      size="xs"
-      fullWidth
-      radius="md"
-      transitionDuration={180}
-      value={value}
-      onChange={onChange}
-      data={data}
-      styles={glassSegmentedStyles}
-    />
-  );
-}
+// CSS variables read by the collapse animation in transition.ts (section 6):
+// the size the element collapses from, and its spacing (which collapses too).
+const collapseVars = (max: string, mr = '0px', ml = '0px') =>
+  ({
+    '--gam-collapse-max': max,
+    '--gam-collapse-mr': mr,
+    '--gam-collapse-ml': ml
+  }) as React.CSSProperties;
 
 // ---- Scale & position model ------------------------------------------------
 // fit     = whole video visible (letterboxed)
@@ -294,7 +205,8 @@ interface VideoFx {
 
 // Same set of audio effects as AudioPlayer (EQ, pitch, reverb).
 interface AudioFx {
-  pitch: number; // semitones
+  pitchMode: PitchMode; // off | shift (pitch + speed together) | correct (pitch only)
+  pitch: number; // semitones, for whichever pitch mode is on
   reverbWet: number; // 0..1
   subBass: number; // dB
   bass: number; // dB
@@ -312,6 +224,7 @@ const DEFAULT_VIDEO_FX: VideoFx = {
 };
 
 const DEFAULT_AUDIO_FX: AudioFx = {
+  pitchMode: 'shift',
   pitch: 0,
   reverbWet: 0,
   subBass: 0,
@@ -326,14 +239,18 @@ const DEFAULT_AUDIO_FX: AudioFx = {
 type PersistedVideoPrefs = {
   speed: number;
   volume: number; // 0..2 (anything above 1 uses the Web Audio boost gain)
+  modular: ModularSettings;
   isLooping: boolean;
+  loopTouched: boolean; // GAM-LOOP: true once the user toggled loop themselves
 } & VideoFx &
   AudioFx;
 
 const DEFAULT_VIDEO_PREFS: PersistedVideoPrefs = {
   speed: 1,
   volume: 1,
-  isLooping: false,
+  isLooping: true, // GAM-LOOP: on by default
+  loopTouched: false,
+  modular: { ...DEFAULT_MODULAR },
   ...DEFAULT_VIDEO_FX,
   ...DEFAULT_AUDIO_FX
 };
@@ -343,7 +260,19 @@ const STORAGE_KEY = 'wh3d_video_player_prefs';
 const loadPrefs = (): PersistedVideoPrefs => {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) return { ...DEFAULT_VIDEO_PREFS, ...JSON.parse(saved) };
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      // Pitch correction was removed: pitch always changes pitch AND speed together.
+      parsed.pitchMode = 'shift';
+      const merged = {
+        ...DEFAULT_VIDEO_PREFS,
+        ...parsed,
+        modular: normalizeModular(parsed.modular)
+      } as PersistedVideoPrefs;
+      // Until the user turns loop off themselves, it is on.
+      if (!merged.loopTouched) merged.isLooping = true;
+      return merged;
+    }
   } catch (e) {
     console.error('Failed to load video prefs from localStorage:', e);
   }
@@ -363,7 +292,11 @@ const videoPrefsStore = {
     }
   },
   reset(): PersistedVideoPrefs {
-    persistedPrefs = { ...DEFAULT_VIDEO_PREFS };
+    persistedPrefs = {
+      ...DEFAULT_VIDEO_PREFS,
+      isLooping: persistedPrefs.isLooping,
+      loopTouched: persistedPrefs.loopTouched
+    };
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(persistedPrefs));
     } catch (e) {
@@ -385,29 +318,18 @@ const getSharedAudioContext = (): AudioContext => {
   return sharedAudioCtx;
 };
 
-const createImpulseResponse = (ctx: AudioContext, durationSec = 2.5, decay = 2.5) => {
-  const sampleRate = ctx.sampleRate;
-  const length = Math.floor(sampleRate * durationSec);
-  const impulse = ctx.createBuffer(2, length, sampleRate);
-  for (let channel = 0; channel < 2; channel++) {
-    const channelData = impulse.getChannelData(channel);
-    for (let i = 0; i < length; i++) {
-      channelData[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, decay);
-    }
-  }
-  return impulse;
-};
-
 interface VideoAudioGraph {
   ctx: AudioContext;
   video: HTMLVideoElement;
   source: MediaElementAudioSourceNode;
   preamp: GainNode;
+  pitchFx: PitchCorrector;
   sub: BiquadFilterNode;
   bass: BiquadFilterNode;
   treble: BiquadFilterNode;
   dry: GainNode;
   wet: GainNode;
+  convolver: ConvolverNode;
   boost: GainNode;
   limiter: DynamicsCompressorNode;
 }
@@ -417,8 +339,8 @@ interface VideoAudioGraph {
 // leaves the element silent/stalled. So the graph is cached per element and reused.
 const graphCache = new WeakMap<HTMLVideoElement, VideoAudioGraph>();
 
-/** Same chain as AudioPlayer: preamp -> sub shelf -> bass peak -> treble shelf
- *  -> dry/reverb mix -> limiter. Volume stays on the <video> element. */
+/** Same chain as AudioPlayer: preamp -> pitch correction -> sub shelf -> bass peak
+ *  -> treble shelf -> dry/reverb mix -> limiter. Volume stays on the <video> element. */
 const buildVideoAudioGraph = (video: HTMLVideoElement): VideoAudioGraph => {
   const cached = graphCache.get(video);
   if (cached) return cached;
@@ -426,6 +348,7 @@ const buildVideoAudioGraph = (video: HTMLVideoElement): VideoAudioGraph => {
   const source = ctx.createMediaElementSource(video);
 
   const preamp = ctx.createGain();
+  const pitchFx = createPitchCorrector(ctx);
 
   const sub = ctx.createBiquadFilter();
   sub.type = 'lowshelf';
@@ -443,7 +366,7 @@ const buildVideoAudioGraph = (video: HTMLVideoElement): VideoAudioGraph => {
   const dry = ctx.createGain();
   const wet = ctx.createGain();
   const convolver = ctx.createConvolver();
-  convolver.buffer = createImpulseResponse(ctx);
+  convolver.buffer = buildReverbImpulse(ctx, fxPresetsStore.reverbParams());
 
   const limiter = ctx.createDynamicsCompressor();
   limiter.threshold.value = -2;
@@ -454,7 +377,8 @@ const buildVideoAudioGraph = (video: HTMLVideoElement): VideoAudioGraph => {
   limiter.connect(ctx.destination);
 
   source.connect(preamp);
-  preamp.connect(sub);
+  preamp.connect(pitchFx.input);
+  pitchFx.output.connect(sub);
   sub.connect(bass);
   bass.connect(treble);
   treble.connect(dry);
@@ -470,11 +394,13 @@ const buildVideoAudioGraph = (video: HTMLVideoElement): VideoAudioGraph => {
     video,
     source,
     preamp,
+    pitchFx,
     sub,
     bass,
     treble,
     dry,
     wet,
+    convolver,
     boost,
     limiter
   };
@@ -482,8 +408,9 @@ const buildVideoAudioGraph = (video: HTMLVideoElement): VideoAudioGraph => {
   return graph;
 };
 
-const applyAudioFx = (g: VideoAudioGraph, fx: AudioFx, volume: number) => {
+const applyAudioFx = (g: VideoAudioGraph, fx: AudioFx, volume: number, correctSt: number) => {
   const t = g.ctx.currentTime;
+  g.pitchFx.setSemitones(correctSt);
   g.dry.gain.setTargetAtTime(1 - fx.reverbWet, t, 0.01);
   g.wet.gain.setTargetAtTime(fx.reverbWet, t, 0.01);
   g.sub.gain.setTargetAtTime(fx.subBass, t, 0.02);
@@ -508,134 +435,6 @@ const formatTime = (timeSec: number) => {
   return `${mins}:${ss}`;
 };
 
-const formatDb = (v: number) => `${v > 0 ? '+' : ''}${v} dB`;
-
-// ---- Small UI pieces for the Effects popover -------------------------------
-
-function EffectSection({
-  title,
-  open,
-  onToggle,
-  active,
-  onReset,
-  children
-}: {
-  title: string;
-  open: boolean;
-  onToggle: () => void;
-  active: boolean;
-  onReset: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <div>
-      <div className="gam-fx-row" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        <UnstyledButton
-          onClick={onToggle}
-          style={{
-            flex: 1,
-            minWidth: 0,
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-            padding: '7px 8px'
-          }}
-        >
-          <IconChevronRight
-            size={12}
-            style={{
-              transform: open ? 'rotate(90deg)' : 'none',
-              transition: 'transform 160ms ease',
-              flexShrink: 0
-            }}
-          />
-          <Text size="xs" fw={600} style={{ flex: 1 }}>
-            {title}
-          </Text>
-          {active && (
-            <Badge size="xs" variant="light" color="indigo">
-              On
-            </Badge>
-          )}
-        </UnstyledButton>
-        <UnstyledButton onClick={onReset} disabled={!active} style={{ paddingRight: 8 }}>
-          <Text size="xs" c={active ? 'indigo' : 'dimmed'}>
-            Reset
-          </Text>
-        </UnstyledButton>
-      </div>
-      <Collapse in={open} transitionDuration={180}>
-        <Stack gap="xs" style={{ padding: '4px 8px 8px 18px' }}>
-          {children}
-        </Stack>
-      </Collapse>
-    </div>
-  );
-}
-
-function FxSlider({
-  label,
-  display,
-  value,
-  min,
-  max,
-  step,
-  onChange,
-  color = 'indigo',
-  marks
-}: {
-  label: string;
-  display: string;
-  value: number;
-  min: number;
-  max: number;
-  step: number;
-  onChange: (v: number) => void;
-  color?: string;
-  marks?: { value: number }[];
-}) {
-  // Hover + scroll adjusts just this slider, same as the audio player.
-  const onWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const dir = e.deltaY < 0 ? 1 : e.deltaY > 0 ? -1 : 0;
-    if (dir === 0) return;
-    const next = Math.round((value + dir * step) * 100) / 100;
-    onChange(Math.max(min, Math.min(max, next)));
-  };
-  return (
-    <div onWheel={onWheel}>
-      <Group justify="space-between" mb={2} wrap="nowrap">
-        <Text size="xs" c="dimmed">
-          {label}
-        </Text>
-        <Text size="xs" style={{ fontFamily: 'monospace' }}>
-          {display}
-        </Text>
-      </Group>
-      <Slider
-        size="xs"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={onChange}
-        label={() => display}
-        marks={marks}
-        color={color}
-        styles={{ thumb: sliderThumbStyle }}
-      />
-    </div>
-  );
-}
-
-// Volume icon follows the level: muted, one wave at 50% or below, two waves above.
-function VolumeIcon({ pct, muted, size }: { pct: number; muted: boolean; size: number }) {
-  if (muted || pct <= 0) return <IconVolumeOff size={size} />;
-  if (pct <= 50) return <IconVolume2 size={size} />;
-  return <IconVolume size={size} />;
-}
-
 export function VideoPlayer({
   libraryId,
   fileId,
@@ -645,7 +444,12 @@ export function VideoPlayer({
   overlayControls = false,
   isFullscreen = false,
   onFullscreen,
-  isMini = false
+  onMini,
+  onSetMode,
+  isMini = false,
+  compact = false,
+  compactStartSlot,
+  compactEndSlot
 }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
@@ -653,10 +457,23 @@ export function VideoPlayer({
   const scrubbingRef = useRef(false);
   const graphRef = useRef<VideoAudioGraph | null>(null);
   const resetOpenRef = useRef(false);
+  // Time + position of the last click on the picture (our own double-click check).
+  const lastClickRef = useRef({ t: 0, x: 0, y: 0 });
+  // Left button held + drag up = fullscreen, drag down = mini player.
+  // The drag logic lives in ../util/gestures (shared with the audio player).
+  // setMode is declared further down; it is only called when the gesture fires.
+  const gesture = useVerticalDragGesture({
+    onGesture: (dir) => {
+      if (dir === 'up') {
+        if (!isFullscreen) setMode('fullscreen');
+      } else if (!isMini) {
+        setMode('mini');
+      }
+    }
+  });
 
-  // Anchors used to measure how much room each menu has above the control bar.
-  const effectsBtnRef = useRef<HTMLButtonElement | null>(null);
-  const speedBtnRef = useRef<HTMLButtonElement | null>(null);
+  // Anchor used to measure how much room the volume menu has above the control bar.
+  // (The merged speed / pitch / effects menu measures itself inside PlayerMenu.tsx.)
   const volumeAnchorRef = useRef<HTMLDivElement | null>(null);
 
   const [isPlaying, setIsPlaying] = useState(false);
@@ -669,20 +486,37 @@ export function VideoPlayer({
   const [isMuted, setIsMuted] = useState(false);
   const [speed, setSpeed] = useState(() => videoPrefsStore.get().speed);
   const [isLooping, setIsLooping] = useState(() => videoPrefsStore.get().isLooping);
+  // Modular pitch / speed: a new random roll each time the video starts or loops.
+  const [modular, setModular] = useState<ModularSettings>(() => videoPrefsStore.get().modular);
+  const modularRef = useRef(modular);
+  modularRef.current = modular;
+  const [roll, setRoll] = useState({ p: 1, s: 1, v: 1 });
+  const lastTimeRef = useRef(0);
+  const rerollModular = useCallback(() => {
+    const r = rollModular(modularRef.current);
+    setRoll({ p: r.p, s: r.s, v: r.v });
+  }, []);
   const [volumeOpen, setVolumeOpen] = useState(false);
-  const [speedOpen, setSpeedOpen] = useState(false);
   const [confirmResetOpen, setConfirmResetOpen] = useState(false);
   resetOpenRef.current = confirmResetOpen;
+
+  // ---- Play / pause circle + status pill (shared with AudioPlayer) ----
+  // See PlaybackIndicators.tsx. <PlaybackIndicators api={pi} /> renders them.
+  const pi = usePlaybackIndicators();
+  const { flashIndicator, flashHud, hitLimit } = pi;
+
+  // Latest values for fast wheel spins and for effects that must not re-run.
+  const volumeRef = useRef(volume);
+  volumeRef.current = volume;
+  const volumeOpenRef = useRef(volumeOpen);
+  volumeOpenRef.current = volumeOpen;
 
   // Sizes used to keep a rotated (90/270) picture inside the player.
   const [surfaceSize, setSurfaceSize] = useState({ w: 0, h: 0 });
   const [videoSize, setVideoSize] = useState({ w: 0, h: 0 });
 
-  // Effects popover
+  // Speed / pitch / effects menu (one button, see PlayerMenu.tsx)
   const [fxOpen, setFxOpen] = useState(false);
-  const [videoSectionOpen, setVideoSectionOpen] = useState(false);
-  const [scaleSectionOpen, setScaleSectionOpen] = useState(false);
-  const [audioSectionOpen, setAudioSectionOpen] = useState(false);
   const [vfx, setVfx] = useState<VideoFx>(() => {
     const p = videoPrefsStore.get();
     return {
@@ -698,6 +532,7 @@ export function VideoPlayer({
   const [afx, setAfx] = useState<AudioFx>(() => {
     const p = videoPrefsStore.get();
     return {
+      pitchMode: p.pitchMode,
       pitch: p.pitch,
       reverbWet: p.reverbWet,
       subBass: p.subBass,
@@ -706,10 +541,96 @@ export function VideoPlayer({
     };
   });
 
-  // Room above each menu's button (updates live while the menu is open).
-  const fxMaxH = useMenuMaxHeight(fxOpen, effectsBtnRef, wrapperRef);
-  const speedMaxH = useMenuMaxHeight(speedOpen, speedBtnRef, wrapperRef);
+  // Pitch shifter: pitch AND speed change together (playback rate follows the pitch).
+  // Pitch correction: pitch changes, speed stays the same (the pitch node in the graph).
+  const pitchOn = modular.pitchOn;
+  const speedOn = modular.speedOn;
+  const volumeOn = modular.volumeOn;
+  // A modular option replaces the regular control while it is on.
+  const baseSt = pitchOn ? 12 * Math.log2(roll.p) : afx.pitch;
+  // Modular pitch is never corrected (it sounds robotic); otherwise the checkbox decides.
+  const corrOn = !pitchOn && afx.pitchMode !== 'shift';
+  const shiftSt = corrOn ? 0 : baseSt;
+  const correctSt = corrOn ? baseSt : 0;
+  const speedEff = speedOn ? roll.s : speed;
+  const volEff = volumeOn ? roll.v : volume;
+
+  // Room above the volume menu's button (updates live while the menu is open).
   const volumeMaxH = useMenuMaxHeight(volumeOpen, volumeAnchorRef, wrapperRef);
+
+  // ---- Compact mode (title bar hidden): slim bar that hides after 2 s ----
+  const barRef = useRef<HTMLDivElement | null>(null);
+  const [barShown, setBarShown] = useState(true);
+  const [barH, setBarH] = useState(0); // full-size bar height, so the video can reserve room for it
+  const barHoverRef = useRef(false);
+  const barTimerRef = useRef<number | undefined>(undefined);
+  const menusOpenRef = useRef(false);
+  menusOpenRef.current = fxOpen || volumeOpen || confirmResetOpen;
+
+  // I / F shortcuts: close the menus with no fade-out BEFORE the window resizes.
+  const [instantClose, setInstantClose] = useState(false);
+  const closeMenusNow = () => {
+    flushSync(() => {
+      setInstantClose(true);
+      setFxOpen(false);
+      setVolumeOpen(false);
+    });
+    requestAnimationFrame(() => setInstantClose(false));
+  };
+
+  // Starts (or restarts) the hide countdown. While the pointer is on the bar,
+  // a slider is being dragged or a menu is open, the bar stays and checks again.
+  const armBarHide: () => void = useCallback(() => {
+    window.clearTimeout(barTimerRef.current);
+    barTimerRef.current = window.setTimeout(() => {
+      if (barHoverRef.current || menusOpenRef.current || scrubbingRef.current) {
+        armBarHide();
+        return;
+      }
+      setBarShown(false);
+    }, VIDEO_COMPACT_BAR.autoHideMs);
+  }, []);
+
+  // Entering / leaving compact mode: show the bar, and (in compact) start the countdown.
+  useEffect(() => {
+    window.clearTimeout(barTimerRef.current);
+    setBarShown(true);
+    // GAM-COMPACT-V2: wait for the leave animation before the 1 s countdown starts.
+    let startTimer: number | undefined;
+    if (compact) startTimer = window.setTimeout(armBarHide, VIDEO_COMPACT_BAR.durationMs);
+    return () => {
+      window.clearTimeout(startTimer);
+      window.clearTimeout(barTimerRef.current);
+    };
+  }, [compact, armBarHide]);
+
+  // A menu closing restarts the countdown.
+  useEffect(() => {
+    if (compact) armBarHide();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fxOpen, volumeOpen, confirmResetOpen, armBarHide]);
+
+  // Any mouse movement over the player brings the bar back.
+  const handlePlayerMouseMove = () => {
+    if (!compact) return;
+    setBarShown(true);
+    armBarHide();
+  };
+
+  // Measure the full-size bar (not while compact, when it is slim).
+  useLayoutEffect(() => {
+    const el = barRef.current;
+    if (!el || compact) return;
+    const update = () => setBarH(el.offsetHeight);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [compact]);
+
+  // Room kept under the video for the bar. 0 when the bar floats over the video
+  // (overlayControls, or compact), so the video grows smoothly into that space.
+  const reservedBottom = overlayControls || compact ? 0 : barH;
 
   // Scale / zoom / pan / stretch. Session-only; each video opens at Fit.
   const [vz, setVz] = useState<VideoZoom>(DEFAULT_VZ);
@@ -744,7 +665,8 @@ export function VideoPlayer({
     [updateVz]
   );
 
-  const scaleActive = !isDefaultVz(vz);
+  // Rotate lives in the Scale & Position section now, so it lights that section up.
+  const scaleActive = !isDefaultVz(vz) || vfx.rotate !== 0;
 
   const vfxActive =
     vfx.brightness !== 100 ||
@@ -752,15 +674,15 @@ export function VideoPlayer({
     vfx.saturation !== 100 ||
     vfx.hue !== 0 ||
     vfx.flip ||
-    vfx.flipV ||
-    vfx.rotate !== 0;
-  const afxActive =
+    vfx.flipV;
+  // Pitch, reverb and EQ (all live in the Audio Effects section).
+  const toneActive =
     afx.pitch !== 0 ||
     afx.reverbWet !== 0 ||
     afx.subBass !== 0 ||
     afx.bass !== 0 ||
     afx.treble !== 0;
-  const fxActive = vfxActive || afxActive || scaleActive;
+  const afxActive = afx.pitch !== 0 || toneActive || pitchOn;
 
   const hasCssFilter =
     vfx.brightness !== 100 || vfx.contrast !== 100 || vfx.saturation !== 100 || vfx.hue !== 0;
@@ -827,23 +749,24 @@ export function VideoPlayer({
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
-    v.volume = Math.max(0, Math.min(1, volume));
+    v.volume = Math.max(0, Math.min(1, volEff));
     v.muted = isMuted;
     videoPrefsStore.set({ volume });
-  }, [volume, isMuted]);
+  }, [volume, isMuted, volEff]);
 
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
-    const rate = effectiveRate(speed, afx.pitch);
-    // With a pitch shift we want the pitch to follow the rate; otherwise keep
+    // Only the pitch shifter changes the rate; pitch correction leaves it alone.
+    const rate = effectiveRate(speedEff, shiftSt);
+    // With the pitch shifter we want the pitch to follow the rate; otherwise keep
     // the browser's default (speed changes without changing pitch).
-    v.preservesPitch = afx.pitch === 0;
+    v.preservesPitch = shiftSt === 0;
     // defaultPlaybackRate survives the load algorithm; playbackRate alone is reset by it.
     v.defaultPlaybackRate = rate;
     v.playbackRate = rate;
     videoPrefsStore.set({ speed });
-  }, [speed, afx.pitch]);
+  }, [speed, shiftSt, speedEff]);
 
   useEffect(() => {
     const v = videoRef.current;
@@ -859,10 +782,54 @@ export function VideoPlayer({
     videoPrefsStore.set(afx);
   }, [afx]);
 
+  useEffect(() => {
+    videoPrefsStore.set({ modular });
+  }, [modular]);
+
+  // Turning modular on rolls a first random pitch / speed.
+  useEffect(() => {
+    if (anyModular(modular)) rerollModular();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modular.pitchOn, modular.volumeOn, modular.speedOn, rerollModular]);
+
+  // ---- Status pill: shows whenever speed / loop / volume / mute CHANGES, no
+  // matter where the change came from (keyboard, menu, scroll, slider). Each
+  // effect compares against the previous value, so the first render (and
+  // StrictMode's double run) never shows the pill.
+  const prevSpeedRef = useRef(speed);
+  useEffect(() => {
+    if (prevSpeedRef.current === speed) return;
+    prevSpeedRef.current = speed;
+    flashHud({ kind: 'speed', text: `${speed}x` });
+  }, [speed, flashHud]);
+
+  const prevLoopRef = useRef(isLooping);
+  useEffect(() => {
+    if (prevLoopRef.current === isLooping) return;
+    prevLoopRef.current = isLooping;
+    flashHud({ kind: isLooping ? 'loop-on' : 'loop-off', text: isLooping ? 'Loop on' : 'Loop off' });
+  }, [isLooping, flashHud]);
+
+  const prevShownVolRef = useRef(isMuted ? 0 : volume);
+  useEffect(() => {
+    const shown = isMuted ? 0 : volume;
+    if (prevShownVolRef.current === shown) return;
+    prevShownVolRef.current = shown;
+    // The volume popover has its own slider, so no pill while it is open.
+    if (volumeOpenRef.current) return;
+    const pct = Math.round(shown * 100);
+    flashHud({
+      kind: 'volume',
+      text: shown === 0 ? 'Muted' : `${pct}%`,
+      pct,
+      boosted: shown > 1
+    });
+  }, [volume, isMuted, flashHud]);
+
   // The Web Audio graph is only built once an audio effect is on or volume is
   // boosted above 100%, so plain playback never goes through it.
   useEffect(() => {
-    if (!afxActive && volume <= 1 && !graphRef.current) return;
+    if (!afxActive && volEff <= 1 && !graphRef.current) return;
     const v = videoRef.current;
     if (!v) return;
     if (!graphRef.current) {
@@ -873,12 +840,24 @@ export function VideoPlayer({
         return;
       }
     }
-    applyAudioFx(graphRef.current, afx, volume);
+    applyAudioFx(graphRef.current, afx, volEff, correctSt);
     if (graphRef.current.ctx.state === 'suspended') {
       void graphRef.current.ctx.resume().catch(() => undefined);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [afx, volume]);
+  }, [afx, volume, volEff, correctSt]);
+
+  // Reverb preset / Custom values changed: rebuild the reverb tail. The short delay
+  // keeps a Custom slider drag from rebuilding it on every tick.
+  const reverbParams = useReverbParams();
+  useEffect(() => {
+    const g = graphRef.current;
+    if (!g) return undefined;
+    const id = window.setTimeout(() => {
+      g.convolver.buffer = buildReverbImpulse(g.ctx, reverbParams);
+    }, 120);
+    return () => window.clearTimeout(id);
+  }, [reverbParams]);
 
   useEffect(() => {
     return () => {
@@ -889,6 +868,7 @@ export function VideoPlayer({
       // Tearing the graph down then would orphan the element's audio, so only
       // disconnect when the <video> has really left the DOM.
       if (g.video.isConnected) return;
+      g.pitchFx.dispose();
       try {
         g.source.disconnect();
       } catch {}
@@ -899,22 +879,37 @@ export function VideoPlayer({
     };
   }, []);
 
+  // (drag-gesture cleanup now lives inside useVerticalDragGesture)
+
   // Close open menus when fullscreen toggles, so none are left floating
   // mid-animation at the old position.
   useEffect(() => {
     setFxOpen(false);
     setVolumeOpen(false);
-    setSpeedOpen(false);
-  }, [isFullscreen]);
+  }, [isFullscreen, isMini, compact]);
 
-  // Shift + scroll wheel zooms toward the mouse pointer (the point under the
-  // cursor stays put). Native listener so preventDefault works (React's wheel
-  // handlers are passive).
+  // Scroll wheel over the picture:
+  //   plain scroll  = volume (up = louder), works even when the window is not focused
+  //   Shift + scroll = zoom toward the mouse pointer (the point under the cursor stays put)
+  // Native listener so preventDefault works (React's wheel handlers are passive).
   useEffect(() => {
     const el = surfaceRef.current;
     if (!el) return;
+    let wheelAcc = 0; // touchpads send many tiny deltas; a mouse notch is ~100
     const onWheel = (e: WheelEvent) => {
-      if (!e.shiftKey) return;
+      if (!e.shiftKey) {
+        // The control bar keeps its own per-button scroll behaviour.
+        if ((e.target as HTMLElement | null)?.closest('[data-vp-controls]')) return;
+        e.preventDefault();
+        e.stopPropagation();
+        wheelAcc += e.deltaY;
+        const steps = Math.trunc(Math.abs(wheelAcc) / 100);
+        if (steps === 0) return;
+        const dir = wheelAcc < 0 ? 1 : -1; // scroll up = louder
+        wheelAcc -= Math.sign(wheelAcc) * steps * 100;
+        actionsRef.current.adjustVolumeRelative(dir * steps * 5);
+        return;
+      }
       e.preventDefault();
       e.stopPropagation();
       // Chromium turns Shift+wheel into horizontal scroll (deltaX) on Windows.
@@ -946,11 +941,19 @@ export function VideoPlayer({
     return () => el.removeEventListener('wheel', onWheel);
   }, [updateVz]);
 
-  // Right mouse button held + drag moves the picture.
+  // Mouse buttons on the picture:
+  //   left  held + drag up   = fullscreen, drag down = mini player
+  //   right held + drag      = move the picture
   const handleSurfaceMouseDown = (e: React.MouseEvent) => {
-    if (e.button !== 2) return;
     const el = surfaceRef.current;
     if (!el) return;
+
+    if (e.button === 0) {
+      gesture.onMouseDown(e);
+      return;
+    }
+
+    if (e.button !== 2) return;
     e.preventDefault();
     const rect = el.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return;
@@ -972,14 +975,18 @@ export function VideoPlayer({
   };
 
   // ---- Actions ----
-  const togglePlay = () => {
+  // The circle shows for every toggle: clicks on the picture, the control-bar
+  // button and the keyboard.
+  const togglePlay = (showIndicator = true) => {
     const v = videoRef.current;
     if (!v || error) return;
     if (graphRef.current?.ctx.state === 'suspended') {
       void graphRef.current.ctx.resume().catch(() => undefined);
     }
-    if (v.paused || v.ended) void v.play().catch(() => undefined);
+    const willPlay = v.paused || v.ended;
+    if (willPlay) void v.play().catch(() => undefined);
     else v.pause();
+    if (showIndicator) flashIndicator(willPlay ? 'play' : 'pause');
   };
 
   const seekTo = (t: number) => {
@@ -996,14 +1003,37 @@ export function VideoPlayer({
     if (!v || !Number.isFinite(v.duration) || v.duration <= 0) return;
     const step = v.duration < 5 ? 1 : 5;
     seekTo(v.currentTime + direction * step);
+    flashHud({
+      kind: direction === -1 ? 'back' : 'forward',
+      text: `${direction === -1 ? '−' : '+'}${step}s`
+    });
   };
 
+  // Reads a ref so fast wheel spins never use a stale volume. When the volume
+  // actually changes, the status pill comes from the volume effect above; when
+  // it is already at an end, hitLimit() drives the shake / shrink reaction.
   const adjustVolumeRelative = (deltaPct: number) => {
+    const cur = Math.round(volumeRef.current * 100);
+    const pct = Math.max(0, Math.min(VOLUME_MAX_PCT, cur + deltaPct));
+    if (pct === cur) {
+      // Already at the end: nothing changes, but persisting makes the pill react.
+      if (!volumeOpenRef.current) {
+        if (deltaPct > 0 && cur >= VOLUME_MAX_PCT) {
+          hitLimit('volume', 'max', {
+            kind: 'volume',
+            text: `${VOLUME_MAX_PCT}%`,
+            pct: VOLUME_MAX_PCT,
+            boosted: true
+          });
+        } else if (deltaPct < 0 && cur <= 0) {
+          hitLimit('volume', 'min', { kind: 'volume', text: '0%', pct: 0 });
+        }
+      }
+      return;
+    }
+    volumeRef.current = pct / 100;
     setIsMuted(false);
-    setVolume((prev) => {
-      const pct = Math.max(0, Math.min(VOLUME_MAX_PCT, Math.round(prev * 100) + deltaPct));
-      return pct / 100;
-    });
+    setVolume(pct / 100);
   };
 
   const changeSpeedStep = (direction: 'down' | 'up' | 'reset') => {
@@ -1020,6 +1050,15 @@ export function VideoPlayer({
         closestIdx = idx;
       }
     });
+    // Already at the fastest / slowest preset: persisting makes the pill react.
+    if (direction === 'up' && closestIdx === SPEED_PRESETS.length - 1) {
+      hitLimit('speed', 'max', { kind: 'speed', text: `${speed}x` });
+      return;
+    }
+    if (direction === 'down' && closestIdx === 0) {
+      hitLimit('speed', 'min', { kind: 'speed', text: `${speed}x` });
+      return;
+    }
     const nextIdx =
       direction === 'down'
         ? Math.max(0, closestIdx - 1)
@@ -1028,6 +1067,12 @@ export function VideoPlayer({
   };
 
   const toggleMute = () => setIsMuted((prev) => !prev);
+
+  // Only the user turning loop on / off marks it as their own choice.
+  const setLoopByUser = (on: boolean) => {
+    videoPrefsStore.set({ loopTouched: true });
+    setIsLooping(on);
+  };
 
   const handleVolumeChange = (pct: number) => {
     setIsMuted(false);
@@ -1048,11 +1093,15 @@ export function VideoPlayer({
     setSpeed(d.speed);
     setVolume(d.volume);
     setIsMuted(false);
-    setIsLooping(d.isLooping);
+    // Loop is left exactly as it is.
     setVfx({ ...DEFAULT_VIDEO_FX });
     setAfx({ ...DEFAULT_AUDIO_FX });
+    setModular({ ...d.modular });
     setVz({ ...DEFAULT_VZ });
     setConfirmResetOpen(false);
+    // The speed/loop/volume effects above each flash their own pill after the
+    // next render; this later call replaces them with a single "reset" pill.
+    window.setTimeout(() => flashHud({ kind: 'reset', text: 'Settings reset' }), 60);
   };
 
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -1066,10 +1115,33 @@ export function VideoPlayer({
     if (e.button === 1) e.preventDefault();
   };
 
-  // Fullscreen is owned by PreviewPane (animated window-fill, not OS fullscreen).
-  const toggleFullscreen = () => {
-    onFullscreen?.();
+  // ---- Preview modes (fullscreen / mini / expand) ----
+  // Mode state is owned by PreviewPane. When it passes onSetMode, every mode
+  // change goes through it. Until then this falls back to the older
+  // onFullscreen / onMini props, which can only do part of the job.
+  // PreviewPane owns the modes. These call the same functions the I and F keys
+  // use, so a gesture / double-click behaves exactly like pressing the key:
+  //   I key -> onMini        (toggles mini; leaves fullscreen / expanded first)
+  //   F key -> onFullscreen  (toggles fullscreen; from mini it leaves mini first)
+  const setMode = (m: PreviewMode) => {
+    if (onSetMode) {
+      onSetMode(m);
+      return;
+    }
+    if (m === 'fullscreen') {
+      if (!isFullscreen) onFullscreen?.();
+    } else if (m === 'mini') {
+      if (!isMini) onMini?.();
+    } else if (m === 'normal') {
+      if (isMini) onMini?.();
+    }
   };
+
+  // F key.
+  const toggleFullscreen = () => onFullscreen?.();
+
+  // Mini toggle (the double-click on the picture now does what the F key does instead).
+  const toggleMini = () => setMode(isMini ? 'normal' : 'mini');
 
   // Windows-style hover-to-scroll, same helper shape as AudioPlayer.
   const onWheelAdjust = (adjust: (dir: 1 | -1) => void) => (e: React.WheelEvent) => {
@@ -1079,14 +1151,15 @@ export function VideoPlayer({
     else if (e.deltaY > 0) adjust(-1);
   };
 
-  // ---- Keyboard (same keymap as AudioPlayer, plus F for fullscreen) ----
+  // ---- Keyboard (same keymap as AudioPlayer, plus F for fullscreen (T is handled by PreviewPane)) ----
   const actionsRef = useRef({
     togglePlay,
     seekRelative,
     adjustVolumeRelative,
     changeSpeedStep,
     toggleMute,
-    toggleFullscreen
+    toggleFullscreen,
+    toggleMini
   });
   useEffect(() => {
     actionsRef.current = {
@@ -1095,7 +1168,8 @@ export function VideoPlayer({
       adjustVolumeRelative,
       changeSpeedStep,
       toggleMute,
-      toggleFullscreen
+      toggleFullscreen,
+      toggleMini
     };
   });
 
@@ -1109,6 +1183,11 @@ export function VideoPlayer({
 
       const a = actionsRef.current;
       const key = e.key.toLowerCase();
+
+      // I (mini / compact) and F (fullscreen): close any open menu first.
+      if ((key === 'i' || key === 'f') && !e.shiftKey && menusOpenRef.current) {
+        closeMenusNow();
+      }
 
       // --- Scale / position keys. These are handled FIRST and always return, so
       // a Shift combo never falls through to the plain-key action below
@@ -1150,7 +1229,7 @@ export function VideoPlayer({
       if (e.code === 'Space' || key === 's') {
         e.preventDefault();
         e.stopPropagation();
-        a.togglePlay();
+        a.togglePlay(true);
       } else if (key === 'a') {
         e.preventDefault();
         a.seekRelative(-1);
@@ -1216,29 +1295,48 @@ export function VideoPlayer({
   const panLimX = panLimit(vz.zoom, vz.stretchX);
   const panLimY = panLimit(vz.zoom, vz.stretchY);
 
+  const compactAttr = compact ? 'true' : 'false';
   const controlBar = (
     <Box
+      ref={barRef}
       p="xs"
-      style={
-        overlayControls
-          ? { position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 3 }
-          : { flexShrink: 0 }
-      }
+      data-vp-controls
+      data-compact={compactAttr}
+      data-shown={barShown ? 'true' : 'false'}
+      className={VIDEO_COMPACT_BAR.boxClassName}
+      onMouseEnter={() => {
+        barHoverRef.current = true;
+      }}
+      onMouseLeave={() => {
+        barHoverRef.current = false;
+        if (compact) armBarHide();
+      }}
+      style={{ position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 3 }}
     >
       <Card
         withBorder={false}
         radius="lg"
         p="xs"
-        className={PLAYER_GLASS_CLASS}
+        className={`${PLAYER_GLASS_CLASS} ${VIDEO_COMPACT_BAR.barClassName}`}
+        data-compact={compactAttr}
         style={{ width: '100%' }}
       >
-        <Group wrap="nowrap" gap="md" align="center">
+        <Group wrap="nowrap" gap={0} align="center">
+          {/* Pin button (from PreviewPane), only in compact mode */}
+          <div className={VIDEO_COMPACT_BAR.revealClassName} style={{ marginRight: 8 }}>
+            {compactStartSlot}
+          </div>
+
+          <div
+            className={VIDEO_COMPACT_BAR.collapseClassName}
+            style={{ flexShrink: 0, ...collapseVars('56px', '16px') }}
+          >
           <ActionIcon
             variant="filled"
             color="indigo"
             radius="xl"
             size={42}
-            onClick={togglePlay}
+            onClick={() => togglePlay()}
             disabled={!!error}
             aria-label={isPlaying ? 'Pause' : 'Play'}
             style={{ flexShrink: 0 }}
@@ -1249,8 +1347,12 @@ export function VideoPlayer({
               <IconPlayerPlay size={20} style={{ marginLeft: 2 }} />
             )}
           </ActionIcon>
+          </div>
 
-          <Box style={{ flexShrink: 1, flexGrow: 0, minWidth: 0, maxWidth: 180, overflow: 'hidden' }}>
+          <Box
+            className={VIDEO_COMPACT_BAR.collapseClassName}
+            style={{ flexShrink: 1, flexGrow: 0, minWidth: 0, ...collapseVars('180px', '16px') }}
+          >
             <Text size="xs" fw={700} truncate>
               {filename}
             </Text>
@@ -1260,7 +1362,7 @@ export function VideoPlayer({
           </Box>
 
           {/* Seek bar */}
-          <Box style={{ flex: '1 1 140px', minWidth: 140, display: 'flex', alignItems: 'center' }}>
+          <Box className="gam-vp-seek" style={{ flex: '1 1 140px', minWidth: 140, display: 'flex', alignItems: 'center' }}>
             <Slider
               size="sm"
               min={0}
@@ -1270,6 +1372,8 @@ export function VideoPlayer({
               onChange={(val) => {
                 scrubbingRef.current = true;
                 seekTo(val);
+                // Show where the click / drag landed (e.g. 1:32) in the status pill.
+                flashHud({ kind: 'seek', text: formatTime(val) });
               }}
               onChangeEnd={() => {
                 scrubbingRef.current = false;
@@ -1282,6 +1386,10 @@ export function VideoPlayer({
             />
           </Box>
 
+          <div
+            className={VIDEO_COMPACT_BAR.collapseClassName}
+            style={{ flexShrink: 0, ...collapseVars('240px', '0px', '16px') }}
+          >
           <Group gap="xs" wrap="nowrap" style={{ flexShrink: 0 }}>
             {/* Loop — hover + scroll: up turns it on, down turns it off */}
             <Tooltip
@@ -1293,101 +1401,37 @@ export function VideoPlayer({
                 variant={isLooping ? 'filled' : 'subtle'}
                 color={isLooping ? 'indigo' : 'gray'}
                 size="md"
-                onClick={() => setIsLooping(!isLooping)}
-                onWheel={onWheelAdjust((dir) => setIsLooping(dir === 1))}
+                onClick={() => setLoopByUser(!isLooping)}
+                onWheel={onWheelAdjust((dir) => setLoopByUser(dir === 1))}
                 aria-label="Toggle loop"
               >
                 <IconRepeat size={16} />
               </ActionIcon>
             </Tooltip>
 
-            {/* Speed — hover + scroll steps through presets */}
-            <Menu
-              shadow="md"
-              width={100}
-              position="top"
-              portalProps={portalProps}
-              opened={speedOpen}
-              onChange={setSpeedOpen}
-              middlewares={menuMiddlewares}
-            >
-              <Menu.Target>
-                <Tooltip
-                  label={`Speed: ${speed}x (J/K/L, or scroll)`}
-                  withinPortal
-                  portalProps={portalProps}
-                >
-                  <ActionIcon
-                    ref={speedBtnRef}
-                    variant={speed !== 1 ? 'filled' : 'subtle'}
-                    color={speed !== 1 ? 'indigo' : 'gray'}
-                    size="md"
-                    aria-label="Playback speed"
-                    onWheel={onWheelAdjust((dir) => changeSpeedStep(dir === 1 ? 'up' : 'down'))}
-                  >
-                    <IconGauge size={16} />
-                  </ActionIcon>
-                </Tooltip>
-              </Menu.Target>
-              <Menu.Dropdown>
-                <GlassScroll maxHeight={speedMaxH - 12} bleed={3}>
-                  {SPEED_PRESETS.map((s) => {
-                    const isSelected = speed === s;
-                    return (
-                      <Menu.Item
-                        key={s}
-                        onClick={() => setSpeed(s)}
-                        disabled={isSelected}
-                        style={{
-                          opacity: isSelected ? 0.45 : 1,
-                          backgroundColor: isSelected ? 'rgba(255, 255, 255, 0.08)' : undefined,
-                          cursor: isSelected ? 'default' : 'pointer'
-                        }}
-                      >
-                        <Text size="xs" fw={isSelected ? 700 : 500}>
-                          {s}x
-                        </Text>
-                      </Menu.Item>
-                    );
-                  })}
-                </GlassScroll>
-              </Menu.Dropdown>
-            </Menu>
-
-            {/* Effects — collapsible categories, like the Filter menu */}
-            <Popover
-              width={280}
-              position="top"
-              shadow="md"
-              withArrow={false}
+            {/* One menu: Speed, Pitch, Video Effects, Scale & Position, Audio Effects
+                (the same menu component AudioPlayer uses, see PlayerMenu.tsx) */}
+            <PlayerSettingsMenu
+              speed={speed}
+              onSpeed={setSpeed}
+              modular={modular}
+              onModular={setModular}
+              extraActive={vfxActive || scaleActive || toneActive}
               opened={fxOpen}
-              onChange={setFxOpen}
-              portalProps={portalProps}
-              middlewares={menuMiddlewares}
-              classNames={{ dropdown: PLAYER_GLASS_POPOVER_CLASS }}
-            >
-              <Popover.Target>
-                <Tooltip label="Effects" withinPortal portalProps={portalProps}>
-                  <ActionIcon
-                    ref={effectsBtnRef}
-                    variant={fxActive ? 'filled' : 'subtle'}
-                    color={fxActive ? 'violet' : 'gray'}
-                    size="md"
-                    aria-label="Effects"
-                    onClick={() => setFxOpen((o) => !o)}
-                  >
-                    <IconWand size={16} />
-                  </ActionIcon>
-                </Tooltip>
-              </Popover.Target>
-              <Popover.Dropdown style={{ padding: '8px 10px' }}>
-                <GlassScroll maxHeight={fxMaxH - 20}>
+              onOpenedChange={setFxOpen}
+              watchRef={wrapperRef}
+              instantClose={instantClose}
+              onWheelSpeed={(dir) => changeSpeedStep(dir === 1 ? 'up' : 'down')}
+              extraSections={(acc) => (
+                <>
+                  <Divider my={4} />
+
                   <EffectSection
                     title="Video Effects"
-                    open={videoSectionOpen}
-                    onToggle={() => setVideoSectionOpen((o) => !o)}
+                    open={acc.isOpen('video')}
+                    onToggle={() => acc.toggle('video')}
                     active={vfxActive}
-                    onReset={() => setVfx({ ...DEFAULT_VIDEO_FX })}
+                    onReset={() => setVfx((p) => ({ ...DEFAULT_VIDEO_FX, rotate: p.rotate }))}
                   >
                     <FxSlider
                       label="Brightness"
@@ -1430,26 +1474,6 @@ export function VideoPlayer({
                       marks={[{ value: 0 }]}
                     />
 
-                    <div>
-                      <Group justify="space-between" mb={4} wrap="nowrap">
-                        <Text size="xs" c="dimmed">
-                          Rotate
-                        </Text>
-                        <Text size="xs" style={{ fontFamily: 'monospace' }}>
-                          {vfx.rotate}°
-                        </Text>
-                      </Group>
-                      <GlassSegmented
-                        value={String(vfx.rotate)}
-                        onChange={(v) => setV({ rotate: Number(v) })}
-                        data={[
-                          { value: '0', label: '0°' },
-                          { value: '90', label: '90°' },
-                          { value: '180', label: '180°' },
-                          { value: '270', label: '270°' }
-                        ]}
-                      />
-                    </div>
 
                     <Switch
                       size="xs"
@@ -1469,10 +1493,13 @@ export function VideoPlayer({
 
                   <EffectSection
                     title="Scale & Position"
-                    open={scaleSectionOpen}
-                    onToggle={() => setScaleSectionOpen((o) => !o)}
+                    open={acc.isOpen('scale')}
+                    onToggle={() => acc.toggle('scale')}
                     active={scaleActive}
-                    onReset={() => setVz({ ...DEFAULT_VZ })}
+                    onReset={() => {
+                      setVz({ ...DEFAULT_VZ });
+                      setV({ rotate: 0 });
+                    }}
                   >
                     <GlassSegmented
                       value={vz.mode}
@@ -1538,83 +1565,69 @@ export function VideoPlayer({
                         />
                       </>
                     )}
-                    <Text size="10px" c="dimmed" style={{ lineHeight: 1.5 }}>
+                    <div>
+                      <Group justify="space-between" mb={4} wrap="nowrap">
+                        <Text size="xs" c="dimmed">
+                          Rotate
+                        </Text>
+                        <Text size="xs" style={{ fontFamily: 'monospace' }}>
+                          {vfx.rotate}&deg;
+                        </Text>
+                      </Group>
+                      <GlassSegmented
+                        value={String(vfx.rotate)}
+                        onChange={(v) => setV({ rotate: Number(v) })}
+                        data={[
+                          { value: '0', label: '0\u00b0' },
+                          { value: '90', label: '90\u00b0' },
+                          { value: '180', label: '180\u00b0' },
+                          { value: '270', label: '270\u00b0' }
+                        ]}
+                      />
+                    </div>
+                    {/* Shortcut hint, hidden from the UI on purpose (kept here for reference):
+<Text size="10px" c="dimmed" style={{ lineHeight: 1.5 }}>
                       + / − zoom · [ vertical stretch · ] horizontal stretch (Shift to shrink) ·
                       Shift+W/A/S/D or right-click drag to move · Shift+scroll zooms at the
                       pointer. Zoom, move and stretch switch to Custom.
                     </Text>
+                    */}
                   </EffectSection>
 
                   <Divider my={4} />
 
+                  {/* Pitch, reverb + EQ. */}
                   <EffectSection
                     title="Audio Effects"
-                    open={audioSectionOpen}
-                    onToggle={() => setAudioSectionOpen((o) => !o)}
-                    active={afxActive}
+                    open={acc.isOpen('audio')}
+                    onToggle={() => acc.toggle('audio')}
+                    active={toneActive}
                     onReset={() => setAfx({ ...DEFAULT_AUDIO_FX })}
                   >
-                    <FxSlider
-                      label="Pitch"
-                      display={`${afx.pitch > 0 ? '+' : ''}${afx.pitch} st`}
-                      value={afx.pitch}
-                      min={-12}
-                      max={12}
-                      step={1}
-                      color="violet"
-                      onChange={(v) => setA({ pitch: v })}
-                      marks={[{ value: 0 }]}
-                    />
-                    <Text size="10px" c="dimmed" style={{ marginTop: -4 }}>
-                      Pitch also changes playback speed, same as the audio player.
-                    </Text>
-                    <FxSlider
-                      label="Reverb"
-                      display={`${Math.round(afx.reverbWet * 100)}%`}
-                      value={afx.reverbWet}
-                      min={0}
-                      max={1}
-                      step={0.05}
-                      color="violet"
-                      onChange={(v) => setA({ reverbWet: v })}
-                    />
-                    <FxSlider
-                      label="Sub Bass (~60 Hz)"
-                      display={formatDb(afx.subBass)}
-                      value={afx.subBass}
-                      min={-EQ_MAX_DB}
-                      max={EQ_MAX_DB}
-                      step={1}
-                      color="teal"
-                      onChange={(v) => setA({ subBass: v })}
-                      marks={[{ value: 0 }]}
-                    />
-                    <FxSlider
-                      label="Bass (~150 Hz)"
-                      display={formatDb(afx.bass)}
-                      value={afx.bass}
-                      min={-EQ_MAX_DB}
-                      max={EQ_MAX_DB}
-                      step={1}
-                      color="teal"
-                      onChange={(v) => setA({ bass: v })}
-                      marks={[{ value: 0 }]}
-                    />
-                    <FxSlider
-                      label="Treble (~6 kHz)"
-                      display={formatDb(afx.treble)}
-                      value={afx.treble}
-                      min={-EQ_MAX_DB}
-                      max={EQ_MAX_DB}
-                      step={1}
-                      color="teal"
-                      onChange={(v) => setA({ treble: v })}
-                      marks={[{ value: 0 }]}
+                    <Dim off={pitchOn}>
+                      <FxSlider
+                        label="Pitch"
+                        display={`${afx.pitch > 0 ? '+' : ''}${afx.pitch} st`}
+                        value={afx.pitch}
+                        min={PITCH_MIN_ST}
+                        max={PITCH_MAX_ST}
+                        step={1}
+                        color="violet"
+                        onChange={(v) => setA({ pitch: v })}
+                        marks={[{ value: 0 }]}
+                      />
+                    </Dim>
+                    <Divider />
+                    <ReverbControls wet={afx.reverbWet} onWet={(v) => setA({ reverbWet: v })} />
+                    <Divider />
+                    <EqControls
+                      values={{ subBass: afx.subBass, bass: afx.bass, treble: afx.treble }}
+                      onChange={(v) => setA(v)}
                     />
                   </EffectSection>
-                </GlassScroll>
-              </Popover.Dropdown>
-            </Popover>
+                </>
+              )}
+            />
 
             {/* Volume — hover the icon (or the open panel) and scroll.
                 Turns orange above 100%. */}
@@ -1626,6 +1639,7 @@ export function VideoPlayer({
               opened={volumeOpen}
               onChange={setVolumeOpen}
               portalProps={portalProps}
+              transitionProps={instantClose ? { duration: 0, exitDuration: 0 } : undefined}
               middlewares={menuMiddlewares}
               classNames={{ dropdown: PLAYER_GLASS_POPOVER_CLASS }}
             >
@@ -1664,6 +1678,7 @@ export function VideoPlayer({
                 onWheel={onWheelAdjust((dir) => adjustVolumeRelative(dir * 5))}
               >
                 <GlassScroll maxHeight={volumeMaxH - 20}>
+                  <Dim off={volumeOn}>
                   <Group gap="xs" wrap="nowrap">
                     <ActionIcon
                       variant="subtle"
@@ -1711,11 +1726,12 @@ export function VideoPlayer({
                       </Text>
                     </UnstyledButton>
                   </Group>
+                  </Dim>
                 </GlassScroll>
               </Popover.Dropdown>
             </Popover>
 
-            {/* Hidden in the mini player (fullscreen does nothing there). */}
+            {/* Hidden in the mini player (the F key still goes fullscreen from mini). */}
             {!isMini && (
               <Tooltip
                 label={isFullscreen ? 'Exit fullscreen (F / Esc)' : 'Fullscreen (F)'}
@@ -1738,6 +1754,12 @@ export function VideoPlayer({
               </Tooltip>
             )}
           </Group>
+          </div>
+
+          {/* Eye (hide / show title bar) button from PreviewPane, only in compact mode */}
+          <div className={VIDEO_COMPACT_BAR.revealClassName} style={{ marginLeft: 8 }}>
+            {compactEndSlot}
+          </div>
         </Group>
       </Card>
     </Box>
@@ -1748,18 +1770,19 @@ export function VideoPlayer({
       ref={wrapperRef}
       onMouseDown={handleMouseDown}
       onAuxClick={handleAuxClick}
+      onMouseMove={handlePlayerMouseMove}
       style={{
-        display: 'flex',
-        flexDirection: 'column',
         height: '100%',
         width: '100%',
         minHeight: 0,
         position: 'relative',
+        overflow: 'hidden',
         // Black in both themes (was var(--wh3d-viewport-bg), which is white in light mode).
         background: '#000'
       }}
     >
       <PlayerGlassStyles />
+      <style>{videoCompactBarCss()}</style>
 
       {/* Video surface (overflow hidden so a zoomed picture is clipped to the player) */}
       <Box
@@ -1767,11 +1790,20 @@ export function VideoPlayer({
         onMouseDown={handleSurfaceMouseDown}
         onContextMenu={(e: React.MouseEvent) => e.preventDefault()}
         style={{
-          flex: 1,
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          // Leaves room for the control bar underneath; animates when the bar
+          // collapses into the compact floating bar (and back).
+          bottom: reservedBottom,
+          transition: `bottom ${VIDEO_COMPACT_BAR.durationMs}ms ${VIDEO_COMPACT_BAR.cssEasing}`,
           minHeight: 0,
-          position: 'relative',
           background: '#000',
-          overflow: 'hidden'
+          overflow: 'hidden',
+          // A drag on the picture is a gesture, never a text / image selection.
+          userSelect: 'none',
+          WebkitUserSelect: 'none'
         }}
       >
         <video
@@ -1779,8 +1811,27 @@ export function VideoPlayer({
           src={src}
           preload="metadata"
           playsInline
-          onClick={togglePlay}
-          onDoubleClick={toggleFullscreen}
+          draggable={false}
+          onClick={(e) => {
+            // A drag up / down gesture just fired: that release is not a play / pause click.
+            if (gesture.shouldSuppressClick()) return;
+            // Own double-click check: two clicks only count when they are close in
+            // time AND place, so a click a couple of seconds later is just a click.
+            const now = performance.now();
+            const last = lastClickRef.current;
+            const isDouble =
+              now - last.t < DOUBLE_CLICK_MS &&
+              Math.hypot(e.clientX - last.x, e.clientY - last.y) < DOUBLE_CLICK_SLOP_PX;
+            lastClickRef.current = isDouble
+              ? { t: 0, x: 0, y: 0 }
+              : { t: now, x: e.clientX, y: e.clientY };
+            // A double-click puts play / pause back (no indicator) and does what the F key does.
+            togglePlay(!isDouble);
+            if (isDouble) {
+              if (menusOpenRef.current) closeMenusNow();
+              toggleFullscreen();
+            }
+          }}
           onLoadedMetadata={(e) => {
             setDuration(e.currentTarget.duration || 0);
             setVideoSize({
@@ -1788,10 +1839,10 @@ export function VideoPlayer({
               h: e.currentTarget.videoHeight || 0
             });
             // Re-apply persisted settings after the element finishes loading.
-            e.currentTarget.volume = Math.max(0, Math.min(1, volume));
+            e.currentTarget.volume = Math.max(0, Math.min(1, volEff));
             e.currentTarget.muted = isMuted;
-            e.currentTarget.preservesPitch = afx.pitch === 0;
-            e.currentTarget.playbackRate = effectiveRate(speed, afx.pitch);
+            e.currentTarget.preservesPitch = shiftSt === 0;
+            e.currentTarget.playbackRate = effectiveRate(speedEff, shiftSt);
             e.currentTarget.loop = isLooping;
           }}
           onLoadedData={(e) => {
@@ -1807,11 +1858,29 @@ export function VideoPlayer({
           onPlay={() => {
             setIsPlaying(true);
             resumeGraph();
+            // Starting from the beginning (or after it ended) = a new random roll.
+            const vEl = videoRef.current;
+            if (anyModular(modularRef.current) && (!vEl || vEl.currentTime < 0.25 || vEl.ended)) {
+              rerollModular();
+            }
           }}
           onPause={() => setIsPlaying(false)}
           onEnded={() => setIsPlaying(false)}
           onTimeUpdate={(e) => {
-            if (!scrubbingRef.current) setCurrentTime(e.currentTarget.currentTime);
+            const t = e.currentTarget.currentTime;
+            const d = e.currentTarget.duration;
+            // Wrapped around from the end back to the start (loop): new random roll.
+            if (
+              anyModular(modularRef.current) && e.currentTarget.loop &&
+              Number.isFinite(d) &&
+              lastTimeRef.current > t &&
+              lastTimeRef.current > d - 0.6 &&
+              t < 0.6
+            ) {
+              rerollModular();
+            }
+            lastTimeRef.current = t;
+            if (!scrubbingRef.current) setCurrentTime(t);
           }}
           onDurationChange={(e) => setDuration(e.currentTarget.duration || 0)}
           onError={handleError}
@@ -1821,7 +1890,7 @@ export function VideoPlayer({
             objectFit: videoObjectFit,
             display: 'block',
             background: '#000',
-            cursor: error ? 'default' : 'pointer',
+            cursor: error ? 'default' : compact && !barShown ? 'none' : 'pointer',
             filter: videoFilter,
             transform: videoTransform,
             transformOrigin: '50% 50%'
@@ -1858,11 +1927,13 @@ export function VideoPlayer({
           </Center>
         )}
 
-        {overlayControls && controlBar}
+        {/* Play / pause circle + status pill (shared with AudioPlayer) */}
+        <PlaybackIndicators api={pi} />
       </Box>
 
-      {/* Control bar: under the video by default */}
-      {!overlayControls && controlBar}
+      {/* Control bar. Always the same element (so its collapse animation can run):
+          under the video by default, floating over it with overlayControls or in compact mode. */}
+      {controlBar}
 
       {/* Reset confirmation (R key or middle mouse button) */}
       <Modal
@@ -1877,8 +1948,7 @@ export function VideoPlayer({
       >
         <Stack gap="md">
           <Text size="sm">
-            Reset speed, volume, loop, scale and position, and all video and audio effects back to
-            defaults?
+            Reset speed, volume, scale and position, and all video and audio effects back to defaults? (Loop stays as it is.)
           </Text>
           <Group justify="flex-end" gap="xs">
             <Button variant="default" onClick={() => setConfirmResetOpen(false)}>

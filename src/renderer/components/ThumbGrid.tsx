@@ -10,6 +10,8 @@ import { modelFitsAnyBed } from '@shared/print-bed';
 import { formatBytes } from '../util/format';
 import { extColor } from '@shared/ext-colors';
 import { ipc } from '../ipc-client';
+import { FolderTile } from './FolderTile';
+import type { FolderTreeNode } from '@shared/types';
 
 export interface TileClickModifiers {
   shift: boolean;
@@ -28,6 +30,12 @@ interface Props {
   onTileContextMenu?: (fileId: number, x: number, y: number) => void;
   headerExtras?: React.ReactNode;
   printBeds?: PrintBed[];
+  emptyTitle?: string;
+  emptyHint?: string;
+  /** Subfolders to show first, as big folder tiles (Explorer style). */
+  folders?: FolderTreeNode[];
+  onOpenFolder?: (path: string) => void;
+  onFolderContextMenu?: (node: FolderTreeNode, x: number, y: number) => void;
 }
 
 const TILE_GAP = 8;
@@ -67,7 +75,12 @@ export function ThumbGrid({
   onTileClick,
   onTileContextMenu,
   headerExtras,
-  printBeds = []
+  printBeds = [],
+  emptyTitle,
+  emptyHint,
+  folders,
+  onOpenFolder,
+  onFolderContextMenu
 }: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [containerWidth, setContainerWidth] = useState(0);
@@ -111,7 +124,10 @@ export function ThumbGrid({
     tileWidth + LABEL_HEIGHT + TILE_PADDING * 2 + TILE_BORDER * 2
   );
 
-  const rowCount = Math.ceil(files.length / columns);
+  const folderList = folders ?? [];
+  const folderCount = folderList.length;
+  const totalItems = folderCount + files.length;
+  const rowCount = Math.ceil(totalItems / columns);
   const virtualizer = useVirtualizer({
     count: rowCount,
     getScrollElement: () => scrollRef.current,
@@ -140,6 +156,7 @@ export function ThumbGrid({
         }}
       >
         <Text size="xs" c="dimmed">
+          {folderCount > 0 && `${folderCount} ${folderCount === 1 ? 'folder' : 'folders'}${'\u00b7'.length ? ' \u00b7 ' : ''}`}
           {files.length} {files.length === 1 ? 'item' : 'items'}
           {selectedIds.size > 0 && ` · ${selectedIds.size} selected`}
         </Text>
@@ -179,12 +196,12 @@ export function ThumbGrid({
         ref={setScrollRef}
         style={{ flex: 1, minHeight: 0, overflow: 'auto', position: 'relative' }}
       >
-        {files.length === 0 ? (
+        {totalItems === 0 ? (
           <Center h="100%">
             <Stack align="center" gap={4}>
-              <Text c="dimmed">This folder has no indexed assets.</Text>
+              <Text c="dimmed">{emptyTitle ?? 'This folder has no indexed assets.'}</Text>
               <Text size="xs" c="dimmed">
-                Try selecting a parent folder or trigger a rescan from the toolbar.
+                {emptyHint ?? 'Try selecting a parent folder or trigger a rescan from the toolbar.'}
               </Text>
             </Stack>
           </Center>
@@ -199,7 +216,14 @@ export function ThumbGrid({
           >
             {virtualizer.getVirtualItems().map((virtualRow) => {
               const start = virtualRow.index * columns;
-              const rowItems = files.slice(start, start + columns);
+              const rowFolders = folderList.slice(
+                Math.min(start, folderCount),
+                Math.min(start + columns, folderCount)
+              );
+              const rowItems = files.slice(
+                Math.max(0, start - folderCount),
+                Math.max(0, start + columns - folderCount)
+              );
               return (
                 <div
                   key={virtualRow.key}
@@ -218,6 +242,18 @@ export function ThumbGrid({
                     boxSizing: 'border-box'
                   }}
                 >
+                  {rowFolders.map((f) => (
+                    <FolderTile
+                      key={'folder:' + f.path}
+                      node={f}
+                      tileHeight={tileHeight}
+                      onOpen={() => onOpenFolder?.(f.path)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        onFolderContextMenu?.(f, e.clientX, e.clientY);
+                      }}
+                    />
+                  ))}
                   {rowItems.map((file) => {
                     const meta = parseFileMeta(file.metadataJson);
                     return (

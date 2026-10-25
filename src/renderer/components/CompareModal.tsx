@@ -25,9 +25,8 @@ import { ModelViewer, type ModelViewerHandle } from '../three/ModelViewer';
 import { LIGHTING_PRESETS } from '../three/lighting-presets';
 import { HDRI_PRESETS, getHdriPreset } from '../three/hdri-presets';
 import { usePreferences, savePreferences } from '../util/use-preferences';
-import { GLASS_CLASS, GLASS_TOOLTIP_CLASS } from './glasseffect';
+import { GLASS_CLASS, GLASS_TOOLTIP_CLASS } from './Glasseffect';
 import { AudioPlayer } from './AudioPlayer';
-import { AudioVisualizer, createAudioVizStore, type AudioVizStore } from './AudioVisualizer';
 import { FileInfoBlock } from './MetadataPanel';
 import { TextPreview } from './TextPreview';
 import { VideoPlayer } from './VideoPlayer';
@@ -437,9 +436,6 @@ function ComparePane({
   showInfo: boolean;
 }) {
   const kind = paneKind(file);
-  // Each pane's player publishes to its own store, so the two visualizers are
-  // independent and both can play at once.
-  const [vizStore] = useState<AudioVizStore>(() => createAudioVizStore());
   const [infoOpen, setInfoOpen] = useState(true);
   return (
     <div
@@ -464,22 +460,14 @@ function ComparePane({
           ext={file.ext}
         />
       ) : kind === 'audio' ? (
-        <Stack h="100%" p="sm" gap="sm" style={{ minHeight: 0 }}>
-          <Box style={{ flex: 1, minHeight: 0 }}>
-            <AudioVisualizer bars={44} height="100%" store={vizStore} />
-          </Box>
-          <Box style={{ width: '100%', maxWidth: 640, alignSelf: 'center' }}>
-            <AudioPlayer
-              key={file.id}
-              libraryId={libraryId}
-              fileId={file.id}
-              filename={file.filename}
-              showHero={false}
-              scopedKeys
-              vizStore={vizStore}
-            />
-          </Box>
-        </Stack>
+        <AudioPlayer
+          key={file.id}
+          libraryId={libraryId}
+          fileId={file.id}
+          filename={file.filename}
+          stage="above"
+          scopedKeys
+        />
       ) : kind === 'text' ? (
         <TextPreview libraryId={libraryId} file={file} />
       ) : (

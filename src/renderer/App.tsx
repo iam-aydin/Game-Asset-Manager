@@ -11,14 +11,26 @@ import {
   Center,
   Divider,
   Group,
+  Modal,
   Progress,
-  ScrollArea,
   Select,
   Stack,
   Text,
-  Tooltip
+  Tooltip,
+  UnstyledButton
 } from '@mantine/core';
-import { IconHeart, IconCopy, IconPalette, IconRefresh, IconSettings, IconX } from '@tabler/icons-react';
+import {
+  IconArrowLeft,
+  IconArrowRight,
+  IconArrowUp,
+  IconHeart,
+  IconCopy,
+  IconPalette,
+  IconRefresh,
+  IconChevronDown,
+  IconSettings,
+  IconX
+} from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import {
   Panel,
@@ -48,9 +60,11 @@ import { DEFAULT_SORT, isSortSpec, type SortSpec } from '@shared/sort';
 import { COLOR_LABELS } from '@shared/ratings';
 import { LibrarySidebar } from './components/LibrarySidebar';
 import { Logo } from './components/Logo';
-import { FolderTree } from './components/FolderTree';
+import { FolderBrowser } from './components/FolderBrowser';
+import { FolderContextMenu, type FolderMenuState } from './components/FolderTile';
 import { TagsSidebar } from './components/TagsSidebar';
-import { CollectionsSidebar } from './components/CollectionsSidebar';
+import { ContainersPanel } from './components/ContainersPanel';
+import { FolderTreePane } from './components/FolderTreePane';
 import { FolderRowList } from './components/FavoritesSidebar';
 import { CollapsibleSection } from './components/CollapsibleSection';
 import { PrintBedFacet } from './components/PrintBedFacet';
@@ -75,7 +89,7 @@ import { FolderRenameModal } from './components/FolderRenameModal';
 // Glass look is always on for now. The on/off switch (theme menu) is commented
 // out below; search for "GLASS TOGGLE" to bring it back. NormalLook.tsx exports
 // the same names, so the switch renders one or the other.
-import { GlassStyles, GLASS_POPOVER_CLASS } from './components/Glasseffect';
+import { GlassStyles, GLASS_CLASS, GLASS_POPOVER_CLASS } from './components/Glasseffect';
 import { ScrollbarStyles } from './components/ScrollbarStyles';
 // GLASS TOGGLE: import { GlassStyles as NormalStyles } from './components/NormalLook';
 import { ipc } from './ipc-client';
@@ -252,6 +266,52 @@ interface ThumbLoad {
   done: number;
 }
 
+/** Fallback: build the folder tree on the client from a recursive file query. */
+function buildFolderTree(rootName: string, files: FileRecord[]): FolderTreeNode {
+  const root: FolderTreeNode = {
+    path: '',
+    name: rootName,
+    immediateFileCount: 0,
+    recursiveFileCount: 0,
+    children: []
+  };
+  const map = new Map<string, FolderTreeNode>([['', root]]);
+  const ensure = (path: string): FolderTreeNode => {
+    const hit = map.get(path);
+    if (hit) return hit;
+    const idx = path.lastIndexOf('/');
+    const parent = ensure(idx < 0 ? '' : path.slice(0, idx));
+    const node: FolderTreeNode = {
+      path,
+      name: path.slice(idx + 1),
+      immediateFileCount: 0,
+      recursiveFileCount: 0,
+      children: []
+    };
+    parent.children.push(node);
+    map.set(path, node);
+    return node;
+  };
+  for (const f of files) ensure(f.parentDir).immediateFileCount++;
+  const total = (n: FolderTreeNode): number => {
+    n.recursiveFileCount = n.immediateFileCount + n.children.reduce((s, c) => s + total(c), 0);
+    return n.recursiveFileCount;
+  };
+  total(root);
+  return root;
+}
+
+function findFolderNode(root: FolderTreeNode | null, path: string): FolderTreeNode | null {
+  if (!root) return null;
+  let cur = root;
+  for (const seg of path.split('/').filter(Boolean)) {
+    const want = cur.path ? `${cur.path}/${seg}` : seg;
+    const next = cur.children.find((c) => c.path === want);
+    if (!next) return null;
+    cur = next;
+  }
+  return cur;
+}
 export function App() {
   useEffect(() => installResizeBlur(), []);
   const [libraries, setLibraries] = useState<LibrarySummary[]>([]);
@@ -283,6 +343,7 @@ export function App() {
     { open: false, x: 0, y: 0 }
   );
   const [preferencesOpen, setPreferencesOpen] = useState(false);
+  const [librariesOpen, setLibrariesOpen] = useState(false);
   const [batchRenameOpen, setBatchRenameOpen] = useState(false);
   const [fullscreenOpen, setFullscreenOpen] = useState(false);
   const [compareOpen, setCompareOpen] = useState(false);
@@ -540,7 +601,26 @@ export function App() {
   }, [refreshLibraries]);
 
   const refreshTree = useCallback(async (libraryId: string) => {
-    const tree = await ipc.listFolders({ libraryId });
+    let tree: FolderTreeNode | null = null;
+    try {
+      tree = await ipc.listFolders({ libraryId });
+    } catch {
+      tree = null;
+    }
+    // listFolders came back empty/null: build the tree from the files instead.
+    if (!tree || tree.recursiveFileCount === 0) {
+      try {
+        const all = await ipc.queryFiles({
+          libraryId,
+          parentDir: '',
+          recursive: true,
+          limit: 100000
+        });
+        if (all.length > 0) tree = buildFolderTree('', all);
+      } catch {
+        // leave tree as-is
+      }
+    }
     setFolderTree(tree);
   }, []);
 
@@ -1060,6 +1140,92 @@ export function App() {
     setSelectedCollectionId(null);
   }, []);
 
+  // --- Navigation history (Explorer style) --------------------------------
+  // Every location change (folder / container / all-models) is recorded.
+  // Alt+Left = back, Alt+Right = forward, Alt+Up = up, Backspace = back,
+  // and the mouse back/forward buttons do the same.
+  type NavEntry = { folder: string; collectionId: number | null; scope: 'normal' | 'tree' };
+  const ROOT_ENTRY: NavEntry = { folder: '', collectionId: null, scope: 'normal' };
+  const [nav, setNav] = useState<{
+    libraryId: string | null;
+    stack: NavEntry[];
+    index: number;
+  }>({ libraryId: null, stack: [ROOT_ENTRY], index: 0 });
+  const navRef = useRef(nav);
+  navRef.current = nav;
+
+  useEffect(() => {
+    const entry: NavEntry = {
+      folder: selectedFolderPath,
+      collectionId: selectedCollectionId,
+      scope: viewScope
+    };
+    setNav((prev) => {
+      if (prev.libraryId !== selectedLibraryId) {
+        // New library always starts at its root.
+        return { libraryId: selectedLibraryId, stack: [ROOT_ENTRY], index: 0 };
+      }
+      const cur = prev.stack[prev.index];
+      if (
+        cur &&
+        cur.folder === entry.folder &&
+        cur.collectionId === entry.collectionId &&
+        cur.scope === entry.scope
+      ) {
+        return prev;
+      }
+      const stack = [...prev.stack.slice(0, prev.index + 1), entry].slice(-100);
+      return { ...prev, stack, index: stack.length - 1 };
+    });
+  }, [selectedLibraryId, selectedFolderPath, selectedCollectionId, viewScope]);
+
+  const applyNavEntry = useCallback((e: NavEntry) => {
+    setSelectedFolderPath(e.folder);
+    setSelectedCollectionId(e.collectionId);
+    setViewScope(e.scope);
+  }, []);
+
+  const goBack = useCallback(() => {
+    const n = navRef.current;
+    if (n.index <= 0) return;
+    const index = n.index - 1;
+    setNav({ ...n, index });
+    applyNavEntry(n.stack[index]);
+  }, [applyNavEntry]);
+
+  const goForward = useCallback(() => {
+    const n = navRef.current;
+    if (n.index >= n.stack.length - 1) return;
+    const index = n.index + 1;
+    setNav({ ...n, index });
+    applyNavEntry(n.stack[index]);
+  }, [applyNavEntry]);
+
+  const goUp = useCallback(() => {
+    if (viewScope !== 'normal' || selectedCollectionId != null) {
+      selectFolder('');
+      return;
+    }
+    if (selectedFolderPath === '') return;
+    const i = selectedFolderPath.lastIndexOf('/');
+    selectFolder(i < 0 ? '' : selectedFolderPath.slice(0, i));
+  }, [viewScope, selectedCollectionId, selectedFolderPath, selectFolder]);
+
+  useEffect(() => {
+    const onMouseUp = (e: MouseEvent) => {
+      if (e.button === 3) {
+        e.preventDefault();
+        goBack();
+      } else if (e.button === 4) {
+        e.preventDefault();
+        goForward();
+      }
+    };
+    window.addEventListener('mouseup', onMouseUp);
+    return () => window.removeEventListener('mouseup', onMouseUp);
+  }, [goBack, goForward]);
+  // --------------------------------------------------------------------------
+
   // Single source of truth for tile-click selection logic, shared by every
   // ThumbGrid interaction. Shift-range walks the visible `files` array between
   // the anchor and the click target (inclusive).
@@ -1442,6 +1608,28 @@ export function App() {
       if (miniModeRef.current) return;
       if (!selectedLibraryId) return;
 
+      // Do not react to shortcuts while a dialog is open.
+      if (target && target.closest('[role="dialog"]')) return;
+
+      // Alt+Left / Alt+Right / Alt+Up = back / forward / up (like Explorer)
+      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+        if (e.key === 'ArrowLeft') {
+          e.preventDefault();
+          goBack();
+          return;
+        }
+        if (e.key === 'ArrowRight') {
+          e.preventDefault();
+          goForward();
+          return;
+        }
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          goUp();
+          return;
+        }
+      }
+
       // Color labels — modifier + 1..5 = red..purple, modifier + 0 = clear.
       const mod = e.metaKey || e.ctrlKey;
       if (mod && !e.shiftKey && !e.altKey) {
@@ -1470,7 +1658,13 @@ export function App() {
       }
 
       // Delete / Backspace → trash the selection (with confirm).
-      if ((e.key === 'Delete' || e.key === 'Backspace') && !mod) {
+      // Backspace = Back (like Explorer). Only the Delete key trashes files.
+      if (e.key === 'Backspace' && !mod) {
+        e.preventDefault();
+        goBack();
+        return;
+      }
+      if (e.key === 'Delete' && !mod) {
         if (selectedFileIds.size === 0) return;
         e.preventDefault();
         requestDelete();
@@ -1524,7 +1718,10 @@ export function App() {
     handleBulkSetColorLabel,
     handleTileClick,
     requestDelete,
-    performDuplicate
+    performDuplicate,
+    goBack,
+    goForward,
+    goUp
   ]);
 
   const handleAddToCollection = useCallback(
@@ -1735,6 +1932,35 @@ export function App() {
     [files, selectedFileIds]
   );
 
+  const [folderMenu, setFolderMenu] = useState<FolderMenuState>({
+    opened: false,
+    x: 0,
+    y: 0,
+    path: '',
+    name: ''
+  });
+  const currentFolderNode = useMemo(
+    () => findFolderNode(folderTree, selectedFolderPath),
+    [folderTree, selectedFolderPath]
+  );
+  const parentFolderPath = selectedFolderPath.includes('/')
+    ? selectedFolderPath.slice(0, selectedFolderPath.lastIndexOf('/'))
+    : '';
+  const showFolders =
+    !!selectedLibrary?.online &&
+    viewScope === 'normal' &&
+    selectedCollectionId == null &&
+    !filterActive;
+  const hasSubfolders = (currentFolderNode?.children.length ?? 0) > 0;
+  // Folders shown as big tiles inside the grid (grid view only; list view keeps the strip).
+  const gridFolders = useMemo(() => {
+    if (!showFolders || viewMode !== 'grid') return undefined;
+    return [...(currentFolderNode?.children ?? [])].sort((a, b) =>
+      a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+    );
+  }, [showFolders, viewMode, currentFolderNode]);
+  // Kept for a future drag-to-move onto folder tiles (the old tree used it).
+  void requestMove;
   const leftSidebar = (
     <Stack
       gap={0}
@@ -1745,17 +1971,6 @@ export function App() {
           pushed by the folder tree expanding/collapsing because they sit
           above it in the flex column. */}
       <Stack gap="sm" style={{ padding: 8, flexShrink: 0 }}>
-        <LibrarySidebar
-          libraries={libraries}
-          selectedId={selectedLibraryId}
-          onSelect={setSelectedLibraryId}
-          onAdd={handleAdd}
-          onRename={handleRename}
-          onReveal={handleReveal}
-          onRescan={handleRescanLibrary}
-          onRemove={handleRemove}
-          onRemoveAndDeleteCache={handleRemoveAndDeleteCache}
-        />
         {selectedLibrary && (
           <ShowAllInLibraryLink
             libraryName={selectedLibrary.name}
@@ -1763,67 +1978,60 @@ export function App() {
             onClick={selectAllInCurrentLibrary}
           />
         )}
-        {selectedLibrary && (
-          <>
-            <Divider />
-            <CollectionsSidebar
-              collections={collections}
-              selectedCollectionId={selectedCollectionId}
-              onSelect={selectCollection}
-              onCreate={(name) => void handleCreateCollection(name)}
-              onCreateSmart={() => setSmartCollectionEditor({ open: true, existing: null })}
-              onEditSmart={(c) => setSmartCollectionEditor({ open: true, existing: c })}
-              onRename={(id, name) => void handleRenameCollection(id, name)}
-              onDelete={(id) => void handleDeleteCollection(id)}
-              onExportZip={(id) => void handleExportCollectionZip(id)}
-              onExportContactSheet={(id) => void handleExportCollectionContactSheet(id)}
-            />
-          </>
-        )}
       </Stack>
 
-      {/* Flexible middle: the folder tree. Auto-expansion to the selected
-          path can grow this section freely; the scroll area absorbs any
-          excess and the pinned-bottom area below stays put. */}
-      {selectedLibrary && (
-        <>
-          <Divider />
-          <div style={{ flex: 1, minHeight: 0 }}>
-            <ScrollArea h="100%" type="auto">
-              <div style={{ padding: 8 }}>
-                <FolderTree
-                  root={folderTree}
-                  selectedPath={
-                    viewScope !== 'normal' || selectedCollectionId != null
-                      ? null
-                      : selectedFolderPath
-                  }
-                  onSelect={selectFolder}
-                  onDropFiles={requestMove}
-                  onRevealFolder={handleRevealFolder}
-                  onRescanFolder={handleRescanFolder}
-                  onRenameFolder={handleRenameFolder}
-                />
-              </div>
-            </ScrollArea>
-          </div>
-        </>
-      )}
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+        {selectedLibrary ? (
+          <FolderTreePane
+            root={folderTree}
+            rootLabel={selectedLibrary.name}
+            selectedPath={
+              viewScope !== 'normal' || selectedCollectionId != null ? null : selectedFolderPath
+            }
+            onSelect={selectFolder}
+            isFavorite={isFavoriteFolder}
+            onToggleFavorite={toggleFavoriteFolder}
+            onRename={handleRenameFolder}
+            onReveal={handleRevealFolder}
+            onRescan={handleRescanFolder}
+          />
+        ) : (
+          <Text size="sm" c="dimmed" p="md">
+            No library yet. Click Libraries (top left) to add one.
+          </Text>
+        )}
+      </div>
 
       {/* Pinned bottom: Favorites/Recent (expanded by default) and
           Triage/Tags (collapsed by default). All collapsible so power users
           can free up vertical space when they don't need them. */}
       {selectedLibrary && (
         <div
+          className={GLASS_CLASS}
           style={{
             flexShrink: 0,
-            borderTop: '1px solid var(--mantine-color-dark-4)',
+            margin: 8,
             padding: 8,
-            background: 'var(--mantine-color-dark-7)'
+            maxHeight: '70%',
+            overflowY: 'auto',
+            scrollbarWidth: 'none'
           }}
         >
           <Stack gap="xs">
-            <CollapsibleSection title="Favorites" defaultExpanded>
+            <CollapsibleSection title="Containers">
+              <ContainersPanel
+                libraryId={selectedLibraryId}
+                collections={collections}
+                selectedCollectionId={selectedCollectionId}
+                onSelect={selectCollection}
+                onCreate={(name) => void handleCreateCollection(name)}
+                onRename={(id, name) => void handleRenameCollection(id, name)}
+                onDelete={(id) => void handleDeleteCollection(id)}
+                onExportZip={(id) => void handleExportCollectionZip(id)}
+                onExportContactSheet={(id) => void handleExportCollectionContactSheet(id)}
+              />
+            </CollapsibleSection>
+            <CollapsibleSection title="Favorites">
               <FolderRowList
                 paths={favoriteFolders}
                 selectedPath={selectedFolderPath}
@@ -1832,7 +2040,7 @@ export function App() {
                 isFavorite={isFavoriteFolder}
               />
             </CollapsibleSection>
-            <CollapsibleSection title="Recent" defaultExpanded>
+            <CollapsibleSection title="Recent">
               <FolderRowList
                 paths={visibleRecentFolders}
                 selectedPath={selectedFolderPath}
@@ -1912,6 +2120,13 @@ export function App() {
     <ThumbGrid
       libraryId={selectedLibraryId}
       files={files}
+      emptyTitle={hasSubfolders && showFolders ? 'No files directly in this folder.' : undefined}
+      emptyHint={hasSubfolders && showFolders ? 'Open a subfolder above.' : undefined}
+      folders={gridFolders}
+      onOpenFolder={selectFolder}
+      onFolderContextMenu={(node, x, y) =>
+        setFolderMenu({ opened: true, x, y, path: node.path, name: node.name })
+      }
       selectedIds={selectedFileIds}
       primaryId={primaryFileId}
       thumbVersions={thumbVersions}
@@ -1920,6 +2135,37 @@ export function App() {
     />
   );
 
+  const contentPane = (
+    <Stack gap={0} h="100%">
+      {showFolders && viewMode === 'list' && (
+        <FolderBrowser
+          node={currentFolderNode}
+          canGoUp={selectedFolderPath !== ''}
+          onUp={() => selectFolder(parentFolderPath)}
+          onOpen={selectFolder}
+          isFavorite={isFavoriteFolder}
+          onToggleFavorite={toggleFavoriteFolder}
+          onRename={handleRenameFolder}
+          onReveal={handleRevealFolder}
+          onRescan={handleRescanFolder}
+        />
+      )}
+      <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
+        <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column' }}>
+          {gridPane}
+        </div>
+      </div>
+      <FolderContextMenu
+        state={folderMenu}
+        onClose={() => setFolderMenu((m) => ({ ...m, opened: false }))}
+        isFavorite={isFavoriteFolder}
+        onToggleFavorite={toggleFavoriteFolder}
+        onRename={handleRenameFolder}
+        onReveal={handleRevealFolder}
+        onRescan={handleRescanFolder}
+      />
+    </Stack>
+  );
   const previewPane = (
     <PreviewPane
     
@@ -1971,16 +2217,65 @@ export function App() {
       <AppShell.Header>
         <Stack gap={0} h="100%">
           <Group h={44} px="md" gap="md" wrap="nowrap">
-            <Group gap={8} wrap="nowrap" style={{ flexShrink: 0 }}>
-              <Logo size={22} />
-              <Text fw={600}>Game Asset Manager</Text>
+            <Tooltip label="Switch or add libraries">
+              <UnstyledButton
+                onClick={() => setLibrariesOpen(true)}
+                aria-label="Libraries"
+                style={{
+                  flexShrink: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '4px 10px',
+                  borderRadius: 8,
+                  background: 'color-mix(in srgb, var(--mantine-color-indigo-4) 12%, transparent)',
+                  border: '1px solid color-mix(in srgb, var(--mantine-color-indigo-4) 30%, transparent)'
+                }}
+              >
+                <Logo size={22} />
+                <Text fw={600}>Libraries</Text>
+                <IconChevronDown size={14} />
+              </UnstyledButton>
+            </Tooltip>            <Divider orientation="vertical" />
+            <Group gap={2} wrap="nowrap" style={{ flexShrink: 0 }}>
+              <Tooltip label="Back (Alt+Left)">
+                <ActionIcon
+                  variant="subtle"
+                  onClick={goBack}
+                  disabled={nav.index <= 0}
+                  aria-label="Back"
+                >
+                  <IconArrowLeft size={16} />
+                </ActionIcon>
+              </Tooltip>
+              <Tooltip label="Forward (Alt+Right)">
+                <ActionIcon
+                  variant="subtle"
+                  onClick={goForward}
+                  disabled={nav.index >= nav.stack.length - 1}
+                  aria-label="Forward"
+                >
+                  <IconArrowRight size={16} />
+                </ActionIcon>
+              </Tooltip>
+              <Tooltip label="Up (Alt+Up)">
+                <ActionIcon
+                  variant="subtle"
+                  onClick={goUp}
+                  disabled={
+                    selectedFolderPath === '' && viewScope === 'normal' && selectedCollectionId == null
+                  }
+                  aria-label="Up one folder"
+                >
+                  <IconArrowUp size={16} />
+                </ActionIcon>
+              </Tooltip>
             </Group>
-            <Divider orientation="vertical" />
-            <Breadcrumbs
-              library={selectedLibrary}
+            <Breadcrumbs              library={selectedLibrary}
               folderPath={selectedFolderPath}
               collectionName={selectedCollection?.name ?? null}
               scope={viewScope}
+              onNavigate={selectFolder}
             />
             <div style={{ flex: 1 }} />
             <CacheRebuildStatus status={cacheStatus} onCancel={handleCancelCacheRebuild} />
@@ -2155,7 +2450,7 @@ export function App() {
                     borderTop: '1px solid var(--mantine-color-dark-4)'
                   }}
                 >
-                  {gridPane}
+                  {contentPane}
                 </div>
               </Panel>
             </PanelGroup>
@@ -2166,6 +2461,32 @@ export function App() {
           </Panel>
         </PanelGroup>
       </AppShell.Main>
+
+      <Modal
+        opened={librariesOpen}
+        onClose={() => setLibrariesOpen(false)}
+        withCloseButton={false}
+        centered
+        size={420}
+        radius="lg"
+        overlayProps={{ backgroundOpacity: 0.45, blur: 6 }}
+        classNames={{ content: GLASS_POPOVER_CLASS }}
+      >
+        <LibrarySidebar
+          libraries={libraries}
+          selectedId={selectedLibraryId}
+          onSelect={(id) => {
+            setSelectedLibraryId(id);
+            setLibrariesOpen(false);
+          }}
+          onAdd={handleAdd}
+          onRename={handleRename}
+          onReveal={handleReveal}
+          onRescan={handleRescanLibrary}
+          onRemove={handleRemove}
+          onRemoveAndDeleteCache={handleRemoveAndDeleteCache}
+        />
+      </Modal>
 
       <PreferencesModal
         opened={preferencesOpen}
@@ -2295,7 +2616,7 @@ function ShowAllInLibraryLink({
         color: active ? 'var(--mantine-color-indigo-3)' : 'var(--mantine-color-gray-3)',
         background: active ? 'var(--mantine-color-dark-5)' : 'transparent',
         fontWeight: active ? 600 : 500,
-        whiteSpace: 'nowrap'
+        whiteSpace: 'normal'
       }}
       title={`Show all models in current library: ${libraryName}`}
     >
@@ -2309,12 +2630,14 @@ function Breadcrumbs({
   library,
   folderPath,
   collectionName,
-  scope
+  scope,
+  onNavigate
 }: {
   library: LibrarySummary | null;
   folderPath: string;
   collectionName: string | null;
   scope: 'normal' | 'tree';
+  onNavigate: (path: string) => void;
 }) {
   if (!library)
     return (
@@ -2325,10 +2648,23 @@ function Breadcrumbs({
   const segments =
     scope === 'tree' || collectionName ? [] : folderPath ? folderPath.split('/') : [];
   return (
-    <Group gap={4} wrap="nowrap" style={{ minWidth: 0, overflow: 'hidden' }}>
-      <Text size="sm" fw={500} truncate>
-        {library.name}
-      </Text>
+    <Group
+      gap={4}
+      wrap="nowrap"
+      style={{
+        minWidth: 0,
+        overflow: 'hidden',
+        padding: '4px 14px',
+        borderRadius: 999,
+        background: 'color-mix(in srgb, var(--mantine-color-indigo-4) 16%, transparent)',
+        border: '1px solid color-mix(in srgb, var(--mantine-color-indigo-4) 45%, transparent)',
+        boxShadow: 'inset 0 1px 0 rgba(255, 255, 255, 0.12)'
+      }}
+    >      <UnstyledButton onClick={() => onNavigate('')}>
+        <Text size="sm" fw={600} c="indigo.2" truncate>
+          {library.name}
+        </Text>
+      </UnstyledButton>
       {scope === 'tree' && (
         <Group gap={4} wrap="nowrap">
           <Text size="sm" c="dimmed">
@@ -2354,15 +2690,16 @@ function Breadcrumbs({
           <Text size="sm" c="dimmed">
             /
           </Text>
-          <Text size="sm" truncate>
-            {seg}
-          </Text>
+          <UnstyledButton onClick={() => onNavigate(segments.slice(0, i + 1).join('/'))}>
+            <Text size="sm" c="indigo.1" truncate>
+              {seg}
+            </Text>
+          </UnstyledButton>
         </Group>
       ))}
     </Group>
   );
 }
-
 function ScanStatusBadge({
   status,
   onCancel

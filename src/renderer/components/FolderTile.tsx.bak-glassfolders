@@ -1,0 +1,250 @@
+import { useId, useState } from 'react';
+import type React from 'react';
+import { Menu } from '@mantine/core';
+import { IconEdit, IconFolderOpen, IconRefresh, IconStar } from '@tabler/icons-react';
+import type { FolderTreeNode } from '@shared/types';
+
+const TILE_PADDING = 6;
+const TILE_BORDER = 2;
+const LABEL_HEIGHT = 34;
+
+/**
+ * Folder color follows the theme. It reads --wh3d-folder-accent if a theme
+ * defines it, otherwise the theme's indigo accent. Every shade is derived from
+ * that one color with color-mix, so switching themes recolors all folders.
+ */
+const ACCENT = 'var(--wh3d-folder-accent, var(--mantine-color-indigo-4))';
+const mix = (pct: number, other: string) => `color-mix(in srgb, ${ACCENT} ${pct}%, ${other})`;
+
+export function FolderTile({
+  node,
+  tileHeight,
+  onOpen,
+  onContextMenu
+}: {
+  node: FolderTreeNode;
+  tileHeight: number;
+  onOpen: () => void;
+  onContextMenu: (e: React.MouseEvent) => void;
+}) {
+  const uid = useId().replace(/[^a-zA-Z0-9]/g, '');
+  const [hover, setHover] = useState(false);
+  const [focus, setFocus] = useState(false);
+  const count = node.recursiveFileCount;
+
+  return (
+    <button
+      type="button"
+      title={node.path}
+      onDoubleClick={onOpen}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          onOpen();
+        }
+      }}
+      onContextMenu={onContextMenu}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      onFocus={() => setFocus(true)}
+      onBlur={() => setFocus(false)}
+      style={{
+        all: 'unset',
+        cursor: 'pointer',
+        display: 'flex',
+        flexDirection: 'column',
+        height: tileHeight,
+        padding: TILE_PADDING,
+        borderRadius: 6,
+        border: focus
+          ? `${TILE_BORDER}px solid var(--mantine-color-indigo-5)`
+          : `${TILE_BORDER}px solid transparent`,
+        background: focus
+          ? 'var(--mantine-color-dark-5)'
+          : hover
+            ? 'var(--mantine-color-dark-6)'
+            : 'transparent',
+        boxSizing: 'border-box',
+        overflow: 'hidden'
+      }}
+    >
+      <div
+        style={{
+          position: 'relative',
+          width: '100%',
+          aspectRatio: '1 / 1',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center'
+        }}
+      >
+        <svg
+          viewBox="0 0 200 160"
+          style={{
+            width: '100%',
+            height: 'auto',
+            display: 'block',
+            filter: 'drop-shadow(0 4px 6px rgba(0,0,0,0.45))'
+          }}
+        >
+          <defs>
+            <linearGradient id={`${uid}b`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" style={{ stopColor: mix(60, 'black') }} />
+              <stop offset="1" style={{ stopColor: mix(46, 'black') }} />
+            </linearGradient>
+            <linearGradient id={`${uid}f`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" style={{ stopColor: mix(72, 'white') }} />
+              <stop offset="1" style={{ stopColor: mix(90, 'black') }} />
+            </linearGradient>
+          </defs>
+
+          {/* back panel with the tab */}
+          <path
+            d="M12 22 Q12 10 24 10 H76 Q84 10 90 17 L96 24 H176 Q188 24 188 36 V136 Q188 146 176 146 H24 Q12 146 12 136 Z"
+            fill={`url(#${uid}b)`}
+          />
+          {/* front panel */}
+          <path
+            d="M8 52 Q8 40 20 40 H180 Q192 40 192 52 V138 Q192 150 180 150 H20 Q8 150 8 138 Z"
+            fill={`url(#${uid}f)`}
+          />
+          {/* top edge highlight */}
+          <path d="M20 41.5 H180" stroke="rgba(255,255,255,0.55)" strokeWidth="1.5" fill="none" />
+          {/* bottom edge shade */}
+          <path d="M20 148.5 H180" stroke="rgba(0,0,0,0.18)" strokeWidth="1.5" fill="none" />
+
+          {/* pixel game-controller emblem */}
+          <g style={{ fill: mix(55, 'black') }} opacity="0.55">
+            <rect x="68" y="86" width="64" height="36" rx="3" />
+            <rect x="108" y="76" width="4" height="10" />
+            <rect x="108" y="72" width="12" height="4" />
+            <rect x="116" y="64" width="4" height="8" />
+          </g>
+          <g style={{ fill: mix(55, 'white') }} opacity="0.85">
+            <rect x="77" y="102" width="18" height="4" />
+            <rect x="84" y="95" width="4" height="18" />
+            <rect x="106" y="102" width="5" height="5" />
+            <rect x="117" y="102" width="5" height="5" />
+          </g>
+        </svg>
+
+        {count > 0 && (
+          <div
+            style={{
+              position: 'absolute',
+              top: 4,
+              right: 4,
+              padding: '1px 6px',
+              borderRadius: 6,
+              fontSize: 9,
+              fontWeight: 700,
+              letterSpacing: 0.5,
+              lineHeight: 1.5,
+              color: 'var(--mantine-color-white)',
+              background: 'rgba(12, 13, 16, 0.55)',
+              WebkitBackdropFilter: 'blur(8px) saturate(140%)',
+              backdropFilter: 'blur(8px) saturate(140%)',
+              border: '1px solid rgba(255, 255, 255, 0.22)',
+              textShadow: '0 1px 3px rgba(0, 0, 0, 0.6)',
+              pointerEvents: 'none'
+            }}
+          >
+            {count}
+          </div>
+        )}
+      </div>
+      <div style={{ height: LABEL_HEIGHT, marginTop: 4, minWidth: 0, overflow: 'hidden' }}>
+        <div
+          style={{
+            fontSize: 12,
+            lineHeight: 1.3,
+            color: 'var(--mantine-color-text)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap'
+          }}
+        >
+          {node.name}
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--mantine-color-dimmed)' }}>
+          {count} {count === 1 ? 'file' : 'files'}
+        </div>
+      </div>
+    </button>
+  );
+}
+
+export interface FolderMenuState {
+  opened: boolean;
+  x: number;
+  y: number;
+  path: string;
+  name: string;
+}
+
+export function FolderContextMenu({
+  state,
+  onClose,
+  isFavorite,
+  onToggleFavorite,
+  onRename,
+  onReveal,
+  onRescan
+}: {
+  state: FolderMenuState;
+  onClose: () => void;
+  isFavorite: (path: string) => boolean;
+  onToggleFavorite: (path: string) => void;
+  onRename: (path: string) => void;
+  onReveal: (path: string) => void;
+  onRescan: (path: string) => void;
+}) {
+  const run = (fn: (p: string) => void) => () => {
+    const p = state.path;
+    onClose();
+    fn(p);
+  };
+  return (
+    <Menu
+      opened={state.opened}
+      onChange={(open) => {
+        if (!open) onClose();
+      }}
+      position="bottom-start"
+      floatingStrategy="fixed"
+      offset={0}
+      withinPortal
+      shadow="md"
+      width={210}
+    >
+      <Menu.Target>
+        <div
+          style={{
+            position: 'fixed',
+            top: state.y,
+            left: state.x,
+            width: 1,
+            height: 1,
+            pointerEvents: 'none'
+          }}
+        />
+      </Menu.Target>
+      <Menu.Dropdown>
+        <Menu.Label>{state.name || 'Folder'}</Menu.Label>
+        <Menu.Item leftSection={<IconStar size={14} />} onClick={run(onToggleFavorite)}>
+          {isFavorite(state.path) ? 'Remove from favorites' : 'Add to favorites'}
+        </Menu.Item>
+        <Menu.Item leftSection={<IconEdit size={14} />} onClick={run(onRename)}>
+          Rename...
+        </Menu.Item>
+        <Menu.Item leftSection={<IconFolderOpen size={14} />} onClick={run(onReveal)}>
+          Show in folder
+        </Menu.Item>
+        <Menu.Divider />
+        <Menu.Item leftSection={<IconRefresh size={14} />} onClick={run(onRescan)}>
+          Rescan folder
+        </Menu.Item>
+      </Menu.Dropdown>
+    </Menu>
+  );
+}

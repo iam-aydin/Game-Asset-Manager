@@ -7,7 +7,6 @@ import {
   type ReactNode
 } from 'react';
 import { AudioPlayer } from './AudioPlayer';
-import { AudioVisualizer } from './AudioVisualizer';
 import { TextPreview } from './TextPreview';
 import { VideoPlayer } from './VideoPlayer';
 import {
@@ -55,8 +54,10 @@ import { flushSync } from 'react-dom';
 import {
   MINI_CHROME_TRANSITION,
   PREVIEW_TRANSITION,
+  VIDEO_COMPACT_BAR,
   miniChromeCss,
   miniChromeTransition,
+  videoChromeTransition,
   previewTransitionCss,
   pulseResizeBlur,
   runPreviewTransition
@@ -67,6 +68,7 @@ import {
 const animateLayout = (fn: () => void) => runPreviewTransition(() => flushSync(fn));
 import { ipc } from '../ipc-client';
 import { usePreferences, savePreferences } from '../util/use-preferences';
+import { useVerticalDragGesture } from '../util/gestures';
 import { DEFAULT_RENDER_QUALITY } from '@shared/render-quality';
 
 // Must match AppShell header height in App.tsx. The expanded video preview
@@ -75,6 +77,9 @@ const APP_HEADER_HEIGHT = 88;
 
 // Mini player header (the native OS title bar sits above it).
 const MINI_HEADER_H = 28;
+
+// GAM-MINI-IDLE: the mini player opens with its options hidden (O key / eye button toggles).
+const MINI_OPTIONS_HIDDEN_BY_DEFAULT = true;
 
 /** Arrow pair icon for the mini player's hide / show interface button.
  *  Shown state (click to hide): arrows pointing outward, "← →", as the bars
@@ -196,8 +201,39 @@ export function PreviewPane({
     if (!mini) {
       setMiniMore(false);
       setMiniChromeHidden(false);
+    } else {
+      setMiniChromeHidden(MINI_OPTIONS_HIDDEN_BY_DEFAULT);
     }
   }, [mini]);
+
+  // GAM-MINI-IDLE: with the options hidden, the header buttons fade out after 1 s
+  // without mouse movement (same rule as the video slider) and return on movement.
+  const [miniUiShown, setMiniUiShown] = useState(true);
+  const miniUiHoverRef = useRef(false);
+  const miniUiTimerRef = useRef<number | undefined>(undefined);
+  const armMiniUiHide: () => void = useCallback(() => {
+    window.clearTimeout(miniUiTimerRef.current);
+    miniUiTimerRef.current = window.setTimeout(() => {
+      if (miniUiHoverRef.current) {
+        armMiniUiHide();
+        return;
+      }
+      setMiniUiShown(false);
+    }, VIDEO_COMPACT_BAR.autoHideMs);
+  }, []);
+  useEffect(() => {
+    window.clearTimeout(miniUiTimerRef.current);
+    setMiniUiShown(true);
+    if (!(mini && miniChromeHidden)) return undefined;
+    // Let the hide animation finish, then start the 1 s countdown.
+    miniUiTimerRef.current = window.setTimeout(armMiniUiHide, VIDEO_COMPACT_BAR.durationMs);
+    return () => window.clearTimeout(miniUiTimerRef.current);
+  }, [mini, miniChromeHidden, armMiniUiHide]);
+  const handleMiniPointerMove = () => {
+    if (!(mini && miniChromeHidden)) return;
+    setMiniUiShown(true);
+    armMiniUiHide();
+  };
 
   // Video/audio/3D "expand" and "fullscreen": the preview fills the app window
   // without using real OS/browser fullscreen, so both can be animated.
@@ -206,14 +242,6 @@ export function PreviewPane({
   layoutRef.current = layout;
   // Every expand/shrink/fullscreen goes through these so it gets the animation
   // (see transition.ts). Both do nothing while the mini player is active.
-  const toggleExpanded = useCallback(() => {
-    if (miniRef.current) return;
-    animateLayout(() => setLayout((m) => (m === 'normal' ? 'expanded' : 'normal')));
-  }, []);
-  const toggleFullscreen = useCallback(() => {
-    if (miniRef.current) return;
-    animateLayout(() => setLayout((m) => (m === 'full' ? 'normal' : 'full')));
-  }, []);
 
   // Always-on-top applies to the mini player only. Default ON each time you
   // enter it; Ctrl+T toggles it.
@@ -224,6 +252,11 @@ export function PreviewPane({
   // dropped (which made the button feel like it needed two clicks), it is
   // remembered and applied as soon as the current transition finishes.
   const pendingRef = useRef<boolean | null>(null);
+  // Layout to land in once the mini player has closed (F / T pressed, or the
+  // drag-up gesture, while in mini). It is applied in the SAME React commit
+  // that leaves mini, so the preview never flashes through the normal layout
+  // and never starts a view transition while the window is still resizing.
+  const afterMiniRef = useRef<PreviewLayout | null>(null);
 
   const applyMini = useCallback((on: boolean) => {
     if (on === miniRef.current) return;
@@ -239,6 +272,8 @@ export function PreviewPane({
     };
 
     if (on) {
+      // A stale "after mini" request must not fire on the next close.
+      afterMiniRef.current = null;
       // Swap to the player layout immediately; the window shrinks around it.
       pinnedRef.current = true;
       setPinned(true);
@@ -246,10 +281,15 @@ export function PreviewPane({
       onMiniModeChangeRef.current?.(true);
       void ipc.setMiniMode(true).finally(done);
     } else {
-      // Keep the player layout until the window has finished growing back.
       void ipc.setMiniMode(false).finally(() => {
-        pulseResizeBlur(); // cover the layout swap back to the full UI
-        setMini(false);
+        pulseResizeBlur();
+        const target = afterMiniRef.current;
+        afterMiniRef.current = null;
+        // One commit: leave mini AND go to the requested layout (if any).
+        flushSync(() => {
+          setMini(false);
+          if (target) setLayout(target);
+        });
         onMiniModeChangeRef.current?.(false);
         done();
       });
@@ -267,7 +307,24 @@ export function PreviewPane({
     },
     [applyMini]
   );
+  const toggleExpanded = useCallback(() => {
+    if (miniRef.current) {
+      afterMiniRef.current = 'expanded';
+      toggleMini(false);
+      return;
+    }
+    animateLayout(() => setLayout((m) => (m === 'normal' ? 'expanded' : 'normal')));
+  }, [toggleMini]);
 
+  const toggleFullscreen = useCallback(() => {
+    if (miniRef.current) {
+      afterMiniRef.current = 'full';
+      toggleMini(false);
+      return;
+    }
+    animateLayout(() => setLayout((m) => (m === 'full' ? 'normal' : 'full')));
+  }, [toggleMini]);
+  
   const togglePinned = useCallback(() => {
     if (!miniRef.current) return;
     const next = !pinnedRef.current;
@@ -325,9 +382,17 @@ export function PreviewPane({
       if (!hasFile) return;
 
       const key = e.key.toLowerCase();
+      // O: hide / show the options (mini player only).
+      if (key === 'o') {
+        if (miniRef.current) {
+          e.preventDefault();
+          if (!isVideoFile && !isAudioFile) pulseResizeBlur();
+          setMiniChromeHidden((v) => !v);
+        }
+        return;
+      }
       if (key === 't') {
         e.preventDefault();
-        if (miniRef.current) return;
         // T does nothing for audio (its fullscreen is F).
         if (isAudioFile) return;
         // Video, 3D models, images and text all expand in place (animated).
@@ -340,7 +405,6 @@ export function PreviewPane({
       } else if (key === 'f' && isModelFile) {
         // For 3D models F does exactly what T does (animated in-place expand).
         e.preventDefault();
-        if (miniRef.current) return;
         toggleExpanded();
       } else if (key === 'f' && isAudioFile) {
         // Audio fullscreen is F only (video handles its own F in VideoPlayer).
@@ -414,6 +478,13 @@ export function PreviewPane({
 
   // Interface hidden in the mini player (3D models only).
   const hideChrome = mini && miniChromeHidden;
+  const videoCompact = hideChrome && isVideo;
+  const audioCompact = hideChrome && isAudio;
+
+  // GAM-COMPACT-V2: video files use the long 1.25 s timeline for the header too.
+  const chromeT = (...props: string[]) =>
+    isVideo || isAudio ? videoChromeTransition(...props) : miniChromeTransition(...props);
+
 
   // Same rule for audio and video: autoplay only when this exact file was
   // just clicked (not on the initial folder auto-select, not on shift/ctrl).
@@ -707,7 +778,11 @@ export function PreviewPane({
       <style>{miniChromeCss()}</style>
       {/* Main Preview Container (same element in every mode, so players and the
           3D viewer never remount when switching between normal/expanded/full/mini) */}
-      <div style={animatedContainerStyle} data-mini-chrome={hideChrome ? 'hidden' : 'shown'}>
+      <div
+        style={animatedContainerStyle}
+        data-mini-chrome={hideChrome ? 'hidden' : 'shown'}
+        onMouseMove={handleMiniPointerMove}
+      >
         {mini && (
           // Outer box takes the header's space in the layout and animates to 0
           // when the interface is hidden, so the viewer grows to fill it. The
@@ -719,7 +794,7 @@ export function PreviewPane({
               zIndex: 20,
               flexShrink: 0,
               height: hideChrome ? 0 : MINI_HEADER_H,
-              transition: miniChromeTransition('height')
+              transition: chromeT('height')
             }}
           >
           <div
@@ -748,7 +823,7 @@ export function PreviewPane({
                 borderBottom: '1px solid var(--mantine-color-dark-4)',
                 opacity: hideChrome ? 0 : 1,
                 transform: hideChrome ? 'translateY(-100%)' : 'translateY(0)',
-                transition: miniChromeTransition('opacity', 'transform'),
+                transition: chromeT('opacity', 'transform'),
                 pointerEvents: 'none'
               }}
             />
@@ -776,7 +851,7 @@ export function PreviewPane({
                 transform: hideChrome
                   ? `translateX(-${MINI_CHROME_TRANSITION.titleSlidePx}px)`
                   : 'translateX(0)',
-                transition: miniChromeTransition('opacity', 'transform'),
+                transition: chromeT('opacity', 'transform'),
                 pointerEvents: 'none'
               }}
             >
@@ -786,6 +861,13 @@ export function PreviewPane({
             {/* Header buttons: never hidden. When the interface is hidden they
                 get their own backing so they stay readable over the viewer. */}
             <div
+              onMouseEnter={() => {
+                miniUiHoverRef.current = true;
+              }}
+              onMouseLeave={() => {
+                miniUiHoverRef.current = false;
+                if (mini && miniChromeHidden) armMiniUiHide();
+              }}
               style={{
                 position: 'relative',
                 display: 'flex',
@@ -793,11 +875,22 @@ export function PreviewPane({
                 gap: 6,
                 height: MINI_HEADER_H,
                 paddingLeft: 6,
+                opacity: hideChrome && !miniUiShown ? 0 : 1,
+                pointerEvents: hideChrome && !miniUiShown ? 'none' : 'auto',
+                filter: hideChrome && !miniUiShown ? 'blur(4px)' : 'none',
                 borderRadius: '0 0 0 8px',
-                background: hideChrome
-                  ? 'var(--wh3d-overlay-bg, rgba(16, 17, 19, 0.85))'
-                  : 'transparent',
-                transition: miniChromeTransition('background-color', 'background')
+                // GAM-HEADER-GLASS: buttons stay; when the interface is hidden they sit on glass.
+                background: hideChrome ? 'rgba(128, 128, 128, 0.16)' : 'transparent',
+                backdropFilter: hideChrome ? 'blur(16px) saturate(170%)' : 'none',
+                WebkitBackdropFilter: hideChrome ? 'blur(16px) saturate(170%)' : 'none',
+                boxShadow: hideChrome
+                  ? 'inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 6px 18px rgba(0, 0, 0, 0.28)'
+                  : 'none',
+                borderLeft: hideChrome ? '1px solid rgba(255, 255, 255, 0.16)' : '1px solid transparent',
+                borderBottom: hideChrome ? '1px solid rgba(255, 255, 255, 0.16)' : '1px solid transparent',
+                transition:
+                  chromeT('background-color', 'background', 'backdrop-filter', '-webkit-backdrop-filter', 'box-shadow', 'border-color') +
+                  ', opacity 260ms ease, filter 260ms ease'
               }}
             >
               {/* Shown for every file type. For 3D models it hides the file
@@ -806,29 +899,21 @@ export function PreviewPane({
               {(
                 <Tooltip
                   label={
-                    hideChrome
-                      ? isModel
-                        ? 'Show interface'
-                        : 'Show title bar'
-                      : isModel
-                        ? 'Hide interface'
-                        : 'Hide title bar'
+                    hideChrome ? 'Show options (O)' : 'Hide options (O)'
                   }
                   withinPortal
                 >
                   <ActionIcon
-                    className={GLASS_BUTTON_CLASS}
-                    data-glass-active={hideChrome ? 'true' : 'false'}
-                    variant={hideChrome ? 'light' : 'subtle'}
+                    variant="subtle"
                     color={hideChrome ? 'indigo' : 'gray'}
                     size="sm"
                     onClick={() => {
                       // Frost the whole window while the interface collapses/returns,
                       // same blur layer the expand / mini-player changes use.
-                      pulseResizeBlur();
+                      if (!isVideo && !isAudio) pulseResizeBlur();
                       setMiniChromeHidden((v) => !v);
                     }}
-                    aria-label={hideChrome ? 'Show interface' : 'Hide interface'}
+                    aria-label={hideChrome ? 'Show options' : 'Hide options'}
                     aria-pressed={hideChrome}
                   >
                     <ChromeToggleIcon hidden={hideChrome} size={14} />
@@ -840,9 +925,7 @@ export function PreviewPane({
                 withinPortal
               >
                 <ActionIcon
-                  className={GLASS_BUTTON_CLASS}
-                  data-glass-active={pinned ? 'true' : 'false'}
-                  variant={pinned ? 'light' : 'subtle'}
+                  variant="subtle"
                   color={pinned ? 'indigo' : 'gray'}
                   size="sm"
                   onClick={togglePinned}
@@ -890,6 +973,7 @@ export function PreviewPane({
               isMini={mini}
               onFullscreen={toggleFullscreen}
               isFullscreen={isFull}
+              compact={videoCompact}
             />
           ) : isAudio ? (
             <AudioPreview
@@ -903,6 +987,7 @@ export function PreviewPane({
               isMini={mini}
               onFullscreen={toggleFullscreen}
               isFullscreen={isFull}
+              compact={audioCompact}
             />
           ) : isText ? (
             // The expand / mini buttons live inside the text card's header, to
@@ -1052,7 +1137,7 @@ export function PreviewPane({
               display: 'grid',
               flexShrink: 0,
               gridTemplateRows: hideChrome ? '0fr' : '1fr',
-              transition: miniChromeTransition('grid-template-rows')
+              transition: chromeT('grid-template-rows')
             }}
           >
             <div
@@ -1063,7 +1148,7 @@ export function PreviewPane({
                 transform: hideChrome
                   ? `translateY(${MINI_CHROME_TRANSITION.stripSlidePercent}%)`
                   : 'translateY(0)',
-                transition: miniChromeTransition('opacity', 'transform')
+                transition: chromeT('opacity', 'transform')
               }}
             >
               {controlStrip}
@@ -1098,7 +1183,8 @@ function AudioPreview({
   onMini,
   isMini,
   onFullscreen,
-  isFullscreen
+  isFullscreen,
+  compact
 }: {
   libraryId: string;
   file: FileRecord;
@@ -1109,29 +1195,49 @@ function AudioPreview({
   /** Fill the whole app window (animated, same as video's F). */
   onFullscreen?: () => void;
   isFullscreen?: boolean;
+  /** Mini player with the interface hidden: the bar collapses to the seek slider. */
+  compact: boolean;
 }) {
   const autoPlay = activeAudio?.fileId === file.id ? activeAudio.autoPlay : false;
 
+  // Same drag gesture as the video player: up = fullscreen, down = mini player.
+  const gesture = useVerticalDragGesture({
+    onGesture: (dir) => {
+      if (dir === 'up') {
+        if (!isFullscreen) onFullscreen?.();
+      } else if (!isMini) {
+        onMini?.();
+      }
+    }
+  });
+
+  // The player draws its own visualizer stage and floats the bar over the
+  // bottom of it, so this only supplies the gesture wrapper.
   return (
-    <Stack h="100%" p="sm" gap="sm" style={{ minHeight: 0 }}>
-      <Box style={{ flex: 1, minHeight: 0 }}>
-        <AudioVisualizer bars={44} height="100%" />
-      </Box>
-      <Box style={{ width: '100%', maxWidth: 640, alignSelf: 'center' }}>
-        <AudioPlayer
-          key={file.id}
-          libraryId={libraryId}
-          fileId={file.id}
-          filename={file.filename}
-          showHero={false}
-          autoPlay={autoPlay}
-          onMini={onMini}
-          isMini={isMini}
-          onFullscreen={onFullscreen}
-          isFullscreen={isFullscreen}
-        />
-      </Box>
-    </Stack>
+    <Box
+      onMouseDown={gesture.onMouseDown}
+      style={{
+        position: 'relative',
+        height: '100%',
+        minHeight: 0,
+        overflow: 'hidden',
+        userSelect: 'none'
+      }}
+    >
+      <AudioPlayer
+        key={file.id}
+        libraryId={libraryId}
+        fileId={file.id}
+        filename={file.filename}
+        stage="above"
+        autoPlay={autoPlay}
+        onMini={onMini}
+        isMini={isMini}
+        onFullscreen={onFullscreen}
+        isFullscreen={isFullscreen}
+        compact={compact}
+      />
+    </Box>
   );
 }
 
