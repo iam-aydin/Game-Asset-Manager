@@ -118,8 +118,8 @@ export function FolderTreePane({
   );
 }
 
-function MiniFolder({ open }: { open: boolean }) {
-  return <GlassFolderMini open={open} />;
+function MiniFolder({ open, hasFiles }: { open: boolean; hasFiles: boolean }) {
+  return <GlassFolderMini open={open} hasFiles={hasFiles} />;
 }
 
 function TreeRow({
@@ -181,23 +181,36 @@ function TreeRow({
         onMouseEnter={() => setHover(true)}
         onMouseLeave={() => setHover(false)}
         style={{
+          position: 'relative',
           display: 'flex',
           alignItems: 'center',
           gap: 4,
-          height: 28,
+          height: 30,
           paddingLeft: 2 + depth * 14,
           paddingRight: 6,
           borderRadius: 6,
           cursor: 'pointer',
           boxSizing: 'border-box',
           background: selected
-            ? 'color-mix(in srgb, var(--mantine-color-indigo-4) 24%, transparent)'
+            ? 'rgba(177, 186, 196, 0.14)'
             : hover
-              ? 'rgba(255, 255, 255, 0.06)'
-              : 'transparent',
-          boxShadow: selected ? 'inset 2px 0 0 var(--mantine-color-indigo-4)' : undefined
+              ? 'rgba(177, 186, 196, 0.08)'
+              : 'transparent'
         }}
       >
+        {selected && (
+          <span
+            style={{
+              position: 'absolute',
+              left: 0,
+              top: 6,
+              bottom: 6,
+              width: 3,
+              borderRadius: 2,
+              background: 'var(--mantine-color-indigo-4)'
+            }}
+          />
+        )}
         <span
           onClick={(e) => {
             e.stopPropagation();
@@ -219,7 +232,7 @@ function TreeRow({
         {isRoot ? (
           <IconDatabase size={16} color="var(--mantine-color-indigo-3)" style={{ flexShrink: 0 }} />
         ) : (
-          <MiniFolder open={isOpen || selected} />
+          <MiniFolder open={isOpen || selected} hasFiles={node.recursiveFileCount > 0} />
         )}
         <span
           style={{

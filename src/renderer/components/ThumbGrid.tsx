@@ -36,6 +36,8 @@ interface Props {
   folders?: FolderTreeNode[];
   onOpenFolder?: (path: string) => void;
   onFolderContextMenu?: (node: FolderTreeNode, x: number, y: number) => void;
+  /** Navigation (back / forward / up / path) shown in the bar above the files. */
+  headerNav?: React.ReactNode;
 }
 
 const TILE_GAP = 8;
@@ -80,7 +82,8 @@ export function ThumbGrid({
   emptyHint,
   folders,
   onOpenFolder,
-  onFolderContextMenu
+  onFolderContextMenu,
+  headerNav
 }: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [containerWidth, setContainerWidth] = useState(0);
@@ -160,6 +163,18 @@ export function ThumbGrid({
           {files.length} {files.length === 1 ? 'item' : 'items'}
           {selectedIds.size > 0 && ` · ${selectedIds.size} selected`}
         </Text>
+        <div
+          style={{
+            flex: 1,
+            minWidth: 0,
+            display: 'flex',
+            alignItems: 'center',
+            padding: '0 8px',
+            overflow: 'hidden'
+          }}
+        >
+          {headerNav}
+        </div>
         <Group gap={6} wrap="nowrap">
           {headerExtras}
           <Group gap={4} wrap="nowrap">

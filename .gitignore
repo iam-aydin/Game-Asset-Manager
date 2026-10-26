@@ -45,6 +45,9 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 
+# Backup files — anything with .bak in the name
+*.bak*
+
 # App runtime data
 .meshFlask/
 .meshFlask.db

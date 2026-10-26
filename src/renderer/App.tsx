@@ -60,11 +60,11 @@ import { DEFAULT_SORT, isSortSpec, type SortSpec } from '@shared/sort';
 import { COLOR_LABELS } from '@shared/ratings';
 import { LibrarySidebar } from './components/LibrarySidebar';
 import { Logo } from './components/Logo';
-import { FolderBrowser } from './components/FolderBrowser';
 import { FolderContextMenu, type FolderMenuState } from './components/FolderTile';
 import { TagsSidebar } from './components/TagsSidebar';
 import { ContainersPanel } from './components/ContainersPanel';
 import { FolderTreePane } from './components/FolderTreePane';
+import { FolderGlyphStyles } from './components/FolderGlyphs';
 import { FolderRowList } from './components/FavoritesSidebar';
 import { CollapsibleSection } from './components/CollapsibleSection';
 import { PrintBedFacet } from './components/PrintBedFacet';
@@ -457,6 +457,10 @@ export function App() {
   useEffect(() => {
     const theme = getTheme(themeId);
     setColorScheme(theme.colorScheme);
+    // Tell the page which theme is active, so the folder icons can adapt their colors.
+    document.documentElement.dataset.wh3dScheme = theme.colorScheme;
+    document.documentElement.dataset.wh3dTheme = theme.id;
+    document.documentElement.dataset.wh3dLabel = theme.label;
 
     const root = document.documentElement.style;
     for (const t of THEMES) {
@@ -1134,11 +1138,25 @@ export function App() {
     }
   }, []);
 
+  // Toggle: first click shows every model in the library, second click goes back
+  // to where you were (the folder or container you left).
+  const preTreeRef = useRef<{ folder: string; collectionId: number | null }>({
+    folder: '',
+    collectionId: null
+  });
   const selectAllInCurrentLibrary = useCallback(() => {
+    if (viewScope === 'tree') {
+      const prev = preTreeRef.current;
+      setViewScope('normal');
+      setSelectedFolderPath(prev.folder);
+      setSelectedCollectionId(prev.collectionId);
+      return;
+    }
+    preTreeRef.current = { folder: selectedFolderPath, collectionId: selectedCollectionId };
     setViewScope('tree');
     setSelectedFolderPath('');
     setSelectedCollectionId(null);
-  }, []);
+  }, [viewScope, selectedFolderPath, selectedCollectionId]);
 
   // --- Navigation history (Explorer style) --------------------------------
   // Every location change (folder / container / all-models) is recorded.
@@ -1225,6 +1243,25 @@ export function App() {
     return () => window.removeEventListener('mouseup', onMouseUp);
   }, [goBack, goForward]);
   // --------------------------------------------------------------------------
+
+  // Release keyboard focus from buttons / radio buttons / checkboxes / sliders right
+  // after a mouse click, so W A S D (3D camera) and the other shortcuts keep working
+  // after you click things like Lit or Normals.
+  useEffect(() => {
+    const onClick = () => {
+      window.setTimeout(() => {
+        const el = document.activeElement as HTMLElement | null;
+        if (!el || el === document.body) return;
+        if (el.closest('[role="dialog"]')) return;
+        const nonTextInput =
+          el instanceof HTMLInputElement &&
+          ['radio', 'checkbox', 'range', 'button'].includes(el.type);
+        if (nonTextInput || el instanceof HTMLButtonElement) el.blur();
+      }, 0);
+    };
+    window.addEventListener('click', onClick);
+    return () => window.removeEventListener('click', onClick);
+  }, []);
 
   // Single source of truth for tile-click selection logic, shared by every
   // ThumbGrid interaction. Shift-range walks the visible `files` array between
@@ -1954,11 +1991,11 @@ export function App() {
   const hasSubfolders = (currentFolderNode?.children.length ?? 0) > 0;
   // Folders shown as big tiles inside the grid (grid view only; list view keeps the strip).
   const gridFolders = useMemo(() => {
-    if (!showFolders || viewMode !== 'grid') return undefined;
+    if (!showFolders) return undefined;
     return [...(currentFolderNode?.children ?? [])].sort((a, b) =>
       a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
     );
-  }, [showFolders, viewMode, currentFolderNode]);
+  }, [showFolders, currentFolderNode]);
   // Kept for a future drag-to-move onto folder tiles (the old tree used it).
   void requestMove;
   const leftSidebar = (
@@ -2073,6 +2110,31 @@ export function App() {
     </Stack>
   );
 
+  const navCrumbs: { label: string; path: string | null }[] = [];
+  if (selectedLibrary) {
+    navCrumbs.push({ label: selectedLibrary.name, path: '' });
+    if (viewScope === 'tree') {
+      navCrumbs.push({ label: 'All models', path: null });
+    } else if (selectedCollection) {
+      navCrumbs.push({ label: selectedCollection.name, path: null });
+    } else if (selectedFolderPath) {
+      const segs = selectedFolderPath.split('/');
+      segs.forEach((s, i) => navCrumbs.push({ label: s, path: segs.slice(0, i + 1).join('/') }));
+    }
+  }
+  const inlineNav = (
+    <InlineNav
+      canBack={nav.index > 0}
+      canForward={nav.index < nav.stack.length - 1}
+      canUp={selectedFolderPath !== '' || viewScope !== 'normal' || selectedCollectionId != null}
+      onBack={goBack}
+      onForward={goForward}
+      onUp={goUp}
+      crumbs={navCrumbs}
+      onNavigate={selectFolder}
+    />
+  );
+
   const sortToolbar = (
     <ViewSortToolbar sort={sort} onSortChange={setSort} view={viewMode} onViewChange={setViewMode} />
   );
@@ -2105,10 +2167,18 @@ export function App() {
           {displayedFiles.length} {displayedFiles.length === 1 ? 'item' : 'items'}
           {selectedFileIds.size > 0 && ` · ${selectedFileIds.size} selected`}
         </Text>
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center' }}>
+          {inlineNav}
+        </div>
       </Group>
       <FileListView
         libraryId={selectedLibrary.id}
         files={displayedFiles}
+        folders={gridFolders}
+        onOpenFolder={selectFolder}
+        onFolderContextMenu={(node, x, y) =>
+          setFolderMenu({ opened: true, x, y, path: node.path, name: node.name })
+        }
         thumbVersions={thumbVersions}
         selectedIds={selectedFileIds}
         primaryId={primaryFileId}
@@ -2123,6 +2193,7 @@ export function App() {
       emptyTitle={hasSubfolders && showFolders ? 'No files directly in this folder.' : undefined}
       emptyHint={hasSubfolders && showFolders ? 'Open a subfolder above.' : undefined}
       folders={gridFolders}
+      headerNav={inlineNav}
       onOpenFolder={selectFolder}
       onFolderContextMenu={(node, x, y) =>
         setFolderMenu({ opened: true, x, y, path: node.path, name: node.name })
@@ -2137,19 +2208,6 @@ export function App() {
 
   const contentPane = (
     <Stack gap={0} h="100%">
-      {showFolders && viewMode === 'list' && (
-        <FolderBrowser
-          node={currentFolderNode}
-          canGoUp={selectedFolderPath !== ''}
-          onUp={() => selectFolder(parentFolderPath)}
-          onOpen={selectFolder}
-          isFavorite={isFavoriteFolder}
-          onToggleFavorite={toggleFavoriteFolder}
-          onRename={handleRenameFolder}
-          onReveal={handleRevealFolder}
-          onRescan={handleRescanFolder}
-        />
-      )}
       <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
         <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column' }}>
           {gridPane}
@@ -2212,6 +2270,18 @@ export function App() {
     <>
     <GlassStyles />
     <ScrollbarStyles />
+    <FolderGlyphStyles />
+    <style>{`
+      /* wh3d-round: capsule shapes in the top bar (colors and sizes untouched) */
+      .mantine-AppShell-header .mantine-Input-input,
+      .mantine-AppShell-header .mantine-TextInput-input,
+      .mantine-AppShell-header .mantine-Select-input {
+        border-radius: 999px !important;
+      }
+      .mantine-AppShell-header .mantine-Button-root {
+        border-radius: 999px !important;
+      }
+    `}</style>
     {/* GLASS TOGGLE: {glassUi ? <GlassStyles /> : <NormalStyles />} */}
     <AppShell header={{ height: 88 }} padding={0}>
       <AppShell.Header>
@@ -2227,7 +2297,7 @@ export function App() {
                   alignItems: 'center',
                   gap: 8,
                   padding: '4px 10px',
-                  borderRadius: 8,
+                  borderRadius: 999,
                   background: 'color-mix(in srgb, var(--mantine-color-indigo-4) 12%, transparent)',
                   border: '1px solid color-mix(in srgb, var(--mantine-color-indigo-4) 30%, transparent)'
                 }}
@@ -2584,6 +2654,77 @@ export function App() {
       )}
     </AppShell>
     </>
+  );
+}
+
+function InlineNav({
+  canBack,
+  canForward,
+  canUp,
+  onBack,
+  onForward,
+  onUp,
+  crumbs,
+  onNavigate
+}: {
+  canBack: boolean;
+  canForward: boolean;
+  canUp: boolean;
+  onBack: () => void;
+  onForward: () => void;
+  onUp: () => void;
+  crumbs: { label: string; path: string | null }[];
+  onNavigate: (path: string) => void;
+}) {
+  return (
+    <Group gap={2} wrap="nowrap" style={{ minWidth: 0, overflow: 'hidden' }}>
+      <ActionIcon size="sm" variant="subtle" onClick={onBack} disabled={!canBack} aria-label="Back">
+        <IconArrowLeft size={14} />
+      </ActionIcon>
+      <ActionIcon
+        size="sm"
+        variant="subtle"
+        onClick={onForward}
+        disabled={!canForward}
+        aria-label="Forward"
+      >
+        <IconArrowRight size={14} />
+      </ActionIcon>
+      <ActionIcon size="sm" variant="subtle" onClick={onUp} disabled={!canUp} aria-label="Up">
+        <IconArrowUp size={14} />
+      </ActionIcon>
+      <Group
+        gap={4}
+        wrap="nowrap"
+        ml={6}
+        style={{
+          minWidth: 0,
+          overflow: 'hidden',
+          padding: '1px 10px',
+          borderRadius: 999,
+          background: 'color-mix(in srgb, var(--mantine-color-indigo-4) 14%, transparent)',
+          border: '1px solid color-mix(in srgb, var(--mantine-color-indigo-4) 38%, transparent)'
+        }}
+      >
+        {crumbs.map((c, i) => (
+          <Group key={i} gap={4} wrap="nowrap">
+            {i > 0 && (
+              <Text size="xs" c="dimmed">
+                /
+              </Text>
+            )}
+            <UnstyledButton
+              disabled={c.path === null}
+              onClick={() => c.path !== null && onNavigate(c.path)}
+            >
+              <Text size="xs" fw={i === crumbs.length - 1 ? 600 : 500} c="indigo.2" truncate>
+                {c.label}
+              </Text>
+            </UnstyledButton>
+          </Group>
+        ))}
+      </Group>
+    </Group>
   );
 }
 

@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { Group, Text } from '@mantine/core';
 import { IconCircleFilled, IconStarFilled } from '@tabler/icons-react';
 import { useVirtualizer } from '@tanstack/react-virtual';
@@ -7,6 +7,8 @@ import type { FileRecord, ExtractedMetadata } from '@shared/types';
 import { COLOR_LABEL_HEX } from '@shared/ratings';
 import { formatBytes, formatDateTime } from '../util/format';
 import type { TileClickModifiers } from './ThumbGrid';
+import type { FolderTreeNode } from '@shared/types';
+import { GlassFolderMini } from './FolderGlyphs';
 
 interface Props {
   /** Active library id, or null in "All Libraries" mode. Tile thumbs use
@@ -18,6 +20,10 @@ interface Props {
   thumbVersions: ReadonlyMap<number, number>;
   onTileClick: (fileId: number, modifiers: TileClickModifiers) => void;
   onTileContextMenu?: (fileId: number, x: number, y: number) => void;
+  /** Subfolders shown first, as rows above the files. */
+  folders?: FolderTreeNode[];
+  onOpenFolder?: (path: string) => void;
+  onFolderContextMenu?: (node: FolderTreeNode, x: number, y: number) => void;
 }
 
 const ROW_HEIGHT = 36;
@@ -37,18 +43,24 @@ export function FileListView({
   primaryId,
   thumbVersions,
   onTileClick,
-  onTileContextMenu
+  onTileContextMenu,
+  folders,
+  onOpenFolder,
+  onFolderContextMenu
 }: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
+  const folderList = folders ?? [];
+  const folderCount = folderList.length;
+
   const virtualizer = useVirtualizer({
-    count: files.length,
+    count: folderCount + files.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => ROW_HEIGHT,
     overscan: 12
   });
 
-  if (files.length === 0) {
+  if (files.length + folderCount === 0) {
     return (
       <div
         style={{
@@ -83,7 +95,22 @@ export function FileListView({
         }}
       >
         {virtualizer.getVirtualItems().map((vRow) => {
-          const file = files[vRow.index];
+          if (vRow.index < folderCount) {
+            const f = folderList[vRow.index];
+            return (
+              <FolderRow
+                key={'folder:' + f.path}
+                node={f}
+                style={{ transform: `translateY(${vRow.start}px)` }}
+                onOpen={() => onOpenFolder?.(f.path)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  onFolderContextMenu?.(f, e.clientX, e.clientY);
+                }}
+              />
+            );
+          }
+          const file = files[vRow.index - folderCount];
           return (
             <Row
               key={file.id}
@@ -287,5 +314,71 @@ function Thumb({ url, ext }: { url: string | null; ext: string }) {
     >
       .{ext}
     </div>
+  );
+}
+
+function FolderRow({
+  node,
+  style,
+  onOpen,
+  onContextMenu
+}: {
+  node: FolderTreeNode;
+  style?: React.CSSProperties;
+  onOpen: () => void;
+  onContextMenu: (e: React.MouseEvent) => void;
+}) {
+  const [focus, setFocus] = useState(false);
+  const count = node.recursiveFileCount;
+  return (
+    <button
+      type="button"
+      title={node.path}
+      onDoubleClick={onOpen}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          onOpen();
+        }
+      }}
+      onContextMenu={onContextMenu}
+      onFocus={() => setFocus(true)}
+      onBlur={() => setFocus(false)}
+      style={{
+        all: 'unset',
+        position: 'absolute',
+        top: HEADER_HEIGHT,
+        left: 0,
+        width: '100%',
+        height: ROW_HEIGHT,
+        display: 'grid',
+        gridTemplateColumns: COLUMNS,
+        gap: 8,
+        padding: '0 12px',
+        alignItems: 'center',
+        boxSizing: 'border-box',
+        cursor: 'pointer',
+        background: focus ? 'var(--mantine-color-dark-5)' : 'var(--mantine-color-dark-6)',
+        borderLeft: focus
+          ? '2px solid var(--mantine-color-indigo-4)'
+          : '2px solid transparent',
+        borderBottom: '1px solid var(--mantine-color-dark-7)',
+        ...style
+      }}
+    >
+      <GlassFolderMini hasFiles={count > 0} />
+      <Text size="xs" fw={500} truncate>
+        {node.name}
+      </Text>
+      <div />
+      <Text size="xs" c="dimmed" ta="right">
+        {count} {count === 1 ? 'file' : 'files'}
+      </Text>
+      <div />
+      <div />
+      <div />
+      <div />
+      <div />
+    </button>
   );
 }

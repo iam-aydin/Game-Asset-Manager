@@ -120,7 +120,7 @@ export function FolderBrowser({
                   border: '1px solid var(--mantine-color-dark-4)'
                 }}
               >
-                <GlassFolderMini open />
+                <GlassFolderMini open hasFiles={f.recursiveFileCount > 0} />
                 <Text size="sm" truncate style={{ flex: 1, minWidth: 0 }}>
                   {f.name}
                 </Text>

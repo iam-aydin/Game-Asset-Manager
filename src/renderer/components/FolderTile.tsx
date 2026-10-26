@@ -76,7 +76,7 @@ export function FolderTile({
           justifyContent: 'center'
         }}
       >
-        <GlassFolderBig />
+        <GlassFolderBig hasFiles={count > 0} />
 
         {count > 0 && (
           <div

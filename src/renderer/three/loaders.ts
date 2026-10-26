@@ -1,3 +1,4 @@
+import { registerSpecGloss } from './gltf-spec-gloss';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
@@ -150,6 +151,7 @@ function loadGLTF(buffer: ArrayBuffer, resourceContext: ResourceContext): Promis
   allowDataUris();
   return new Promise((resolve, reject) => {
     const loader = new GLTFLoader();
+    registerSpecGloss(loader);
 
     if (typeof resourceContext === 'function') {
       // Leave embedded data URIs / already-qualified URLs alone; only
