@@ -1,7 +1,7 @@
 import type { Theme } from './types';
 
 /**
- * Mint Gum â€” fresh mint green + bubble-gum pink on soft green-tinted white.
+ * Mint Gum - fresh mint green + bubble-gum pink on soft green-tinted white.
  * A light-mode take on the Cyberpunk recipe:
  *
  *   dark-4                         -> dividers / panel borders (soft mint)

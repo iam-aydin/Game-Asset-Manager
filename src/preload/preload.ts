@@ -9,6 +9,7 @@ import type {
   CameraState,
   CollectionRecord,
   CollectionWithCount,
+  ContainerItem,
   DeleteFileResult,
   DuplicateFileResult,
   ExportResult,
@@ -135,6 +136,13 @@ const api: IpcApi = {
     ipcRenderer.invoke(IPC.addFilesToCollection, libraryId, collectionId, fileIds) as Promise<void>,
   removeFilesFromCollection: (libraryId: string, collectionId: number, fileIds: number[]) =>
     ipcRenderer.invoke(IPC.removeFilesFromCollection, libraryId, collectionId, fileIds) as Promise<void>,
+  listContainerItems: (collectionId: number) =>
+    ipcRenderer.invoke(IPC.listContainerItems, collectionId) as Promise<ContainerItem[]>,
+  zipContainerToDesktop: (collectionId: number) =>
+    ipcRenderer.invoke(IPC.zipContainerToDesktop, collectionId),
+  exportData: (local: { favorites: string[]; recent: string[] }) =>
+    ipcRenderer.invoke(IPC.exportData, local),
+  importData: () => ipcRenderer.invoke(IPC.importData),
   createSmartCollection: (libraryId: string, name: string, query: SmartQuery) =>
     ipcRenderer.invoke(IPC.createSmartCollection, libraryId, name, query) as Promise<CollectionRecord>,
   updateSmartQuery: (libraryId: string, id: number, query: SmartQuery) =>

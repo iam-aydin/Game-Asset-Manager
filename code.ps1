@@ -1,324 +1,324 @@
-# add-themes-v2.ps1
-# Adds / updates the "Vampire" and "Mint Gum" themes with a Cyberpunk-style multi-color setup.
-# Replaces the earlier add-themes.ps1 (overwrites vampire.ts and mint-gum.ts; safe to re-run).
-#
-# Usage (from your project folder, or pass a path):
-#   powershell -ExecutionPolicy Bypass -File .\add-themes-v2.ps1
-#   powershell -ExecutionPolicy Bypass -File .\add-themes-v2.ps1 -ProjectRoot "C:\path\to\project"
-#   powershell -ExecutionPolicy Bypass -File .\add-themes-v2.ps1 -ThemesDir "C:\path\to\themes"
-
-param(
-  [string]$ProjectRoot = (Get-Location).Path,
-  [string]$ThemesDir = ''
-)
-
+# patch-mixed.ps1  -- run from the project root
 $ErrorActionPreference = 'Stop'
+$root = (Get-Location).Path
 $utf8 = New-Object System.Text.UTF8Encoding($false)
+$pending = [ordered]@{}
 
-# ---------------------------------------------------------------- locate themes dir
-if (-not $ThemesDir) {
-  $skip = '\\(node_modules|dist|out|release|build|\.git)\\'
-  $hit = Get-ChildItem -Path $ProjectRoot -Recurse -File -Filter 'light.ts' -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -notmatch $skip -and $_.Directory.Name -eq 'themes' } |
-    Select-Object -First 1
-  if (-not $hit) {
-    throw "Could not find a 'themes' folder containing light.ts under $ProjectRoot. Re-run with -ThemesDir <path>."
-  }
-  $ThemesDir = $hit.DirectoryName
+function Get-Doc([string]$rel) {
+  $full = Join-Path $root $rel
+  if ($pending.Contains($full)) { return $pending[$full] }
+  if (-not (Test-Path $full)) { throw "Missing file: $rel" }
+  $raw = [System.IO.File]::ReadAllText($full)
+  $doc = @{ Rel = $rel; Full = $full; Crlf = $raw.Contains("`r`n"); Text = $raw.Replace("`r`n", "`n") }
+  $pending[$full] = $doc
+  return $doc
 }
-if (-not (Test-Path (Join-Path $ThemesDir 'light.ts'))) {
-  throw "light.ts not found in $ThemesDir"
+function Add-Edit([string]$rel, [string]$old, [string]$new) {
+  $doc = Get-Doc $rel
+  $old = $old.Replace("`r`n", "`n"); $new = $new.Replace("`r`n", "`n")
+  $count = ([regex]::Matches($doc.Text, [regex]::Escape($old))).Count
+  if ($count -ne 1) { throw "Anchor matched $count times (need exactly 1) in $rel :`n$old" }
+  $doc.Text = $doc.Text.Replace($old, $new)
 }
-Write-Host "Themes folder: $ThemesDir" -ForegroundColor Cyan
+function Set-Whole([string]$rel, [string]$content) {
+  $doc = Get-Doc $rel
+  $doc.Text = $content.Replace("`r`n", "`n")
+}
 
-# ---------------------------------------------------------------- vampire.ts
-$vampire = @'
-import type { Theme } from './types';
+$app  = 'src\renderer\App.tsx'
+$q    = 'src\main\containers\query.ts'
+$prot = 'src\main\protocol\asset-protocols.ts'
+$grid = 'src\renderer\components\ThumbGrid.tsx'
+
+if (-not (Get-Doc $app).Text.Contains('GLOBAL_FAV_KEY')) { throw 'patch-global.ps1 must be applied first.' }
+if (-not (Get-Doc $q).Text.Contains('queryContainerFiles')) { throw 'src\main\containers\query.ts is missing (patch-global).' }
+
+# ───────── main: container query across all libraries ─────────
+Set-Whole $q @'
+import * as manager from '@main/libraries/manager';
+import type { OpenLibrary } from '@main/libraries/manager';
+import type { FileQueryRequest, FileRecord } from '@shared/types';
+import * as store from './store';
+
+/** Files from a library other than the requesting one get id = ordinal * SPAN + localId. */
+export const LIB_ID_SPAN = 1000000000;
 
 /**
- * Vampire — blood-crimson + amethyst + antique gold on near-black burgundy.
- * Same recipe as Cyberpunk, different palette:
- *
- *   dark-4                         -> dividers / panel borders (dim wine)
- *   --mantine-color-default-border -> input / button borders (brighter wine)
- *   indigo scale                   -> primary accent (blood crimson)
- *   blue scale                     -> links / secondary accent (amethyst)
- *   gold                           -> small highlights (slider thumb, waveform track)
+ * All files of a global container, from every open library, in stored order,
+ * with the simple filters applied (search, extension, rating, color).
  */
-const BODY = '#0b0307';
-const DEEP = '#070204';
-const LINE = '#4d1226';        // dividers
-const LINE_STRONG = '#7d1a3b'; // inputs / buttons
-const ROW = '#1f0a14';         // hover / selected rows
-const GOLD = '#a71935';
-
-const vampire: Theme = {
-  id: 'vampire',
-  label: 'Vampire',
-  colorScheme: 'dark',
-
-  colors: {
-    'dark-4': LINE,
-    'dark-5': ROW,
-    'dark-6': '#12050b',
-    'dark-7': '#0e0409',
-    'dark-8': BODY,
-
-    'text-primary': '#f5e9ec',
-    'text-dimmed': '#b08a95',
-    'gray-2': '#f0dde2',
-    'gray-3': '#e0c9cf',
-
-    indigo: '#e03a52',
-    teal: '#c084fc',
-    violet: '#9d54ff',
-    orange: '#ff8a3d',
-    red: '#ff3b4e',
-    grape: '#e03a52',
-    green: '#4ade80',
-    yellow: GOLD
-  },
-
-  cssVars: {
-    // Surfaces + lines
-    '--mantine-color-dark-0': '#f5e9ec',
-    '--mantine-color-dark-1': '#e0c9cf',
-    '--mantine-color-dark-2': '#c4a3ad',
-    '--mantine-color-dark-3': '#9b7480',
-    '--mantine-color-dark-4': LINE,
-    '--mantine-color-dark-5': ROW,
-    '--mantine-color-dark-6': '#12050b',
-    '--mantine-color-dark-7': '#0e0409',
-    '--mantine-color-dark-8': BODY,
-    '--mantine-color-dark-9': DEEP,
-    '--mantine-color-body': BODY,
-    '--mantine-color-default': '#0e0409',
-    '--mantine-color-default-hover': ROW,
-    '--mantine-color-default-border': LINE_STRONG,
-
-    // Primary accent: blood crimson
-    '--mantine-color-indigo-0': '#ffe3e8',
-    '--mantine-color-indigo-1': '#ffc2cd',
-    '--mantine-color-indigo-2': '#ff9fb0',
-    '--mantine-color-indigo-3': '#ff7a92',
-    '--mantine-color-indigo-4': '#f2506d',
-    '--mantine-color-indigo-5': '#e03a52',
-    '--mantine-color-indigo-6': '#c9184a',
-    '--mantine-color-indigo-7': '#a4133c',
-    '--mantine-color-indigo-8': '#800f2f',
-    '--mantine-color-indigo-9': '#590d22',
-    '--mantine-primary-color-filled': '#c9184a',
-    '--mantine-primary-color-filled-hover': '#e03a52',
-    '--mantine-primary-color-light': 'rgba(224,58,82,0.15)',
-    '--mantine-primary-color-light-hover': 'rgba(224,58,82,0.25)',
-    '--mantine-primary-color-light-color': '#ff7a92',
-
-    // Secondary accent: amethyst (links, info chips)
-    '--mantine-color-blue-0': '#f3e8ff',
-    '--mantine-color-blue-1': '#e2ccff',
-    '--mantine-color-blue-2': '#d0adff',
-    '--mantine-color-blue-3': '#bd8cff',
-    '--mantine-color-blue-4': '#ab6dff',
-    '--mantine-color-blue-5': '#9d54ff',
-    '--mantine-color-blue-6': '#8a3df0',
-    '--mantine-color-blue-7': '#7230cc',
-    '--mantine-color-blue-8': '#5a26a3',
-    '--mantine-color-blue-9': '#401b75',
-
-    // App-specific
-    '--wh3d-waveform-blend': 'normal',
-    '--wh3d-waveform-opacity': '0.5',
-    '--wh3d-waveform-filter': 'brightness(1.3) saturate(1.4)',
-    '--wh3d-waveform-played': '#e03a52',
-    '--wh3d-waveform-unplayed': 'rgba(125,26,59,0.45)',
-    '--wh3d-viewport-bg': '#050104',
-    '--wh3d-slider-track': 'rgba(125,26,59,0.35)',
-    '--wh3d-slider-thumb-bg': '#e03a52',
-    '--wh3d-slider-thumb-border': '#a71935',
-    '--wh3d-overlay-bg': 'rgba(11,3,7,0.9)',
-    '--wh3d-overlay-border': LINE_STRONG,
-    '--wh3d-viz-top': '#ff7a92',
-    '--wh3d-viz-mid': '#a4133c'
+export function queryContainerFiles(
+  home: OpenLibrary,
+  req: Omit<FileQueryRequest, 'libraryId'>
+): FileRecord[] {
+  if (req.collectionId == null) return [];
+  const c = store.get(req.collectionId);
+  if (!c) return [];
+  const ordinals = new Map(manager.listLibraries().map((l, i) => [l.id, i + 1] as const));
+  const exts =
+    req.extensions && req.extensions.length > 0
+      ? new Set(req.extensions.map((e) => e.toLowerCase()))
+      : null;
+  const labels =
+    req.colorLabels && req.colorLabels.length > 0 ? new Set<string>(req.colorLabels) : null;
+  const needle = req.query?.trim().toLowerCase() ?? '';
+  const out: FileRecord[] = [];
+  for (const it of c.items) {
+    const lib = manager.getOpenLibrary(it.libraryId);
+    if (!lib) continue;
+    const base = lib.files.getByRelPath(it.relPath);
+    // getByRelPath has no thumbnail join; getById has.
+    const f = base ? lib.files.getById(base.id) : null;
+    if (!f) continue;
+    if (exts && !exts.has(f.ext.toLowerCase())) continue;
+    if (req.minRating && f.rating < req.minRating) continue;
+    if (labels && (f.colorLabel == null || !labels.has(f.colorLabel))) continue;
+    if (needle && !f.relPath.toLowerCase().includes(needle)) continue;
+    out.push(
+      lib.entry.id === home.entry.id
+        ? f
+        : { ...f, id: (ordinals.get(lib.entry.id) ?? 1) * LIB_ID_SPAN + f.id }
+    );
+    if (req.limit && out.length >= req.limit) break;
   }
-};
-
-export default vampire;
+  return out;
+}
 '@
 
-# ---------------------------------------------------------------- mint-gum.ts
-$mint = @'
-import type { Theme } from './types';
+# ───────── protocol: decode composite ids ─────────
+Add-Edit $prot @'
+  return { libraryId, fileId };
+}
 
 /**
- * Mint Gum — fresh mint green + bubble-gum pink on soft green-tinted white.
- * A light-mode take on the Cyberpunk recipe:
- *
- *   dark-4                         -> dividers / panel borders (soft mint)
- *   --mantine-color-default-border -> input / button borders (stronger mint)
- *   indigo scale                   -> primary accent (mint green)
- *   blue scale                     -> links / secondary accent (bubble-gum pink)
- *
- * The indigo steps 1-3 are dark greens on purpose: the app uses them as TEXT
- * colors (breadcrumbs, active links), which must read on a light background.
- */
-const BODY = '#f3fcf6';
-const LINE = '#a8dfbd';        // dividers
-const LINE_STRONG = '#7fcfa0'; // inputs / buttons
-const ROW = '#d6f3e0';         // hover / selected rows
-const GUM = '#8fe3b0';
+ * URL shape: wh3d-file://<libraryId>/rel/
+'@ @'
+  return { libraryId, fileId: fileId >= 1000000000 ? fileId % 1000000000 : fileId };
+}
 
-const mintGum: Theme = {
-  id: 'mint-gum',
-  label: 'Mint Gum',
-  colorScheme: 'light',
-
-  colors: {
-    'dark-4': LINE,
-    'dark-5': ROW,
-    'dark-6': '#e6f8ec',
-    'dark-7': '#eefaf2',
-    'dark-8': BODY,
-
-    'text-primary': '#12301f',
-    'text-dimmed': '#5b7a68',
-    'gray-2': '#1f4a33',
-    'gray-3': '#2d5f45',
-
-    indigo: '#0f9d58',
-    teal: '#12b886',
-    violet: '#9775fa',
-    orange: '#fd7e14',
-    red: '#e03131',
-    grape: GUM,
-    green: '#2f9e44',
-    yellow: '#f08c00'
-  },
-
-  cssVars: {
-    // Surfaces + lines
-    '--mantine-color-text': '#12301f',
-    '--mantine-color-dimmed': '#5b7a68',
-    '--mantine-color-gray-2': '#1f4a33',
-    '--mantine-color-gray-3': '#2d5f45',
-    '--mantine-color-dark-4': LINE,
-    '--mantine-color-dark-5': ROW,
-    '--mantine-color-dark-6': '#e6f8ec',
-    '--mantine-color-dark-7': '#eefaf2',
-    '--mantine-color-dark-8': BODY,
-    '--mantine-color-body': BODY,
-    '--mantine-color-default': '#ffffff',
-    '--mantine-color-default-hover': ROW,
-    '--mantine-color-default-border': LINE_STRONG,
-
-    // Primary accent: mint green (1-3 darkened for text legibility)
-    '--mantine-color-indigo-0': '#e6fcf0',
-    '--mantine-color-indigo-1': '#0a5c35',
-    '--mantine-color-indigo-2': '#0b6b3e',
-    '--mantine-color-indigo-3': '#117a48',
-    '--mantine-color-indigo-4': '#18a058',
-    '--mantine-color-indigo-5': '#12a150',
-    '--mantine-color-indigo-6': '#0f9d58',
-    '--mantine-color-indigo-7': '#0c8449',
-    '--mantine-color-indigo-8': '#096b3b',
-    '--mantine-color-indigo-9': '#06522d',
-    '--mantine-primary-color-filled': '#0f9d58',
-    '--mantine-primary-color-filled-hover': '#0c8449',
-    '--mantine-primary-color-light': 'rgba(15,157,88,0.14)',
-    '--mantine-primary-color-light-hover': 'rgba(15,157,88,0.22)',
-    '--mantine-primary-color-light-color': '#0b6b3e',
-
-    // Secondary accent: bubble-gum pink (links, info chips)
-    '--mantine-color-blue-0': '#fff0f6',
-    '--mantine-color-blue-1': '#ffdeeb',
-    '--mantine-color-blue-2': '#fcc2d7',
-    '--mantine-color-blue-3': '#faa2c1',
-    '--mantine-color-blue-4': '#f783ac',
-    '--mantine-color-blue-5': '#f06595',
-    '--mantine-color-blue-6': '#e64980',
-    '--mantine-color-blue-7': '#d6336c',
-    '--mantine-color-blue-8': '#b02a5b',
-    '--mantine-color-blue-9': '#8c1f48',
-
-    // App-specific (blend/filter approach copied from the Light theme)
-    '--wh3d-waveform-blend': 'normal',
-    '--wh3d-waveform-opacity': '0.5',
-    '--wh3d-waveform-filter': 'brightness(1.05) saturate(1.1)',
-    '--wh3d-waveform-played': '#12a150',
-    '--wh3d-waveform-unplayed': 'rgba(143,227,176,0.65)',
-    '--wh3d-viewport-bg': '#dff5e7',
-    '--wh3d-slider-track': '#b8edcc',
-    '--wh3d-slider-thumb-bg': '#ffffff',
-    '--wh3d-slider-thumb-border': '#8fe3b0',
-    '--wh3d-overlay-bg': 'rgba(243,252,246,0.88)',
-    '--wh3d-overlay-border': LINE_STRONG,
-    '--wh3d-viz-top': '#b8edcc',
-    '--wh3d-viz-mid': '#0f9d58'
-  }
-};
-
-export default mintGum;
+/**
+ * URL shape: wh3d-file://<libraryId>/rel/
 '@
 
-[System.IO.File]::WriteAllText((Join-Path $ThemesDir 'vampire.ts'), $vampire, $utf8)
-[System.IO.File]::WriteAllText((Join-Path $ThemesDir 'mint-gum.ts'), $mint, $utf8)
-Write-Host 'Wrote vampire.ts and mint-gum.ts' -ForegroundColor Green
+# ───────── ThumbGrid: drag uses local id ─────────
+Add-Edit $grid 'ipc.startFileDrag(file.libraryId, file.id);' 'ipc.startFileDrag(file.libraryId, file.id % 1000000000);'
 
-# ---------------------------------------------------------------- register in index.ts
-$indexPath = Join-Path $ThemesDir 'index.ts'
-$needManual = $false
+# ───────── App.tsx ─────────
+Add-Edit $app @'
+function readStoredList(key: string): string[] {
+'@ @'
+/** Container files from other libraries carry id = ordinal * SPAN + localId (see main/containers/query.ts). */
+const LIB_ID_SPAN = 1000000000;
 
-if (-not (Test-Path $indexPath)) {
-  Write-Host 'No index.ts found in the themes folder.' -ForegroundColor Yellow
-  $needManual = $true
-} else {
-  $src = [System.IO.File]::ReadAllText($indexPath)
+function decodeFileRecord(f: FileRecord): FileRecord {
+  return f.id >= LIB_ID_SPAN ? { ...f, id: f.id % LIB_ID_SPAN } : f;
+}
 
-  if ($src -match 'import\.meta\.glob') {
-    Write-Host 'index.ts auto-registers every file in the folder - nothing to patch.' -ForegroundColor Green
+/** libraryId -> local file ids, for sending bulk actions to each file's own library. */
+function groupLocalIds(list: FileRecord[]): Map<string, number[]> {
+  const m = new Map<string, number[]>();
+  for (const f of list) {
+    const arr = m.get(f.libraryId) ?? [];
+    arr.push(f.id % LIB_ID_SPAN);
+    m.set(f.libraryId, arr);
   }
-  elseif ($src -match "from\s+'\./vampire'") {
-    Write-Host 'index.ts already registers the themes - nothing to patch.' -ForegroundColor Green
-  }
-  else {
-    $imp = [regex]::Match($src, "(?m)^import\s+(\w+)\s+from\s+'\./light'[ \t]*;?[ \t]*\r?$")
-    $arr = [regex]::Match($src, '(?s)(THEMES[^=]*=\s*\[)(.*?)(\])')
+  return m;
+}
 
-    if ($imp.Success -and $arr.Success) {
-      $lightName = $imp.Groups[1].Value
-      $inner = $arr.Groups[2].Value
-      $re = New-Object System.Text.RegularExpressions.Regex("\b$lightName\b")
+function readStoredList(key: string): string[] {
+'@
 
-      if ($re.IsMatch($inner)) {
-        Copy-Item $indexPath "$indexPath.bak" -Force
-        $newInner = $re.Replace($inner, "$lightName, vampire, mintGum", 1)
-        $patched = $src.Substring(0, $arr.Index) +
-                   $arr.Groups[1].Value + $newInner + $arr.Groups[3].Value +
-                   $src.Substring($arr.Index + $arr.Length)
-        $nl = if ($src -match "`r`n") { "`r`n" } else { "`n" }
-        $importLine = $imp.Value.TrimEnd("`r")
-        $cr = if ($imp.Value.EndsWith("`r")) { "`r" } else { '' }
-        $patched = $patched.Replace(
-          $imp.Value,
-          $importLine + $nl + "import vampire from './vampire';" + $nl + "import mintGum from './mint-gum';" + $cr
-        )
-        [System.IO.File]::WriteAllText($indexPath, $patched, $utf8)
-        Write-Host 'Patched index.ts (backup: index.ts.bak)' -ForegroundColor Green
-      } else {
-        $needManual = $true
+Add-Edit $app @'
+  const [favoriteFolders, setFavoriteFoldersState] = useState<string[]>([]);
+'@ @'
+  // Latest decoded selection, readable from callbacks defined before it exists.
+  const selectedFilesRef = useRef<FileRecord[]>([]);
+  const [favoriteFolders, setFavoriteFoldersState] = useState<string[]>([]);
+'@
+
+Add-Edit $app 'files.slice(0, 100).map((f) => f.id)' 'files.filter((f) => f.libraryId === selectedLibraryId).slice(0, 100).map((f) => f.id)'
+
+Add-Edit $app @'
+      if (event.libraryId !== s.selectedLibraryId) return;
+'@ @'
+      // Changes made to a container file that lives in ANOTHER library.
+      if (event.libraryId !== s.selectedLibraryId && s.selectedLibraryId) {
+        if (event.kind === 'collections-changed') void refreshCollections(s.selectedLibraryId);
+        if (
+          (event.kind === 'collections-changed' || event.kind === 'files-changed') &&
+          s.selectedCollectionId != null
+        ) {
+          void refreshFiles(
+            s.selectedLibraryId,
+            s.selectedFolderPath,
+            s.selectedCollectionId,
+            s.searchQuery,
+            s.selectedExtensions,
+            s.selectedTagIds,
+            s.minRating,
+            s.selectedColorLabels,
+            s.sort,
+            s.viewScope,
+            s.duplicatesOnly
+          );
+        }
+        if (event.kind === 'collections-changed' || event.kind === 'files-changed') return;
       }
-    } else {
-      $needManual = $true
+      if (event.libraryId !== s.selectedLibraryId) return;
+'@
+
+Add-Edit $app 'setActiveAudio({ fileId: clickedFile.id, autoPlay: true });' 'setActiveAudio({ fileId: clickedFile.id % LIB_ID_SPAN, autoPlay: true });'
+Add-Edit $app 'setActiveAudio({ fileId: first.id, autoPlay: false });' 'setActiveAudio({ fileId: first.id % LIB_ID_SPAN, autoPlay: false });'
+
+Add-Edit $app 'const r = await ipc.deleteFile(f.libraryId, f.id);' 'const r = await ipc.deleteFile(f.libraryId, f.id % LIB_ID_SPAN);'
+Add-Edit $app 'const r = await ipc.duplicateFile(f.libraryId, f.id);' 'const r = await ipc.duplicateFile(f.libraryId, f.id % LIB_ID_SPAN);'
+Add-Edit $app 'const r = await ipc.moveFile(f.libraryId, f.id, toParentDir);' 'const r = await ipc.moveFile(f.libraryId, f.id % LIB_ID_SPAN, toParentDir);'
+
+Add-Edit $app @'
+      const file = files.find((f) => f.id === fileId);
+      if (!file) return;
+      void ipc.rerenderThumb(file.libraryId, fileId).then(() => scheduleThumbRecount());
+    },
+    [files, scheduleThumbRecount]
+'@ @'
+      const file =
+        files.find((f) => f.id === primaryFileId && f.id % LIB_ID_SPAN === fileId) ??
+        files.find((f) => f.id === fileId);
+      if (!file) return;
+      void ipc
+        .rerenderThumb(file.libraryId, file.id % LIB_ID_SPAN)
+        .then(() => scheduleThumbRecount());
+    },
+    [files, primaryFileId, scheduleThumbRecount]
+'@
+
+# Bulk handlers: send each file to its own library.
+Add-Edit $app 'await ipc.addTagToFiles(selectedLibraryId, selectedIdsArray, tagName);' @'
+for (const [lid, ids] of groupLocalIds(selectedFilesRef.current)) {
+        await ipc.addTagToFiles(lid, ids, tagName);
+      }
+'@
+Add-Edit $app 'await ipc.removeTagFromFiles(selectedLibraryId, selectedIdsArray, tagId);' @'
+// Tag ids belong to one library, so only files of the current library are touched.
+      await ipc.removeTagFromFiles(
+        selectedLibraryId,
+        groupLocalIds(selectedFilesRef.current).get(selectedLibraryId) ?? [],
+        tagId
+      );
+'@
+Add-Edit $app 'await ipc.setFileOrientations(selectedLibraryId, selectedIdsArray, orientation);' @'
+for (const [lid, ids] of groupLocalIds(selectedFilesRef.current)) {
+        await ipc.setFileOrientations(lid, ids, orientation);
+      }
+'@
+Add-Edit $app 'await ipc.rerenderThumbs(selectedLibraryId, selectedIdsArray);' @'
+for (const [lid, ids] of groupLocalIds(selectedFilesRef.current)) {
+      await ipc.rerenderThumbs(lid, ids);
     }
-  }
-}
+'@
+Add-Edit $app 'await ipc.setFileRatings(selectedLibraryId, selectedIdsArray, rating);' @'
+for (const [lid, ids] of groupLocalIds(selectedFilesRef.current)) {
+        await ipc.setFileRatings(lid, ids, rating);
+      }
+'@
+Add-Edit $app 'await ipc.setFileColorLabels(selectedLibraryId, selectedIdsArray, label);' @'
+for (const [lid, ids] of groupLocalIds(selectedFilesRef.current)) {
+        await ipc.setFileColorLabels(lid, ids, label);
+      }
+'@
 
-if ($needManual) {
-  Write-Host ''
-  Write-Host 'Could not safely patch index.ts automatically (it is laid out differently than expected).' -ForegroundColor Yellow
-  Write-Host 'Add these two imports and put both names in the THEMES array, then you are done:' -ForegroundColor Yellow
-  Write-Host "  import vampire from './vampire';"
-  Write-Host "  import mintGum from './mint-gum';"
-}
+Add-Edit $app 'await ipc.addFilesToCollection(selectedLibraryId, collectionId, fileIds);' @'
+const want = new Set(fileIds);
+      const picked = selectedFilesRef.current.filter((f) => want.has(f.id));
+      if (picked.length === 0) {
+        await ipc.addFilesToCollection(selectedLibraryId, collectionId, fileIds);
+        return;
+      }
+      for (const [lid, ids] of groupLocalIds(picked)) {
+        await ipc.addFilesToCollection(lid, collectionId, ids);
+      }
+'@
+Add-Edit $app 'await ipc.removeFilesFromCollection(selectedLibraryId, collectionId, fileIds);' @'
+const want = new Set(fileIds);
+      const picked = selectedFilesRef.current.filter((f) => want.has(f.id));
+      if (picked.length === 0) {
+        await ipc.removeFilesFromCollection(selectedLibraryId, collectionId, fileIds);
+        return;
+      }
+      for (const [lid, ids] of groupLocalIds(picked)) {
+        await ipc.removeFilesFromCollection(lid, collectionId, ids);
+      }
+'@
 
-Write-Host ''
-Write-Host 'Done. Restart the dev server if it is running, then pick the theme from the palette icon.' -ForegroundColor Cyan
+# Decoded views for the side panels.
+Add-Edit $app @'
+    () => files.find((f) => f.id === primaryFileId) ?? null,
+'@ @'
+    () => {
+      const f = files.find((x) => x.id === primaryFileId);
+      return f ? decodeFileRecord(f) : null;
+    },
+'@
+Add-Edit $app '() => files.filter((f) => selectedFileIds.has(f.id)),' '() => files.filter((f) => selectedFileIds.has(f.id)).map(decodeFileRecord),'
+Add-Edit $app @'
+  const [folderMenu, setFolderMenu] = useState<FolderMenuState>({
+'@ @'
+  selectedFilesRef.current = selectedFiles;
+
+  const [folderMenu, setFolderMenu] = useState<FolderMenuState>({
+'@
+
+# Panels use the file's own library.
+Add-Edit $app @'
+      libraryId={selectedLibraryId}
+      file={primaryFile}
+      selectionCount
+'@ @'
+      libraryId={primaryFile?.libraryId ?? selectedLibraryId}
+      file={primaryFile}
+      selectionCount
+'@
+Add-Edit $app @'
+        libraryId={selectedLibraryId}
+        primaryFile={primaryFile}
+'@ @'
+        libraryId={primaryFile?.libraryId ?? selectedLibraryId}
+        primaryFile={primaryFile}
+'@
+Add-Edit $app @'
+        libraryId={selectedLibraryId}
+        file={primaryFile}
+'@ @'
+        libraryId={primaryFile?.libraryId ?? selectedLibraryId}
+        file={primaryFile}
+'@
+Add-Edit $app @'
+        libraryId={selectedLibraryId}
+        left={selectedFiles[0] ?? null}
+'@ @'
+        libraryId={selectedFiles[0]?.libraryId ?? selectedLibraryId}
+        left={selectedFiles[0] ?? null}
+'@
+Add-Edit $app @'
+        files={selectedFiles}
+        onClose={() => setBatchRenameOpen(false)}
+'@ @'
+        files={selectedFiles.filter((f) => f.libraryId === selectedLibraryId)}
+        onClose={() => setBatchRenameOpen(false)}
+'@
+Add-Edit $app @'
+          libraryId={selectedLibraryId}
+          selectedFiles={selectedFiles}
+'@ @'
+          libraryId={primaryFile?.libraryId ?? selectedLibraryId}
+          selectedFiles={selectedFiles}
+'@
+
+foreach ($doc in $pending.Values) {
+  $out = if ($doc.Crlf) { $doc.Text.Replace("`n", "`r`n") } else { $doc.Text }
+  $bak = $doc.Full + '.bak4'
+  if (-not (Test-Path $bak)) { Copy-Item $doc.Full $bak }
+  [System.IO.File]::WriteAllText($doc.Full, $out, $utf8)
+  Write-Host ("patched  " + $doc.Rel)
+}
+Write-Host "`nDone. Run:  npm run typecheck   then   npm run dev"

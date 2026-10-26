@@ -305,7 +305,7 @@ export function ThumbGrid({
                         }}
                         onDragStart={(e) => {
                           e.preventDefault();
-                          ipc.startFileDrag(file.libraryId, file.id);
+                          ipc.startFileDrag(file.libraryId, file.id % 1000000000);
                         }}
                       />
                     );

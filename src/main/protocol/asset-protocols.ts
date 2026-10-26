@@ -79,7 +79,7 @@ function parse(url: string): ParsedAssetURL | null {
   const seg = parsed.pathname.replace(/^\/+/, '').split('/')[0] ?? '';
   const fileId = Number.parseInt(seg, 10);
   if (!Number.isFinite(fileId) || fileId <= 0) return null;
-  return { libraryId, fileId };
+  return { libraryId, fileId: fileId >= 1000000000 ? fileId % 1000000000 : fileId };
 }
 
 /**

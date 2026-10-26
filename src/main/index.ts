@@ -8,6 +8,7 @@ import { registerTagsIpc } from '@main/ipc/tags';
 import { registerCollectionsIpc } from '@main/ipc/collections';
 import { registerPreferencesIpc } from '@main/ipc/preferences';
 import { registerExportIpc } from '@main/ipc/export';
+import { registerDataTransferIpc } from '@main/ipc/data-transfer';
 import * as manager from '@main/libraries/manager';
 import {
   registerAssetProtocols,
@@ -244,6 +245,7 @@ void app.whenReady().then(() => {
   registerCollectionsIpc();
   registerPreferencesIpc();
   registerExportIpc();
+  registerDataTransferIpc();
   registerWindowIpc();
   // Best-effort restore of registered libraries; failures show as offline.
   // After each library opens its scanner kicks off a scan, and on completion

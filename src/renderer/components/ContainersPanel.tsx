@@ -20,7 +20,8 @@ import {
   IconPlus,
   IconTrash
 } from '@tabler/icons-react';
-import type { CollectionWithCount, FileRecord } from '@shared/types';
+import type { CollectionWithCount, ContainerItem } from '@shared/types';
+import { notifications } from '@mantine/notifications';
 import { ipc } from '../ipc-client';
 
 interface Props {
@@ -33,9 +34,27 @@ interface Props {
   onDelete: (id: number) => void;
   onExportZip: (id: number) => void;
   onExportContactSheet: (id: number) => void;
+  /** Click on an item: jump to its library, then open the container. */
+  onPickItem: (libraryId: string, collectionId: number) => void;
 }
 
 const LINE = 'color-mix(in srgb, var(--mantine-color-indigo-4) 38%, transparent)';
+void [ActionIcon, IconChevronDown, IconChevronRight, ContainerFiles];
+
+async function zipToDesktop(id: number): Promise<void> {
+  const r = await ipc.zipContainerToDesktop(id);
+  if (!r.ok) {
+    notifications.show({ color: 'red', title: 'Zip failed', message: r.error });
+    return;
+  }
+  notifications.show({
+    color: 'green',
+    title: 'Zipped to Desktop',
+    message: `${r.fileCount} file${r.fileCount === 1 ? '' : 's'} -> ${r.path}${
+      r.skipped > 0 ? ` (${r.skipped} missing, skipped)` : ''
+    }`
+  });
+}
 
 /**
  * Containers: simple named groups of assets (for example "one game" or "one
@@ -50,7 +69,8 @@ export function ContainersPanel({
   onRename,
   onDelete,
   onExportZip,
-  onExportContactSheet
+  onExportContactSheet,
+  onPickItem
 }: Props) {
   const [expanded, setExpanded] = useState<Set<number>>(() => new Set());
   const [creating, setCreating] = useState(false);
@@ -68,6 +88,10 @@ export function ContainersPanel({
       else next.add(id);
       return next;
     });
+
+  void expanded;
+  void toggle;
+  void libraryId;
 
   const startCreate = () => {
     createDone.current = false;
@@ -141,9 +165,7 @@ export function ContainersPanel({
       )}
 
       {collections.map((c) => {
-        const isOpen = expanded.has(c.id);
         const isSelected = c.id === selectedCollectionId;
-        const canExpand = c.fileCount > 0 && c.smartQuery == null;
         return (
           <div key={c.id}>
             <Group
@@ -163,15 +185,6 @@ export function ContainersPanel({
                   : '2px solid transparent'
               }}
             >
-              <ActionIcon
-                variant="transparent"
-                size="sm"
-                onClick={() => canExpand && toggle(c.id)}
-                aria-label={isOpen ? 'Collapse' : 'Expand'}
-                style={{ visibility: canExpand ? 'visible' : 'hidden' }}
-              >
-                {isOpen ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
-              </ActionIcon>
               {renamingId === c.id ? (
                 <TextInput
                   size="xs"
@@ -203,17 +216,6 @@ export function ContainersPanel({
                 </UnstyledButton>
               )}
             </Group>
-
-            {isOpen && libraryId && (
-              <div style={{ marginLeft: 11, paddingLeft: 6, borderLeft: `1px solid ${LINE}` }}>
-                <ContainerFiles
-                  libraryId={libraryId}
-                  collectionId={c.id}
-                  version={c.fileCount}
-                  onPick={() => onSelect(c.id)}
-                />
-              </div>
-            )}
           </div>
         );
       })}
@@ -274,6 +276,16 @@ export function ContainersPanel({
           >
             Export contact sheet
           </Menu.Item>
+          <Menu.Item
+            leftSection={<IconDownload size={14} />}
+            onClick={() => {
+              const id = menu.id;
+              setMenu((m) => ({ ...m, opened: false }));
+              void zipToDesktop(id);
+            }}
+          >
+            Zip to Desktop
+          </Menu.Item>
           <Menu.Divider />
           <Menu.Item
             color="red"
@@ -302,14 +314,14 @@ function ContainerFiles({
   libraryId: string;
   collectionId: number;
   version: number;
-  onPick: () => void;
+  onPick: (libraryId: string) => void;
 }) {
-  const [files, setFiles] = useState<FileRecord[] | null>(null);
+  const [files, setFiles] = useState<ContainerItem[] | null>(null);
 
   useEffect(() => {
     let alive = true;
     ipc
-      .queryFiles({ libraryId, collectionId, limit: 500 })
+      .listContainerItems(collectionId)
       .then((r) => {
         if (alive) setFiles(r);
       })
@@ -339,14 +351,17 @@ function ContainerFiles({
     <>
       {files.map((f) => (
         <UnstyledButton
-          key={f.id}
-          onClick={onPick}
+          key={`${f.libraryId}:${f.relPath}`}
+          onClick={() => onPick(f.libraryId)}
           title={f.relPath}
           style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 4px', width: '100%' }}
         >
           <span style={{ width: 8, height: 1, background: LINE, flexShrink: 0 }} />
           <Text size="xs" truncate style={{ flex: 1, minWidth: 0 }}>
-            {f.filename}
+            {f.filename}{' '}
+            <Text span size="xs" c="dimmed">
+              Â· {f.libraryName}
+            </Text>
           </Text>
         </UnstyledButton>
       ))}

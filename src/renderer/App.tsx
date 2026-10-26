@@ -212,6 +212,39 @@ function recentKey(libraryId: string): string {
   return `wh3d:recent:${libraryId}`;
 }
 
+/** Favorites and Recent are global: entries are "libraryId|folderPath" keys. */
+const GLOBAL_FAV_KEY = 'wh3d:favorites:global';
+const GLOBAL_RECENT_KEY = 'wh3d:recent:global';
+
+function folderKey(libraryId: string, path: string): string {
+  return `${libraryId}|${path}`;
+}
+
+function splitFolderKey(key: string): { libraryId: string; path: string } {
+  const i = key.indexOf('|');
+  return i < 0
+    ? { libraryId: '', path: key }
+    : { libraryId: key.slice(0, i), path: key.slice(i + 1) };
+}
+
+/** Container files from other libraries carry id = ordinal * SPAN + localId (see main/containers/query.ts). */
+const LIB_ID_SPAN = 1000000000;
+
+function decodeFileRecord(f: FileRecord): FileRecord {
+  return f.id >= LIB_ID_SPAN ? { ...f, id: f.id % LIB_ID_SPAN } : f;
+}
+
+/** libraryId -> local file ids, for sending bulk actions to each file's own library. */
+function groupLocalIds(list: FileRecord[]): Map<string, number[]> {
+  const m = new Map<string, number[]>();
+  for (const f of list) {
+    const arr = m.get(f.libraryId) ?? [];
+    arr.push(f.id % LIB_ID_SPAN);
+    m.set(f.libraryId, arr);
+  }
+  return m;
+}
+
 function readStoredList(key: string): string[] {
   try {
     const raw = localStorage.getItem(key);
@@ -330,6 +363,13 @@ export function App() {
   const [activeAudio, setActiveAudio] = useState<{ fileId: number; autoPlay: boolean } | null>(null);
   const [primaryFileId, setPrimaryFileId] = useState<number | null>(null);
   const selectionAnchorRef = useRef<number | null>(null);
+  // Set when jumping to a folder/container in ANOTHER library: the library-change
+  // reset effect applies it after it has cleared the per-library state.
+  const pendingNavRef = useRef<{
+    libraryId: string;
+    path: string;
+    collectionId: number | null;
+  } | null>(null);
     // True while the window is shrunk into the mini player. The manager UI is
   // hidden behind it, so global shortcuts (rating, Delete, arrows, Space) must
   // not fire, or you could trash files you can't see.
@@ -519,6 +559,8 @@ export function App() {
     }
   }, []);
 
+  // Latest decoded selection, readable from callbacks defined before it exists.
+  const selectedFilesRef = useRef<FileRecord[]>([]);
   const [favoriteFolders, setFavoriteFoldersState] = useState<string[]>([]);
   const [recentFolders, setRecentFoldersState] = useState<string[]>([]);
   // Filter recent down to non-pinned, capped at MAX_VISIBLE so the section
@@ -535,8 +577,8 @@ export function App() {
       setRecentFoldersState([]);
       return;
     }
-    setFavoriteFoldersState(readStoredList(favoritesKey(selectedLibraryId)));
-    setRecentFoldersState(readStoredList(recentKey(selectedLibraryId)));
+    setFavoriteFoldersState(readStoredList(GLOBAL_FAV_KEY));
+    setRecentFoldersState(readStoredList(GLOBAL_RECENT_KEY));
   }, [selectedLibraryId]);
 
   // Append the selected folder to the recent list, but leave it in place if
@@ -545,19 +587,56 @@ export function App() {
   useEffect(() => {
     if (!selectedLibraryId || selectedCollectionId != null) return;
     setRecentFoldersState((prev) => {
-      if (prev.includes(selectedFolderPath)) return prev;
-      const next = [selectedFolderPath, ...prev].slice(0, MAX_RECENT_FOLDERS);
-      writeStoredList(recentKey(selectedLibraryId), next);
+      const key = folderKey(selectedLibraryId, selectedFolderPath);
+      if (prev.includes(key)) return prev;
+      const next = [key, ...prev].slice(0, MAX_RECENT_FOLDERS);
+      writeStoredList(GLOBAL_RECENT_KEY, next);
       return next;
     });
   }, [selectedLibraryId, selectedFolderPath, selectedCollectionId]);
+
+  // One-time import of the old per-library favorites/recent into the global lists.
+  useEffect(() => {
+    if (libraries.length === 0) return;
+    try {
+      if (localStorage.getItem(GLOBAL_FAV_KEY) !== null) return;
+    } catch {
+      return;
+    }
+    const favs: string[] = [];
+    const recents: string[] = [];
+    for (const l of libraries) {
+      for (const p of readStoredList(favoritesKey(l.id))) favs.push(folderKey(l.id, p));
+      for (const p of readStoredList(recentKey(l.id))) recents.push(folderKey(l.id, p));
+    }
+    const recentCapped = recents.slice(0, MAX_RECENT_FOLDERS);
+    writeStoredList(GLOBAL_FAV_KEY, favs);
+    writeStoredList(GLOBAL_RECENT_KEY, recentCapped);
+    setFavoriteFoldersState(favs);
+    setRecentFoldersState(recentCapped);
+  }, [libraries]);
+
+  // Key-based variants used by the global Favorites/Recent lists.
+  const toggleFavoriteKey = useCallback((key: string) => {
+    setFavoriteFoldersState((prev) => {
+      const next = prev.includes(key) ? prev.filter((p) => p !== key) : [...prev, key];
+      writeStoredList(GLOBAL_FAV_KEY, next);
+      return next;
+    });
+  }, []);
+
+  const isFavoriteKey = useCallback(
+    (key: string) => favoriteFolders.includes(key),
+    [favoriteFolders]
+  );
 
   const toggleFavoriteFolder = useCallback(
     (path: string) => {
       if (!selectedLibraryId) return;
       setFavoriteFoldersState((prev) => {
-        const next = prev.includes(path) ? prev.filter((p) => p !== path) : [...prev, path];
-        writeStoredList(favoritesKey(selectedLibraryId), next);
+        const key = folderKey(selectedLibraryId, path);
+        const next = prev.includes(key) ? prev.filter((p) => p !== key) : [...prev, key];
+        writeStoredList(GLOBAL_FAV_KEY, next);
         return next;
       });
     },
@@ -565,8 +644,9 @@ export function App() {
   );
 
   const isFavoriteFolder = useCallback(
-    (path: string) => favoriteFolders.includes(path),
-    [favoriteFolders]
+    (path: string) =>
+      !!selectedLibraryId && favoriteFolders.includes(folderKey(selectedLibraryId, path)),
+    [favoriteFolders, selectedLibraryId]
   );
 
   useEffect(() => {
@@ -866,6 +946,13 @@ export function App() {
     setSelectedColorLabels(new Set());
     setDuplicatesOnly(false);
     setAllTags([]);
+    // Jumped here from another library's favorite/recent/container item.
+    const pending = pendingNavRef.current;
+    if (pending && pending.libraryId === selectedLibraryId) {
+      pendingNavRef.current = null;
+      setSelectedFolderPath(pending.path);
+      setSelectedCollectionId(pending.collectionId);
+    }
     if (!selectedLibraryId) return;
     void refreshTree(selectedLibraryId);
     void refreshTags(selectedLibraryId);
@@ -932,7 +1019,7 @@ export function App() {
 
     // Select initial audio/video file on folder load WITHOUT starting playback
     if (isPlayableMediaExt(first.ext)) {
-      setActiveAudio({ fileId: first.id, autoPlay: false });
+      setActiveAudio({ fileId: first.id % LIB_ID_SPAN, autoPlay: false });
     }
   }, [files]);
 
@@ -940,7 +1027,7 @@ export function App() {
     if (!selectedLibraryId || files.length === 0) return;
     void ipc.bumpVisibleThumbs(
       selectedLibraryId,
-      files.slice(0, 100).map((f) => f.id)
+      files.filter((f) => f.libraryId === selectedLibraryId).slice(0, 100).map((f) => f.id)
     );
   }, [selectedLibraryId, files]);
 
@@ -1023,6 +1110,29 @@ export function App() {
         return;
       }
 
+      // Changes made to a container file that lives in ANOTHER library.
+      if (event.libraryId !== s.selectedLibraryId && s.selectedLibraryId) {
+        if (event.kind === 'collections-changed') void refreshCollections(s.selectedLibraryId);
+        if (
+          (event.kind === 'collections-changed' || event.kind === 'files-changed') &&
+          s.selectedCollectionId != null
+        ) {
+          void refreshFiles(
+            s.selectedLibraryId,
+            s.selectedFolderPath,
+            s.selectedCollectionId,
+            s.searchQuery,
+            s.selectedExtensions,
+            s.selectedTagIds,
+            s.minRating,
+            s.selectedColorLabels,
+            s.sort,
+            s.viewScope,
+            s.duplicatesOnly
+          );
+        }
+        if (event.kind === 'collections-changed' || event.kind === 'files-changed') return;
+      }
       if (event.libraryId !== s.selectedLibraryId) return;
 
       const reloadFiles = () =>
@@ -1137,6 +1247,61 @@ export function App() {
       setViewScope('normal');
     }
   }, []);
+
+  // Jump to a folder from the global Favorites/Recent lists. Entries from another
+  // library switch the library first; the reset effect then applies the folder.
+  const openFolderKey = useCallback(
+    (key: string) => {
+      const { libraryId, path } = splitFolderKey(key);
+      if (!libraryId || libraryId === selectedLibraryIdRef.current) {
+        selectFolder(path);
+        return;
+      }
+      const target = libraries.find((l) => l.id === libraryId);
+      if (!target || !target.online) {
+        notifications.show({
+          color: 'orange',
+          title: 'Library offline',
+          message: `${target?.name ?? 'That library'} is not available.`
+        });
+        return;
+      }
+      pendingNavRef.current = { libraryId, path, collectionId: null };
+      setSelectedLibraryId(libraryId);
+    },
+    [libraries, selectFolder]
+  );
+
+  // Click on an item inside a container: switch to its library, then open the container.
+  const handlePickContainerItem = useCallback(
+    (libraryId: string, collectionId: number) => {
+      if (libraryId === selectedLibraryIdRef.current) {
+        selectCollection(collectionId);
+        return;
+      }
+      const target = libraries.find((l) => l.id === libraryId);
+      if (!target || !target.online) {
+        notifications.show({
+          color: 'orange',
+          title: 'Library offline',
+          message: `${target?.name ?? 'That library'} is not available.`
+        });
+        return;
+      }
+      pendingNavRef.current = { libraryId, path: '', collectionId };
+      setSelectedLibraryId(libraryId);
+    },
+    [libraries, selectCollection]
+  );
+
+  const libraryNameMap = useMemo(
+    () => Object.fromEntries(libraries.map((l) => [l.id, l.name])) as Record<string, string>,
+    [libraries]
+  );
+  const currentFolderKey =
+    selectedLibraryId && selectedCollectionId == null && viewScope === 'normal'
+      ? folderKey(selectedLibraryId, selectedFolderPath)
+      : '';
 
   // Toggle: first click shows every model in the library, second click goes back
   // to where you were (the folder or container you left).
@@ -1318,7 +1483,7 @@ export function App() {
       selectionAnchorRef.current = fileId;
 
       if (clickedFile && isPlayableMediaExt(clickedFile.ext)) {
-        setActiveAudio({ fileId: clickedFile.id, autoPlay: true });
+        setActiveAudio({ fileId: clickedFile.id % LIB_ID_SPAN, autoPlay: true });
       }
     },
     [files, primaryFileId]
@@ -1354,7 +1519,7 @@ export function App() {
     const toDelete = deleteConfirm.files;
     setDeleteConfirm({ open: false, files: [] });
     for (const f of toDelete) {
-      const r = await ipc.deleteFile(f.libraryId, f.id);
+      const r = await ipc.deleteFile(f.libraryId, f.id % LIB_ID_SPAN);
       if (!r.ok) {
         notifications.show({ color: 'red', title: 'Delete failed', message: r.error });
         break;
@@ -1367,7 +1532,7 @@ export function App() {
     const items = files.filter((f) => selectedFileIds.has(f.id));
     if (items.length === 0) return;
     for (const f of items) {
-      const r = await ipc.duplicateFile(f.libraryId, f.id);
+      const r = await ipc.duplicateFile(f.libraryId, f.id % LIB_ID_SPAN);
       if (!r.ok) {
         notifications.show({ color: 'red', title: 'Duplicate failed', message: r.error });
         break;
@@ -1404,7 +1569,7 @@ export function App() {
     for (const f of toMove) {
       // Moves stay within the file's owning library — the drop target is a
       // folder path that's only meaningful relative to that library's root.
-      const r = await ipc.moveFile(f.libraryId, f.id, toParentDir);
+      const r = await ipc.moveFile(f.libraryId, f.id % LIB_ID_SPAN, toParentDir);
       if (!r.ok) {
         notifications.show({ color: 'red', title: 'Move failed', message: r.error });
         break;
@@ -1504,11 +1669,15 @@ export function App() {
 
   const handleRerenderThumb = useCallback(
     (fileId: number) => {
-      const file = files.find((f) => f.id === fileId);
+      const file =
+        files.find((f) => f.id === primaryFileId && f.id % LIB_ID_SPAN === fileId) ??
+        files.find((f) => f.id === fileId);
       if (!file) return;
-      void ipc.rerenderThumb(file.libraryId, fileId).then(() => scheduleThumbRecount());
+      void ipc
+        .rerenderThumb(file.libraryId, file.id % LIB_ID_SPAN)
+        .then(() => scheduleThumbRecount());
     },
-    [files, scheduleThumbRecount]
+    [files, primaryFileId, scheduleThumbRecount]
   );
 
   // Folder-level actions from the FolderTree context menu. Route through the
@@ -1573,7 +1742,9 @@ export function App() {
   const handleBulkAddTag = useCallback(
     async (tagName: string) => {
       if (!selectedLibraryId || selectedIdsArray.length === 0) return;
-      await ipc.addTagToFiles(selectedLibraryId, selectedIdsArray, tagName);
+      for (const [lid, ids] of groupLocalIds(selectedFilesRef.current)) {
+        await ipc.addTagToFiles(lid, ids, tagName);
+      }
     },
     [selectedLibraryId, selectedIdsArray]
   );
@@ -1581,7 +1752,12 @@ export function App() {
   const handleBulkRemoveTag = useCallback(
     async (tagId: number) => {
       if (!selectedLibraryId || selectedIdsArray.length === 0) return;
-      await ipc.removeTagFromFiles(selectedLibraryId, selectedIdsArray, tagId);
+      // Tag ids belong to one library, so only files of the current library are touched.
+      await ipc.removeTagFromFiles(
+        selectedLibraryId,
+        groupLocalIds(selectedFilesRef.current).get(selectedLibraryId) ?? [],
+        tagId
+      );
     },
     [selectedLibraryId, selectedIdsArray]
   );
@@ -1589,14 +1765,18 @@ export function App() {
   const handleBulkSetOrientation = useCallback(
     async (orientation: FileOrientation | null) => {
       if (!selectedLibraryId || selectedIdsArray.length === 0) return;
-      await ipc.setFileOrientations(selectedLibraryId, selectedIdsArray, orientation);
+      for (const [lid, ids] of groupLocalIds(selectedFilesRef.current)) {
+        await ipc.setFileOrientations(lid, ids, orientation);
+      }
     },
     [selectedLibraryId, selectedIdsArray]
   );
 
   const handleBulkRerender = useCallback(async () => {
     if (!selectedLibraryId || selectedIdsArray.length === 0) return;
-    await ipc.rerenderThumbs(selectedLibraryId, selectedIdsArray);
+    for (const [lid, ids] of groupLocalIds(selectedFilesRef.current)) {
+      await ipc.rerenderThumbs(lid, ids);
+    }
     scheduleThumbRecount();
   }, [selectedLibraryId, selectedIdsArray, scheduleThumbRecount]);
 
@@ -1606,7 +1786,9 @@ export function App() {
   const handleBulkSetRating = useCallback(
     async (rating: number) => {
       if (!selectedLibraryId || selectedIdsArray.length === 0) return;
-      await ipc.setFileRatings(selectedLibraryId, selectedIdsArray, rating);
+      for (const [lid, ids] of groupLocalIds(selectedFilesRef.current)) {
+        await ipc.setFileRatings(lid, ids, rating);
+      }
     },
     [selectedLibraryId, selectedIdsArray]
   );
@@ -1614,7 +1796,9 @@ export function App() {
   const handleBulkSetColorLabel = useCallback(
     async (label: ColorLabel | null) => {
       if (!selectedLibraryId || selectedIdsArray.length === 0) return;
-      await ipc.setFileColorLabels(selectedLibraryId, selectedIdsArray, label);
+      for (const [lid, ids] of groupLocalIds(selectedFilesRef.current)) {
+        await ipc.setFileColorLabels(lid, ids, label);
+      }
     },
     [selectedLibraryId, selectedIdsArray]
   );
@@ -1764,7 +1948,15 @@ export function App() {
   const handleAddToCollection = useCallback(
     async (collectionId: number, fileIds: number[]) => {
       if (!selectedLibraryId) return;
-      await ipc.addFilesToCollection(selectedLibraryId, collectionId, fileIds);
+      const want = new Set(fileIds);
+      const picked = selectedFilesRef.current.filter((f) => want.has(f.id));
+      if (picked.length === 0) {
+        await ipc.addFilesToCollection(selectedLibraryId, collectionId, fileIds);
+        return;
+      }
+      for (const [lid, ids] of groupLocalIds(picked)) {
+        await ipc.addFilesToCollection(lid, collectionId, ids);
+      }
     },
     [selectedLibraryId]
   );
@@ -1772,7 +1964,15 @@ export function App() {
   const handleRemoveFromCollection = useCallback(
     async (collectionId: number, fileIds: number[]) => {
       if (!selectedLibraryId) return;
-      await ipc.removeFilesFromCollection(selectedLibraryId, collectionId, fileIds);
+      const want = new Set(fileIds);
+      const picked = selectedFilesRef.current.filter((f) => want.has(f.id));
+      if (picked.length === 0) {
+        await ipc.removeFilesFromCollection(selectedLibraryId, collectionId, fileIds);
+        return;
+      }
+      for (const [lid, ids] of groupLocalIds(picked)) {
+        await ipc.removeFilesFromCollection(lid, collectionId, ids);
+      }
     },
     [selectedLibraryId]
   );
@@ -1961,13 +2161,18 @@ export function App() {
       ? collections.find((c) => c.id === selectedCollectionId) ?? null
       : null;
   const primaryFile = useMemo(
-    () => files.find((f) => f.id === primaryFileId) ?? null,
+    () => {
+      const f = files.find((x) => x.id === primaryFileId);
+      return f ? decodeFileRecord(f) : null;
+    },
     [files, primaryFileId]
   );
   const selectedFiles = useMemo(
-    () => files.filter((f) => selectedFileIds.has(f.id)),
+    () => files.filter((f) => selectedFileIds.has(f.id)).map(decodeFileRecord),
     [files, selectedFileIds]
   );
+
+  selectedFilesRef.current = selectedFiles;
 
   const [folderMenu, setFolderMenu] = useState<FolderMenuState>({
     opened: false,
@@ -2066,24 +2271,27 @@ export function App() {
                 onDelete={(id) => void handleDeleteCollection(id)}
                 onExportZip={(id) => void handleExportCollectionZip(id)}
                 onExportContactSheet={(id) => void handleExportCollectionContactSheet(id)}
+                onPickItem={handlePickContainerItem}
               />
             </CollapsibleSection>
             <CollapsibleSection title="Favorites">
               <FolderRowList
                 paths={favoriteFolders}
-                selectedPath={selectedFolderPath}
-                onSelect={selectFolder}
-                onToggleFavorite={toggleFavoriteFolder}
-                isFavorite={isFavoriteFolder}
+                libraryNames={libraryNameMap}
+                selectedKey={currentFolderKey}
+                onOpen={openFolderKey}
+                onToggleFavorite={toggleFavoriteKey}
+                isFavorite={isFavoriteKey}
               />
             </CollapsibleSection>
             <CollapsibleSection title="Recent">
               <FolderRowList
                 paths={visibleRecentFolders}
-                selectedPath={selectedFolderPath}
-                onSelect={selectFolder}
-                onToggleFavorite={toggleFavoriteFolder}
-                isFavorite={isFavoriteFolder}
+                libraryNames={libraryNameMap}
+                selectedKey={currentFolderKey}
+                onOpen={openFolderKey}
+                onToggleFavorite={toggleFavoriteKey}
+                isFavorite={isFavoriteKey}
               />
             </CollapsibleSection>
             <CollapsibleSection title="Tags">
@@ -2227,7 +2435,7 @@ export function App() {
   const previewPane = (
     <PreviewPane
     
-      libraryId={selectedLibraryId}
+      libraryId={primaryFile?.libraryId ?? selectedLibraryId}
       file={primaryFile}
       selectionCount={selectedFileIds.size}
       lightingStyle={lightingStyle}
@@ -2244,7 +2452,7 @@ export function App() {
   const metadataPane = (
     <div style={{ height: '100%', borderLeft: '1px solid var(--mantine-color-dark-4)' }}>
       <MetadataPanel
-        libraryId={selectedLibraryId}
+        libraryId={primaryFile?.libraryId ?? selectedLibraryId}
         primaryFile={primaryFile}
         selectedFiles={selectedFiles}
         allTags={allTags}
@@ -2571,14 +2779,14 @@ export function App() {
       <BatchRenameModal
         opened={batchRenameOpen}
         libraryId={selectedLibraryId}
-        files={selectedFiles}
+        files={selectedFiles.filter((f) => f.libraryId === selectedLibraryId)}
         onClose={() => setBatchRenameOpen(false)}
       />
 
       <FullscreenPreviewModal
         opened={fullscreenOpen}
         onClose={() => setFullscreenOpen(false)}
-        libraryId={selectedLibraryId}
+        libraryId={primaryFile?.libraryId ?? selectedLibraryId}
         file={primaryFile}
         lightingStyle={lightingStyle}
       />
@@ -2608,7 +2816,7 @@ export function App() {
       <CompareModal
         opened={compareOpen}
         onClose={() => setCompareOpen(false)}
-        libraryId={selectedLibraryId}
+        libraryId={selectedFiles[0]?.libraryId ?? selectedLibraryId}
         left={selectedFiles[0] ?? null}
         right={selectedFiles[1] ?? null}
         lightingStyle={lightingStyle}
@@ -2634,7 +2842,7 @@ export function App() {
           x={contextMenu.x}
           y={contextMenu.y}
           onClose={closeContextMenu}
-          libraryId={selectedLibraryId}
+          libraryId={primaryFile?.libraryId ?? selectedLibraryId}
           selectedFiles={selectedFiles}
           primaryFile={primaryFile}
           onOpenPreferences={() => setPreferencesOpen(true)}
@@ -2759,9 +2967,9 @@ function ShowAllInLibraryLink({
         fontWeight: active ? 600 : 500,
         whiteSpace: 'normal'
       }}
-      title={`Show all models in current library: ${libraryName}`}
+      title={`Show all files in current library: ${libraryName}`}
     >
-      Show all models in current library:{' '}
+      Show all files in current library:{' '}
       <span style={{ color: 'var(--mantine-color-indigo-3)' }}>{libraryName}</span>
     </button>
   );

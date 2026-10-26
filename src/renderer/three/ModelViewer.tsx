@@ -43,8 +43,8 @@ function clampZoom(value: number): number {
 // WASD / Q / E (cursor over viewport): fly, Shift = fast
 // Right mouse button (hold) : adds mouse-look to the fly keys
 // Mouse wheel               : eased zoom along the view direction
-// Middle mouse (hold)       : same as right mouse (mouse-look + fly), shows the speed
-// Wheel while RMB/MMB held  : changes the navigation speed (fly AND zoom)
+// Middle mouse (hold)       : pan the view (grab it and move left / right / up / down)
+// Wheel while RMB held      : changes the navigation speed (fly AND zoom)
 // Left mouse drag           : orbit around the pivot, Shift/Ctrl + drag pans
 // F                         : frame the model
 const NAV_FLY_SPEED = 0.6;                       // WASD speed, in model radii per second (at speed x1)
@@ -911,6 +911,11 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     // Mouse-look / speed-drag state
     let lookActive = false;
     let lookButton = -1; // which mouse button started the look (1 = middle, 2 = right)
+
+    // Middle-button pan state
+    let panActive = false;
+    const panRight = new THREE.Vector3();
+    const panUp = new THREE.Vector3();
     let hovering = false; // cursor is over the 3D viewport
     const onEnter = () => {
       hovering = true;
@@ -1012,6 +1017,41 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
       };
     };
 
+    // Middle button: grab the view and slide it left / right / up / down.
+    // No rotation: the camera and its orbit pivot move together in the screen plane.
+    const panBy = (dx: number, dy: number) => {
+      const dist = Math.max(
+        ctx.camera.position.distanceTo(ctx.controls.target),
+        modelRadiusRef.current * NAV_MIN_STEP_FACTOR
+      );
+      const perPixel =
+        (2 * dist * Math.tan(THREE.MathUtils.degToRad(ctx.camera.fov) / 2)) /
+        Math.max(canvas.clientHeight, 1) /
+        Math.max(ctx.camera.zoom, 1e-6);
+      panRight.set(1, 0, 0).applyQuaternion(ctx.camera.quaternion);
+      panUp.set(0, 1, 0).applyQuaternion(ctx.camera.quaternion);
+      flyMove
+        .set(0, 0, 0)
+        .addScaledVector(panRight, -dx * perPixel) // drag right -> the scene follows to the right
+        .addScaledVector(panUp, dy * perPixel); // drag down -> the scene follows down
+      ctx.camera.position.add(flyMove);
+      ctx.controls.target.add(flyMove);
+      ctx.controls.update();
+    };
+    const startPan = () => {
+      if (panActive || lookActive || !ctx.currentObject) return;
+      panActive = true;
+      cancelFocus();
+      // Cancel a running gizmo swing (it listens for OrbitControls' 'start').
+      ctx.controls.dispatchEvent({ type: 'start' } as never);
+      canvas.style.cursor = 'grabbing';
+    };
+    const endPan = () => {
+      if (!panActive) return;
+      panActive = false;
+      canvas.style.cursor = '';
+    };
+
     const startLook = (button: number) => {
       if (lookActive || !ctx.currentObject) return;
       lookActive = true;
@@ -1042,22 +1082,44 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
       if (e.button === 2 || e.button === 1) {
         e.preventDefault();
         if (e.buttons & 1) return; // left button is already orbiting: don't mix the two
-        startLook(e.button);
+        if (e.button === 1) {
+          startPan(); // middle button: pan the view
+          if (panActive) {
+            try {
+              canvas.setPointerCapture(e.pointerId);
+            } catch {
+              /* capture is optional */
+            }
+          }
+        }
+        else startLook(e.button); // right button: mouse-look + fly
       }
     };
     // While looking, a left click must not start an orbit at the same time
     // (that is what made the view fight itself). Runs before OrbitControls.
     const onWindowPointerDownCapture = (e: PointerEvent) => {
-      if (lookActive && e.button === 0 && e.target === canvas) {
+      if ((lookActive || panActive) && e.button === 0 && e.target === canvas) {
         e.stopPropagation();
         e.preventDefault();
       }
     };
     const onPointerUp = (e: PointerEvent) => {
       if (lookActive && e.button === lookButton) endLook();
+      if (panActive && e.button === 1) endPan();
     };
     const onMouseMove = (e: MouseEvent) => {
       if (lookActive) lookBy(e.movementX, e.movementY);
+      // pan moves are handled in onPointerMove below
+    };
+    // Pan runs on pointer events: after a preventDefault()-ed pointerdown,
+    // Chromium stops sending mousemove, which can leave the pan dead.
+    const onPointerMove = (e: PointerEvent) => {
+      if (!panActive) return;
+      if ((e.buttons & 4) === 0) {
+        endPan(); // middle button was released somewhere we missed
+        return;
+      }
+      panBy(e.movementX, e.movementY);
     };
     const onPointerLockChange = () => {
       // Esc (or the browser) can drop the lock while the button is still down.
@@ -1101,6 +1163,7 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
       keys.clear();
       shiftHeld = false;
       endLook();
+      endPan();
     };
 
     const onWheel = (e: WheelEvent) => {
@@ -1186,6 +1249,7 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('blur', onBlur);
     window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerdown', onWindowPointerDownCapture, true);
     window.addEventListener('pointerup', onPointerUp);
     window.addEventListener('pointercancel', onBlur);
@@ -1199,11 +1263,13 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     return () => {
       cancelAnimationFrame(raf);
       endLook();
+      endPan();
       window.removeEventListener('pointerdown', onWindowPointerDownCapture, true);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('blur', onBlur);
       window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
       window.removeEventListener('pointercancel', onBlur);
       document.removeEventListener('pointerlockchange', onPointerLockChange);

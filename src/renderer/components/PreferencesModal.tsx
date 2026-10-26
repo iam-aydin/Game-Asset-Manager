@@ -21,6 +21,8 @@ import {
   IconCheck,
   IconCoffee,
   IconDatabase,
+  IconDownload,
+  IconUpload,
   IconFileText,
   IconFolderOpen,
   IconMoon,
@@ -508,6 +510,9 @@ export function PreferencesModal({
           <Tabs.Tab value="logs" leftSection={<IconFileText size={16} />}>
             Logs
           </Tabs.Tab>
+          <Tabs.Tab value="data" leftSection={<IconDatabase size={16} />}>
+            Data
+          </Tabs.Tab>
         </Tabs.List>
 
         <Tabs.Panel value="quality">
@@ -530,6 +535,9 @@ export function PreferencesModal({
         </Tabs.Panel>
         <Tabs.Panel value="logs">
           <LogsSection prefs={prefs} />
+        </Tabs.Panel>
+        <Tabs.Panel value="data">
+          <DataSection />
         </Tabs.Panel>
       </Tabs>
 
@@ -796,6 +804,108 @@ function CacheSection({ libraryId }: { libraryId: string | null }) {
             onClick={() => void purge()}
           >
             Purge
+          </Button>
+        </Property>
+      </Category>
+    </Stack>
+  );
+}
+
+function readLocalList(key: string): string[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) ?? '[]');
+    return Array.isArray(parsed) ? parsed.filter((s: unknown) => typeof s === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function DataSection() {
+  const [busy, setBusy] = useState<'export' | 'import' | null>(null);
+
+  const doExport = async () => {
+    setBusy('export');
+    try {
+      const r = await ipc.exportData({
+        favorites: readLocalList('wh3d:favorites:global'),
+        recent: readLocalList('wh3d:recent:global')
+      });
+      if (!r.ok) {
+        notifications.show({ color: 'red', title: 'Export failed', message: r.error });
+      } else if (!r.canceled) {
+        notifications.show({ color: 'green', title: 'Data exported', message: r.path });
+      }
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const doImport = async () => {
+    setBusy('import');
+    try {
+      const r = await ipc.importData();
+      if (!r.ok) {
+        notifications.show({ color: 'red', title: 'Import failed', message: r.error });
+        return;
+      }
+      if (r.canceled) return;
+      const merge = (key: string, add: string[]) => {
+        const next = [...new Set([...readLocalList(key), ...add])];
+        try {
+          localStorage.setItem(key, JSON.stringify(next));
+        } catch {
+          // ignore
+        }
+      };
+      merge('wh3d:favorites:global', r.local.favorites);
+      merge('wh3d:recent:global', r.local.recent);
+      notifications.show({
+        color: 'green',
+        title: 'Data imported',
+        message:
+          `${r.libraries} libraries, ${r.containers} containers.` +
+          (r.pending > 0
+            ? ` ${r.pending} files are still being scanned; ratings and tags for them apply when the scan finishes. Keep the app open.`
+            : ''),
+        autoClose: 10000
+      });
+      setTimeout(() => window.location.reload(), 1500);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <Stack gap="md">
+      <Note>
+        Move your setup to another computer. The export holds your libraries, containers,
+        favorites, recent folders, and the ratings, color labels, notes and tags of your files. It
+        does not include the asset files or thumbnails; thumbnails rebuild after importing.
+      </Note>
+      <Category title="Backup and transfer">
+        <Property label="Export data" hint="Saves one .gamdata file (Desktop by default).">
+          <Button
+            className="gam-btn-flat"
+            size="xs"
+            leftSection={<IconUpload size={14} />}
+            loading={busy === 'export'}
+            onClick={() => void doExport()}
+          >
+            Export data
+          </Button>
+        </Property>
+        <Property
+          label="Import data"
+          hint="Asks where each library folder is on this computer, then merges everything in."
+        >
+          <Button
+            className="gam-btn-flat"
+            size="xs"
+            leftSection={<IconDownload size={14} />}
+            loading={busy === 'import'}
+            onClick={() => void doImport()}
+          >
+            Import data
           </Button>
         </Property>
       </Category>

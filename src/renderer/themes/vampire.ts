@@ -1,7 +1,7 @@
 import type { Theme } from './types';
 
 /**
- * Vampire â€” blood-crimson + amethyst + antique gold on near-black burgundy.
+ * Vampire - blood-crimson + amethyst + antique gold on near-black burgundy.
  * Same recipe as Cyberpunk, different palette:
  *
  *   dark-4                         -> dividers / panel borders (dim wine)
@@ -102,8 +102,8 @@ const vampire: Theme = {
     '--wh3d-slider-thumb-border': '#a71935',
     '--wh3d-overlay-bg': 'rgba(11,3,7,0.9)',
     '--wh3d-overlay-border': LINE_STRONG,
-    '--wh3d-viz-top': '#ff7a92',
-    '--wh3d-viz-mid': '#a4133c'
+    '--wh3d-viz-top': '#ff2b4a',
+    '--wh3d-viz-mid': '#7f0d20'
   }
 };
 

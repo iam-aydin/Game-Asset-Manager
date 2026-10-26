@@ -45,6 +45,42 @@ html[data-wh3d-scheme='light'] {
   --fg-rim-w-mini: 0.9;
   --fg-edge: rgba(255, 255, 255, 0.7);
 }
+/* BEGIN theme-folders (vampire + mint gum) */
+html[data-wh3d-theme*='vampire' i],
+html[data-wh3d-label*='vampire' i] {
+  --fg-c1: #ff2d4d;
+  --fg-c2: #6e0b1c;
+  --fg-blob-op: 0.9;
+  --fg-under-op: 0.35;
+  --fg-body-op: 0.45;
+  --fg-glass-top: 0.3;
+  --fg-glass-bot: 0.07;
+  --fg-rim-a: #ff7a92;
+  --fg-rim-b: #c9184a;
+  --fg-rim-c: #ff4d6d;
+  --fg-rim-w: 0.6;
+  --fg-rim-w-mini: 0.9;
+  --fg-edge: rgba(255, 77, 109, 0.35);
+  --fg-outline: rgba(0, 0, 0, 0.75);
+  --fg-outline-w: 0.9;
+  --fg-outline-w-mini: 1.4;
+}
+html[data-wh3d-theme*='mint' i],
+html[data-wh3d-label*='mint' i] {
+  --fg-c1: #2f8cf0;
+  --fg-c2: #19c37d;
+  --fg-blob-op: 0.55;
+  --fg-body-op: 0.6;
+  --fg-glass-top: 0.5;
+  --fg-glass-bot: 0.08;
+  --fg-rim-a: rgba(10, 70, 80, 0.85);
+  --fg-rim-b: rgba(10, 70, 80, 0.45);
+  --fg-rim-c: rgba(10, 90, 70, 0.7);
+  --fg-rim-w: 0.5;
+  --fg-rim-w-mini: 0.9;
+  --fg-edge: rgba(255, 255, 255, 0.7);
+}
+/* END theme-folders */
 html[data-wh3d-theme*='cyber' i],
 html[data-wh3d-label*='cyber' i] {
   --fg-c1: #fcee09;

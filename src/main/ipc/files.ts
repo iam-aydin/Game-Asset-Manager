@@ -32,6 +32,8 @@ import { scanner } from '@main/scanner/service';
 import { queueRunner } from '@main/thumb-pool/queue-runner';
 import { undoQueue } from '@main/undo/queue';
 import { moveOnDisk, renameEntryFor } from '@main/files/move-service';
+import * as containersStore from '@main/containers/store';
+import { queryContainerFiles } from '@main/containers/query';
 
 const broadcast = broadcastLibraryEvent;
 
@@ -63,6 +65,7 @@ async function reverseRename(
   const moved = await moveOnDisk(absCurrent, absOriginal);
   if (!moved.ok) return moved;
   lib.files.applyRenames([renameEntryFor(fileId, fromRelPath)]);
+  containersStore.renamePaths(libraryId, [{ from: toRelPath, to: fromRelPath }]);
   broadcast({ kind: 'files-changed', libraryId });
   return { ok: true };
 }
@@ -209,6 +212,13 @@ export function registerFilesIpc(): void {
           renameEntryFor(f.id, newFolderPath + f.relPath.slice(folderPath.length))
         );
         lib.files.applyRenames(entries);
+        containersStore.renamePaths(
+          libraryId,
+          affected.map((f) => ({
+            from: f.relPath,
+            to: newFolderPath + f.relPath.slice(folderPath.length)
+          }))
+        );
       }
 
       broadcast({ kind: 'files-changed', libraryId });
@@ -439,6 +449,10 @@ export function registerFilesIpc(): void {
       // Apply the rename to the DB. The scanner's `applyRenames` does the
       // right thing (UPDATE rel_path/parent_dir/filename, updated_at).
       lib.files.applyRenames(plan.map((p) => renameEntryFor(p.fileId, p.toRelPath)));
+      containersStore.renamePaths(
+        libraryId,
+        plan.map((p) => ({ from: p.fromRelPath, to: p.toRelPath }))
+      );
       broadcast({ kind: 'files-changed', libraryId });
 
       // Capture the plan for undo. Reverse order so each individual rename
@@ -487,6 +501,7 @@ export function registerFilesIpc(): void {
       const moved = await moveOnDisk(absFrom, absTo);
       if (!moved.ok) return moved;
       lib.files.applyRenames([renameEntryFor(fileId, toRelPath)]);
+      containersStore.renamePaths(libraryId, [{ from: file.relPath, to: toRelPath }]);
       broadcast({ kind: 'files-changed', libraryId });
 
       const fromRel = file.relPath;
@@ -568,6 +583,7 @@ export function registerFilesIpc(): void {
         return { ok: false, error: (err as Error).message };
       }
       lib.files.deleteByRelPath(file.relPath);
+      containersStore.removePath(libraryId, file.relPath);
       broadcast({ kind: 'files-changed', libraryId });
       // Surface the trashing so the renderer can offer "Show in Trash" —
       // shell.trashItem has no programmatic restore counterpart, so this is
@@ -581,6 +597,8 @@ export function registerFilesIpc(): void {
     const lib = getOpenLibrary(req.libraryId);
     if (!lib) return [];
     const { libraryId: _, ...rest } = req;
+    // Containers are global; their membership is stored outside the library DB.
+    if (rest.collectionId != null) return queryContainerFiles(lib, rest);
     return lib.files.query(rest);
   });
 

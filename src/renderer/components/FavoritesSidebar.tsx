@@ -2,26 +2,31 @@ import { ActionIcon, Group, Stack, Text, Tooltip, UnstyledButton } from '@mantin
 import { IconFolder, IconStar, IconStarOff } from '@tabler/icons-react';
 
 interface Props {
-  /** Folder paths to show in the list. */
+  /** Entries as "libraryId|folderPath" keys (folderPath is "" for a library root). */
   paths: string[];
-  /** The currently selected folder path — used to highlight the active row. */
-  selectedPath: string;
-  onSelect: (path: string) => void;
-  /** Toggle pin/unpin. */
-  onToggleFavorite: (path: string) => void;
-  /** Whether a row is currently a favorite (drives star fill/icon). */
-  isFavorite: (path: string) => boolean;
+  /** libraryId -> display name. */
+  libraryNames: Record<string, string>;
+  /** Key of the currently open folder, used to highlight the active row. */
+  selectedKey: string;
+  onOpen: (key: string) => void;
+  onToggleFavorite: (key: string) => void;
+  isFavorite: (key: string) => boolean;
+}
+
+function splitKey(key: string): { libraryId: string; path: string } {
+  const i = key.indexOf('|');
+  return i < 0 ? { libraryId: '', path: key } : { libraryId: key.slice(0, i), path: key.slice(i + 1) };
 }
 
 /**
  * Headerless list of folder rows used in the pinned-bottom Favorites/Recent
- * sections. The caller wraps this in a `CollapsibleSection` and decides which
- * subset of paths to feed in.
+ * sections. Entries are global: they can point into any library.
  */
 export function FolderRowList({
   paths,
-  selectedPath,
-  onSelect,
+  libraryNames,
+  selectedKey,
+  onOpen,
   onToggleFavorite,
   isFavorite
 }: Props) {
@@ -34,14 +39,15 @@ export function FolderRowList({
   }
   return (
     <Stack gap={2}>
-      {paths.map((p) => (
+      {paths.map((k) => (
         <Row
-          key={p}
-          path={p}
-          active={p === selectedPath}
-          isFavorite={isFavorite(p)}
-          onSelect={() => onSelect(p)}
-          onToggleFavorite={() => onToggleFavorite(p)}
+          key={k}
+          entryKey={k}
+          libraryName={libraryNames[splitKey(k).libraryId] ?? '(removed library)'}
+          active={k === selectedKey}
+          isFavorite={isFavorite(k)}
+          onOpen={() => onOpen(k)}
+          onToggleFavorite={() => onToggleFavorite(k)}
         />
       ))}
     </Stack>
@@ -49,20 +55,22 @@ export function FolderRowList({
 }
 
 function Row({
-  path,
+  entryKey,
+  libraryName,
   active,
   isFavorite,
-  onSelect,
+  onOpen,
   onToggleFavorite
 }: {
-  path: string;
+  entryKey: string;
+  libraryName: string;
   active: boolean;
   isFavorite: boolean;
-  onSelect: () => void;
+  onOpen: () => void;
   onToggleFavorite: () => void;
 }) {
-  const display = path === '' ? '(library root)' : path.split('/').slice(-1)[0];
-  const parent = path === '' ? '' : path.split('/').slice(0, -1).join('/');
+  const { path } = splitKey(entryKey);
+  const display = path === '' ? libraryName : path.split('/').slice(-1)[0];
   return (
     <Group
       gap={2}
@@ -73,7 +81,8 @@ function Row({
       }}
     >
       <UnstyledButton
-        onClick={onSelect}
+        onClick={onOpen}
+        title={path === '' ? libraryName : `${libraryName}/${path}`}
         style={{ flex: 1, padding: '3px 6px', minWidth: 0 }}
       >
         <Group gap={6} wrap="nowrap">
@@ -81,9 +90,9 @@ function Row({
           <Text size="sm" truncate style={{ flex: 1 }}>
             {display}
           </Text>
-          {parent && (
+          {path !== '' && (
             <Text size="xs" c="dimmed" truncate style={{ maxWidth: 80 }}>
-              {parent}
+              {libraryName}
             </Text>
           )}
         </Group>

@@ -341,6 +341,16 @@ export interface CollectionWithCount extends CollectionRecord {
   fileCount: number;
 }
 
+/** One entry of a global container (may live in any library). */
+export interface ContainerItem {
+  libraryId: string;
+  libraryName: string;
+  relPath: string;
+  filename: string;
+  /** Id inside its own library, or null when that library is offline. */
+  fileId: number | null;
+}
+
 /**
  * Structured metadata extracted by the thumbnail worker after model load.
  * Stored in `files.metadata_json`. The renderer displays a subset of these
@@ -565,6 +575,36 @@ export interface IpcApi {
   ): Promise<void>;
 
   listCollections(libraryId: string): Promise<CollectionWithCount[]>;
+  /** Every file in a (global) container, across all libraries. */
+  listContainerItems(collectionId: number): Promise<ContainerItem[]>;
+  /** Zip every file of a container (any library) to <Desktop>/<name>.zip. */
+  zipContainerToDesktop(
+    collectionId: number
+  ): Promise<
+    { ok: true; path: string; fileCount: number; skipped: number } | { ok: false; error: string }
+  >;
+  /** Save libraries, containers, favorites/recent, ratings/labels/notes/tags to a .gamdata file. */
+  exportData(local: {
+    favorites: string[];
+    recent: string[];
+  }): Promise<
+    | { ok: true; canceled: true }
+    | { ok: true; canceled: false; path: string }
+    | { ok: false; error: string }
+  >;
+  /** Load a .gamdata file, asking where each library lives on this machine. */
+  importData(): Promise<
+    | { ok: true; canceled: true }
+    | {
+        ok: true;
+        canceled: false;
+        libraries: number;
+        containers: number;
+        pending: number;
+        local: { favorites: string[]; recent: string[] };
+      }
+    | { ok: false; error: string }
+  >;
   createCollection(libraryId: string, name: string): Promise<CollectionRecord>;
   renameCollection(libraryId: string, id: number, name: string): Promise<CollectionRecord | null>;
   deleteCollection(libraryId: string, id: number): Promise<void>;
