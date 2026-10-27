@@ -147,7 +147,9 @@ function LibraryRow({
       wrap="nowrap"
       onContextMenu={handleContextMenu}
       style={{
-        borderRadius: 4,
+        borderRadius: 999,
+        paddingLeft: 6,
+        paddingRight: 4,
         background: selected ? 'var(--mantine-color-dark-5)' : undefined
       }}
     >

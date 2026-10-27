@@ -104,7 +104,7 @@ const THEME_STORAGE_KEY = 'wh3d:theme';
 // GLASS TOGGLE: const GLASS_STORAGE_KEY = 'wh3d:glassUi';
 
 const WINDOW_OPACITY_STORAGE_KEY = 'gam:windowOpacity';
-const DEFAULT_WINDOW_OPACITY = 0.85;
+const DEFAULT_WINDOW_OPACITY = 1;
 const MIN_WINDOW_OPACITY = 0.4;
 
 /**
@@ -123,7 +123,8 @@ const SURFACE_VARS = new Set([
 
 function readStoredWindowOpacity(): number {
   try {
-    const raw = localStorage.getItem(WINDOW_OPACITY_STORAGE_KEY);
+    // The opacity setting was removed from Preferences; ignore any saved value.
+    const raw = null as string | null;
     if (raw === null) return DEFAULT_WINDOW_OPACITY;
     const n = Number(raw);
     return Number.isFinite(n)
@@ -2489,6 +2490,28 @@ export function App() {
       .mantine-AppShell-header .mantine-Button-root {
         border-radius: 999px !important;
       }
+      /* Glass notifications (same look as the Containers box) */
+      .mantine-Notification-root {
+        border-radius: 22px !important;
+        padding: 12px 16px 12px 22px !important;
+        background:
+          linear-gradient(135deg, rgba(99, 102, 241, 0.16), rgba(140, 30, 50, 0.12)),
+          color-mix(in srgb, var(--mantine-color-dark-7) 55%, transparent) !important;
+        -webkit-backdrop-filter: blur(26px) saturate(165%);
+        backdrop-filter: blur(26px) saturate(165%);
+        border: 1px solid rgba(255, 255, 255, 0.16) !important;
+        box-shadow: 0 14px 38px rgba(0, 0, 0, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.16) !important;
+      }
+      .mantine-Notification-root::before {
+        top: 12px !important;
+        bottom: 12px !important;
+        left: 9px !important;
+        width: 4px !important;
+        border-radius: 999px !important;
+      }
+      .mantine-Notification-title { color: var(--mantine-color-text) !important; font-weight: 600; }
+      .mantine-Notification-description { color: var(--mantine-color-dimmed) !important; }
+      .mantine-Notification-closeButton { border-radius: 50% !important; }
     `}</style>
     {/* GLASS TOGGLE: {glassUi ? <GlassStyles /> : <NormalStyles />} */}
     <AppShell header={{ height: 88 }} padding={0}>

@@ -7,7 +7,6 @@ import {
   Group,
   Modal,
   SegmentedControl,
-  Slider,
   Stack,
   Tabs,
   Text,
@@ -23,6 +22,9 @@ import {
   IconDatabase,
   IconDownload,
   IconUpload,
+  IconInfoCircle,
+  IconBrandGithub,
+  IconRefresh,
   IconFileText,
   IconFolderOpen,
   IconMoon,
@@ -46,6 +48,7 @@ import {
 } from '@shared/render-quality';
 import { ipc } from '../ipc-client';
 import { savePreferences, usePreferences } from '../util/use-preferences';
+import { THEMES, DEFAULT_THEME_ID } from '../themes';
 
 // Quick-pick file types for the "Add an external app" form, so an app like
 // Photoshop or Audacity can be registered without typing every extension.
@@ -61,7 +64,7 @@ const EXTENSION_GROUPS = [
 type ExtensionGroup = (typeof EXTENSION_GROUPS)[number];
 
 /** Theme ids match the `id` field in themes/dark.ts and themes/light.ts. */
-type ThemeId = 'dark' | 'light';
+type ThemeId = string;
 
 /** Parses the comma-separated draft into normalized, de-duplicated extensions. */
 function parseExtensions(draft: string): string[] {
@@ -320,7 +323,7 @@ const MODAL_CSS = `
   background: var(--gam-header);
   padding: 10px 18px;
   display: flex;
-  justify-content: flex-end;
+  justify-content: center;
 }
 
 /* Theme cards (fixed colors: each card previews its own theme) */
@@ -443,7 +446,7 @@ function Property({
 interface Props {
   opened: boolean;
   onClose: () => void;
-  /** Active library id — used for cache management actions. */
+  /** Active library id - used for cache management actions. */
   libraryId: string | null;
   /**
    * Active theme id ('dark' | 'light'). If omitted, it's read from Mantine's
@@ -468,9 +471,7 @@ export function PreferencesModal({
   onClose,
   libraryId,
   themeId,
-  onThemeChange,
-  windowOpacity,
-  onWindowOpacityChange
+  onThemeChange
 }: Props) {
   const { prefs, reload } = usePreferences();
 
@@ -504,14 +505,11 @@ export function PreferencesModal({
           <Tabs.Tab value="apps" leftSection={<IconAppWindow size={16} />}>
             External apps
           </Tabs.Tab>
-          <Tabs.Tab value="cache" leftSection={<IconDatabase size={16} />}>
-            Cache
-          </Tabs.Tab>
-          <Tabs.Tab value="logs" leftSection={<IconFileText size={16} />}>
-            Logs
-          </Tabs.Tab>
           <Tabs.Tab value="data" leftSection={<IconDatabase size={16} />}>
             Data
+          </Tabs.Tab>
+          <Tabs.Tab value="about" leftSection={<IconInfoCircle size={16} />}>
+            About
           </Tabs.Tab>
         </Tabs.List>
 
@@ -523,21 +521,20 @@ export function PreferencesModal({
             prefs={prefs}
             themeId={themeId}
             onThemeChange={onThemeChange}
-            windowOpacity={windowOpacity}
-            onWindowOpacityChange={onWindowOpacityChange}
           />
         </Tabs.Panel>
         <Tabs.Panel value="apps">
           <ExternalAppsSection prefs={prefs} onChanged={reload} />
         </Tabs.Panel>
-        <Tabs.Panel value="cache">
-          <CacheSection libraryId={libraryId} />
-        </Tabs.Panel>
-        <Tabs.Panel value="logs">
-          <LogsSection prefs={prefs} />
-        </Tabs.Panel>
         <Tabs.Panel value="data">
-          <DataSection />
+          <Stack gap="md">
+            <DataSection />
+            <CacheSection libraryId={libraryId} />
+            <LogsSection prefs={prefs} />
+          </Stack>
+        </Tabs.Panel>
+        <Tabs.Panel value="about">
+          <AboutSection />
         </Tabs.Panel>
       </Tabs>
 
@@ -551,7 +548,7 @@ export function PreferencesModal({
           target="_blank"
           rel="noreferrer"
         >
-          Support Game Asset Manager — Check Out My Socials
+          Support Game Asset Manager: Check Out My Socials
         </Button>
       </div>
     </Modal>
@@ -571,7 +568,7 @@ function RenderQualitySection({ prefs }: { prefs: PreferencesFile }) {
   return (
     <Stack gap="md">
       <Note>
-        Affects the interactive 3D preview only — background thumbnail rendering always uses Low
+        Affects the interactive 3D preview only - background thumbnail rendering always uses Low
         for speed and consistency.
       </Note>
 
@@ -617,94 +614,133 @@ function RenderQualitySection({ prefs }: { prefs: PreferencesFile }) {
 function ThemeSection({
   prefs,
   themeId,
-  onThemeChange,
-  windowOpacity = 1,
-  onWindowOpacityChange
+  onThemeChange
 }: {
   prefs: PreferencesFile;
   themeId?: string;
   onThemeChange?: (id: ThemeId) => void;
-  windowOpacity?: number;
-  onWindowOpacityChange?: (value: number) => void;
 }) {
-  const { colorScheme, setColorScheme } = useMantineColorScheme();
-  
-  // Use Mantine's active color scheme so it stays perfectly synced with your global button
-  const active = (themeId ?? colorScheme) as ThemeId;
+  const { setColorScheme } = useMantineColorScheme();
+  const active = themeId ?? DEFAULT_THEME_ID;
+  const darkThemes = THEMES.filter((t) => t.colorScheme !== 'light');
+  const lightThemes = THEMES.filter((t) => t.colorScheme === 'light');
 
-  const options: { id: ThemeId; label: string; description: string; icon: ReactNode }[] = [
-    { id: 'dark', label: 'Dark', description: 'Low-glare workspace', icon: <IconMoon size={22} /> },
-    { id: 'light', label: 'Light', description: 'Bright workspace', icon: <IconSun size={22} /> }
-  ];
+  const renderCard = (t: (typeof THEMES)[number]) => {
+    const vars = t.cssVars as Record<string, string>;
+    const isLight = t.colorScheme === 'light';
+    const bg = vars['--mantine-color-body'] ?? (isLight ? '#f6f7f9' : '#1b1c20');
+    const fg = vars['--mantine-color-text'] ?? (isLight ? '#16171a' : '#ececee');
+    const accent = vars['--wh3d-waveform-played'] ?? '#4c6ef5';
+    return (
+      <button
+        key={t.id}
+        type="button"
+        role="radio"
+        aria-checked={active === t.id}
+        className="gam-theme-card"
+        style={{
+          background: bg,
+          color: fg,
+          width: 84,
+          boxSizing: 'border-box',
+          minHeight: 0,
+          padding: '8px 8px',
+          gap: 6,
+          borderRadius: 16
+        }}
+        onClick={() => {
+          setColorScheme(t.colorScheme);
+          onThemeChange?.(t.id);
+        }}
+      >
+        {active === t.id && (
+          <span className="gam-theme-check" style={{ top: 6, right: 6, width: 16, height: 16 }}>
+            <IconCheck size={10} stroke={3} />
+          </span>
+        )}
+        <span
+          className="gam-theme-icon"
+          style={{
+            width: 22,
+            height: 22,
+            background: 'rgba(128, 128, 128, 0.2)',
+            color: accent
+          }}
+        >
+          {isLight ? <IconSun size={13} /> : <IconMoon size={13} />}
+        </span>
+        <span style={{ minWidth: 0 }}>
+          <span
+            style={{
+              display: 'block',
+              fontSize: 11,
+              fontWeight: 600,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap'
+            }}
+          >
+            {t.label}
+          </span>
+          <span
+            aria-hidden="true"
+            style={{
+              display: 'block',
+              height: 4,
+              width: '60%',
+              borderRadius: 999,
+              marginTop: 4,
+              background: accent,
+              opacity: 0.8
+            }}
+          />
+        </span>
+      </button>
+    );
+  };
+
+  const colLabel = (text: string) => (
+    <Text size="xs" c={T.dim} fw={600} mb={6} style={{ letterSpacing: 0.4 }}>
+      {text}
+    </Text>
+  );
 
   return (
     <Stack gap="md">
       <Note>Choose how Game Asset Manager looks. The change applies right away.</Note>
 
       <Category title="Appearance">
-        <div className="gam-theme-grid" role="radiogroup" aria-label="Theme">
-          {options.map((o) => (
-            <button
-              key={o.id}
-              type="button"
-              role="radio"
-              aria-checked={active === o.id}
-              className={`gam-theme-card gam-theme-${o.id}`}
-              onClick={() => {
-                setColorScheme(o.id);
-                onThemeChange?.(o.id);
-              }}
-            >
-              {active === o.id && (
-                <span className="gam-theme-check">
-                  <IconCheck size={14} stroke={3} />
-                </span>
-              )}
-              <span className="gam-theme-icon">{o.icon}</span>
-              <span>
-                <span style={{ display: 'block', fontSize: 14, fontWeight: 600 }}>{o.label}</span>
-                <span style={{ display: 'block', fontSize: 11, opacity: 0.7, marginTop: 2 }}>
-                  {o.description}
-                </span>
-                <span className="gam-theme-bars" aria-hidden="true">
-                  <i />
-                  <i />
-                  <i />
-                </span>
-              </span>
-            </button>
-          ))}
-        </div>
-      </Category>
-
-      <Category title="Window">
-        <Property
-          label="Opacity"
-          hint="Lower values let your desktop show through, like Windows Terminal. Needs Windows 11; 100% is solid."
-          wide
+        <div
+          role="radiogroup"
+          aria-label="Theme"
+          style={{
+            display: 'flex',
+            gap: 16,
+            padding: 10,
+            alignItems: 'flex-start',
+            justifyContent: 'center'
+          }}
         >
-          <Group gap="md" wrap="nowrap">
-            <Slider
-              style={{ flex: 1 }}
-              min={40}
-              max={100}
-              step={5}
-              value={Math.round(windowOpacity * 100)}
-              onChange={(v) => onWindowOpacityChange?.(v / 100)}
-              label={(v) => `${v}%`}
-            />
-            <Text size="xs" c={T.text} ta="right" style={{ width: 38, fontFamily: 'monospace' }}>
-              {Math.round(windowOpacity * 100)}%
-            </Text>
-          </Group>
-        </Property>
+          <div>
+            {colLabel('DARK')}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 84px)', gap: 6 }}>
+              {darkThemes.map(renderCard)}
+            </div>
+          </div>
+          <div style={{ width: 1, alignSelf: 'stretch', background: 'var(--gam-edge)' }} />
+          <div>
+            {colLabel('LIGHT')}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 84px)', gap: 6 }}>
+              {lightThemes.map(renderCard)}
+            </div>
+          </div>
+        </div>
       </Category>
 
       <UnitsCategory prefs={prefs} />
     </Stack>
   );
 }
-
 /** Display units, shown inside the Theme tab. */
 function UnitsCategory({ prefs }: { prefs: PreferencesFile }) {
   const [unit, setUnit] = useState<Unit>(prefs.unit ?? 'mm');
@@ -719,7 +755,7 @@ function UnitsCategory({ prefs }: { prefs: PreferencesFile }) {
     <Category title="Measurements">
       <Property
         label="Display units"
-        hint="STL/3MF files don't encode units — this is purely a display preference."
+        hint="Unit used to show model sizes."
         wide
       >
         <SegmentedControl
@@ -806,6 +842,98 @@ function CacheSection({ libraryId }: { libraryId: string | null }) {
             Purge
           </Button>
         </Property>
+      </Category>
+    </Stack>
+  );
+}
+
+function AboutSection() {
+  const [version, setVersion] = useState('');
+  const [checking, setChecking] = useState(false);
+  const [result, setResult] = useState<Awaited<ReturnType<typeof ipc.checkForUpdates>> | null>(
+    null
+  );
+
+  useEffect(() => {
+    void ipc
+      .getAppVersion()
+      .then(setVersion)
+      .catch(() => undefined);
+  }, []);
+
+  const check = async () => {
+    setChecking(true);
+    try {
+      setResult(await ipc.checkForUpdates());
+    } catch (err) {
+      setResult({ ok: false, error: (err as Error).message });
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  return (
+    <Stack gap="md">
+      <Note>Game Asset Manager is a browser and organizer for 3D models, images and audio.</Note>
+      <Category title="About">
+        <Property label="Version">
+          <span className="gam-prop-value">{version || '...'}</span>
+        </Property>
+        <Property label="Source code" hint="Issues, releases and the full project.">
+          <Button
+            className="gam-btn-flat"
+            size="xs"
+            leftSection={<IconBrandGithub size={14} />}
+            component="a"
+            href="https://github.com/iam-aydin/Game-Asset-Manager"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Open GitHub
+          </Button>
+        </Property>
+      </Category>
+      <Category title="Updates">
+        <Property label="Check for updates" hint="Compares your version with the newest release.">
+          <Button
+            className="gam-btn-flat"
+            size="xs"
+            leftSection={<IconRefresh size={14} />}
+            loading={checking}
+            onClick={() => void check()}
+          >
+            Check now
+          </Button>
+        </Property>
+        {result && (
+          <div className="gam-note">
+            {!result.ok ? (
+              <Text size="xs" c={T.danger}>
+                Could not check: {result.error}
+              </Text>
+            ) : result.upToDate ? (
+              <Text size="xs" c={T.text}>
+                You have the newest version ({result.current}).
+              </Text>
+            ) : (
+              <Group justify="space-between" wrap="nowrap">
+                <Text size="xs" c={T.text}>
+                  Version {result.latest} is available. You have {result.current}.
+                </Text>
+                <Button
+                  className="gam-btn-primary"
+                  size="xs"
+                  component="a"
+                  href={result.url}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Download
+                </Button>
+              </Group>
+            )}
+          </div>
+        )}
       </Category>
     </Stack>
   );
@@ -964,7 +1092,7 @@ function ExternalAppsSection({
 }) {
   const apps = prefs.externalApps || [];
   const [adding, setAdding] = useState(false);
-  // Comma-separated extensions — filled by the file-type buttons and/or typed
+  // Comma-separated extensions - filled by the file-type buttons and/or typed
   // by hand in the advanced field. Starts empty so nothing is registered by
   // accident.
   const [extensionsDraft, setExtensionsDraft] = useState('');

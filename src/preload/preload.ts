@@ -143,6 +143,8 @@ const api: IpcApi = {
   exportData: (local: { favorites: string[]; recent: string[] }) =>
     ipcRenderer.invoke(IPC.exportData, local),
   importData: () => ipcRenderer.invoke(IPC.importData),
+  checkForUpdates: () => ipcRenderer.invoke(IPC.checkForUpdates),
+  getAppVersion: () => ipcRenderer.invoke(IPC.getAppVersion) as Promise<string>,
   createSmartCollection: (libraryId: string, name: string, query: SmartQuery) =>
     ipcRenderer.invoke(IPC.createSmartCollection, libraryId, name, query) as Promise<CollectionRecord>,
   updateSmartQuery: (libraryId: string, id: number, query: SmartQuery) =>

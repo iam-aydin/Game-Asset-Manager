@@ -592,6 +592,12 @@ export interface IpcApi {
     | { ok: true; canceled: false; path: string }
     | { ok: false; error: string }
   >;
+  /** Ask GitHub whether a newer release than this version exists. */
+  checkForUpdates(): Promise<
+    | { ok: true; current: string; latest: string | null; upToDate: boolean; url: string }
+    | { ok: false; error: string }
+  >;
+  getAppVersion(): Promise<string>;
   /** Load a .gamdata file, asking where each library lives on this machine. */
   importData(): Promise<
     | { ok: true; canceled: true }

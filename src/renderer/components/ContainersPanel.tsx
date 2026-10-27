@@ -39,6 +39,7 @@ interface Props {
 }
 
 const LINE = 'color-mix(in srgb, var(--mantine-color-indigo-4) 38%, transparent)';
+void IconPhoto;
 void [ActionIcon, IconChevronDown, IconChevronRight, ContainerFiles];
 
 async function zipToDesktop(id: number): Promise<void> {
@@ -267,15 +268,7 @@ export function ContainersPanel({
           >
             Export as ZIP
           </Menu.Item>
-          <Menu.Item
-            leftSection={<IconPhoto size={14} />}
-            onClick={() => {
-              setMenu((m) => ({ ...m, opened: false }));
-              onExportContactSheet(menu.id);
-            }}
-          >
-            Export contact sheet
-          </Menu.Item>
+
           <Menu.Item
             leftSection={<IconDownload size={14} />}
             onClick={() => {

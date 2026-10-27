@@ -1,4 +1,4 @@
-import { BrowserWindow, dialog, ipcMain } from 'electron';
+import { BrowserWindow, app, dialog, ipcMain } from 'electron';
 import { createWriteStream, existsSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -6,64 +6,36 @@ import archiver from 'archiver';
 import { IPC } from '@shared/ipc-channels';
 import type { ExportResult } from '@shared/types';
 import { getOpenLibrary } from '@main/libraries/manager';
+import * as containerStore from '@main/containers/store';
+import { zipContainerTo } from './data-transfer';
 
 export function registerExportIpc(): void {
+  void [createWriteStream, existsSync, archiver];
+
   ipcMain.handle(
     IPC.exportCollectionZip,
-    async (event, libraryId: string, collectionId: number): Promise<ExportResult> => {
-      const lib = getOpenLibrary(libraryId);
-      if (!lib) return { ok: false, error: `Library ${libraryId} not open` };
-      const col = lib.collections.getById(collectionId);
-      if (!col) return { ok: false, error: 'Collection not found' };
-
-      const fileIds = lib.collections.listFileIds(collectionId);
-      if (fileIds.length === 0) return { ok: false, error: 'Collection is empty' };
+    async (event, _libraryId: string, collectionId: number): Promise<ExportResult> => {
+      const c = containerStore.get(collectionId);
+      if (!c) return { ok: false, error: 'Container not found' };
+      if (c.items.length === 0) return { ok: false, error: 'Container is empty' };
 
       const senderWindow = BrowserWindow.fromWebContents(event.sender);
+      const safe = c.name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').trim() || 'Container';
       const saveOpts = {
-        title: 'Export collection as ZIP',
-        defaultPath: `${col.name}.zip`,
+        title: 'Export container as ZIP',
+        defaultPath: join(app.getPath('desktop'), `${safe}.zip`),
         filters: [{ name: 'ZIP archive', extensions: ['zip'] }]
       };
       const result = senderWindow
         ? await dialog.showSaveDialog(senderWindow, saveOpts)
         : await dialog.showSaveDialog(saveOpts);
       if (result.canceled || !result.filePath) return { ok: true, canceled: true };
-      const destPath = result.filePath;
 
-      try {
-        await new Promise<void>((resolve, reject) => {
-          const output = createWriteStream(destPath);
-          const archive = archiver('zip', { zlib: { level: 6 } });
-          output.on('close', () => resolve());
-          output.on('error', reject);
-          archive.on('error', reject);
-          archive.pipe(output);
-
-          let added = 0;
-          for (const fid of fileIds) {
-            const file = lib.files.getById(fid);
-            if (!file) continue;
-            const abs = lib.resolver.toAbsolute(file.relPath);
-            if (!existsSync(abs)) continue;
-            archive.file(abs, { name: file.relPath });
-            added++;
-          }
-          if (added === 0) {
-            archive.abort();
-            output.destroy();
-            reject(new Error('No files exist on disk for this collection'));
-            return;
-          }
-          void archive.finalize();
-        });
-      } catch (err) {
-        return { ok: false, error: (err as Error).message };
-      }
-      return { ok: true, canceled: false, path: destPath, fileCount: fileIds.length };
+      const r = await zipContainerTo(collectionId, result.filePath);
+      if (!r.ok) return { ok: false, error: r.error };
+      return { ok: true, canceled: false, path: r.path, fileCount: r.fileCount };
     }
   );
-
   ipcMain.handle(
     IPC.exportContactSheet,
     async (event, libraryId: string, fileIds: number[]): Promise<ExportResult> => {

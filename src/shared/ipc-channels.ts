@@ -36,6 +36,8 @@ export const IPC = {
   zipContainerToDesktop: 'containers:zipToDesktop',
   exportData: 'data:export',
   importData: 'data:import',
+  checkForUpdates: 'app:checkUpdate',
+  getAppVersion: 'app:version',
   createCollection: 'collections:create',
   renameCollection: 'collections:rename',
   deleteCollection: 'collections:delete',

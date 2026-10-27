@@ -48,7 +48,7 @@ export const SORT_LABELS: Record<SortField, string> = {
   filename: 'Name',
   mtime: 'Modified',
   size: 'Size',
-  ext: 'Type',
+  ext: 'Ext',
   vertices: 'Vertices',
   triangles: 'Triangles',
   resolution: 'Resolution',
