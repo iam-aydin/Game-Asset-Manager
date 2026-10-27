@@ -59,3 +59,5 @@ build/icon.png
 # Local 3D test files
 # Test skips cleanly when this directory is absent
 testfiles/
+
+*.ps1*
