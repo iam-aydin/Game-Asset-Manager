@@ -1,5 +1,5 @@
 import type { Dirent } from 'node:fs';
-import { readdir, stat } from 'node:fs/promises';
+import { open, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { PathResolver } from '@shared/paths';
 import { extensionOf, isSupportedExtension } from '@shared/formats';
@@ -128,4 +128,82 @@ export async function walkLibrary(
   await visit(root);
   await flush();
   return { totalSeen, seenRelPaths };
+}
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ Lazy (Explorer style) scanning â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+const SKIP_DIRS_LOWER: ReadonlySet<string> = new Set([
+  'node_modules',
+  '@eadir',
+  'intermediate',
+  'binaries',
+  'deriveddatacache',
+  'saved',
+  '__pycache__',
+  '$recycle.bin',
+  'system volume information'
+]);
+
+/** True for folders that are never listed or scanned (hidden, build output, tooling). */
+export function shouldSkipDir(name: string): boolean {
+  return name.startsWith('.') || SKIP_DIRS_LOWER.has(name.toLowerCase());
+}
+
+/** Compiled C++ objects also use the .obj extension; real OBJ models are text. */
+async function looksBinary(abs: string): Promise<boolean> {
+  let fh;
+  try {
+    fh = await open(abs, 'r');
+    const buf = Buffer.alloc(512);
+    const { bytesRead } = await fh.read(buf, 0, 512, 0);
+    for (let i = 0; i < bytesRead; i++) if (buf[i] === 0) return true;
+    return false;
+  } catch {
+    return true;
+  } finally {
+    await fh?.close().catch(() => undefined);
+  }
+}
+
+/**
+ * Supported files directly inside ONE folder (no recursion).
+ * Returns [] when the folder no longer exists, null when it cannot be read
+ * right now (so callers leave its database rows alone).
+ */
+export async function listFolderFiles(
+  resolver: PathResolver,
+  relDir: string
+): Promise<UpsertInput[] | null> {
+  const absDir = relDir === '' ? resolver.getMountPath() : resolver.toAbsolute(relDir);
+  let entries: Dirent[];
+  try {
+    entries = await readdir(absDir, { withFileTypes: true, encoding: 'utf8' });
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? [] : null;
+  }
+  const out: UpsertInput[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+    const ext = extensionOf(entry.name);
+    if (!isSupportedExtension(ext)) continue;
+    const absChild = join(absDir, entry.name);
+    try {
+      if (ext === 'obj' && (await looksBinary(absChild))) continue;
+      const s = await stat(absChild);
+      if (!s.isFile()) continue;
+      const relPath = resolver.toRelative(absChild);
+      const slash = relPath.lastIndexOf('/');
+      out.push({
+        relPath,
+        parentDir: slash < 0 ? '' : relPath.slice(0, slash),
+        filename: entry.name,
+        ext,
+        sizeBytes: s.size,
+        mtimeMs: Math.floor(s.mtimeMs)
+      });
+    } catch {
+      continue;
+    }
+  }
+  return out;
 }

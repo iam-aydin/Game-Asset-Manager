@@ -8,6 +8,9 @@ import {
 } from 'react';
 import { AudioPlayer } from './AudioPlayer';
 import { TextPreview } from './TextPreview';
+import { ImagePreview } from './ImagePreview';
+import { IconPreview } from './IconPreview';
+import { isIcoExtension } from '../util/ico';
 import { VideoPlayer } from './VideoPlayer';
 import {
   ActionIcon,
@@ -32,7 +35,6 @@ import {
   IconChevronDown,
   IconChevronUp,
   IconRefresh,
-  IconPictureInPicture,
   IconPinned,
   IconPinnedOff
 } from '@tabler/icons-react';
@@ -45,6 +47,8 @@ import { LIGHTING_PRESETS } from '../three/lighting-presets';
 import { HDRI_PRESETS, getHdriPreset } from '../three/hdri-presets';
 import { ModelViewer, type ModelViewerHandle } from '../three/ModelViewer';
 import { CropOverlay } from './CropOverlay';
+import { MiniIcon } from './PlayerIcons';
+import { PreviewFullscreenButton } from './PreviewFullscreenButton';
 import {
   GLASS_BUTTON_CLASS,
   GLASS_RING_BUTTON_CLASS,
@@ -80,6 +84,9 @@ const MINI_HEADER_H = 28;
 
 // GAM-MINI-IDLE: the mini player opens with its options hidden (O key / eye button toggles).
 const MINI_OPTIONS_HIDDEN_BY_DEFAULT = true;
+void [IconMaximize, IconMinimize];
+
+void ChromeToggleIcon;
 
 /** Arrow pair icon for the mini player's hide / show interface button.
  *  Shown state (click to hide): arrows pointing outward, "← →", as the bars
@@ -123,7 +130,7 @@ const MINI_BG_DARK = '#101113';
 //   expanded = fills the editor below the header (T key / top-right button)
 //   full     = fills the whole app window, header included (F key / fullscreen button)
 // Both expanded and full animate through animateLayout (see transition.ts).
-type PreviewLayout = 'normal' | 'expanded' | 'full';
+type PreviewLayout = 'normal' | 'full';
 
 // Helper to identify document/text extensions
 const isTextExtension = (ext: string): boolean =>
@@ -307,14 +314,7 @@ export function PreviewPane({
     },
     [applyMini]
   );
-  const toggleExpanded = useCallback(() => {
-    if (miniRef.current) {
-      afterMiniRef.current = 'expanded';
-      toggleMini(false);
-      return;
-    }
-    animateLayout(() => setLayout((m) => (m === 'normal' ? 'expanded' : 'normal')));
-  }, [toggleMini]);
+
 
   const toggleFullscreen = useCallback(() => {
     if (miniRef.current) {
@@ -384,28 +384,18 @@ export function PreviewPane({
       const key = e.key.toLowerCase();
       // O: hide / show the options (mini player only).
       if (key === 'o') {
-        if (miniRef.current) {
-          e.preventDefault();
-          if (!isVideoFile && !isAudioFile) pulseResizeBlur();
-          setMiniChromeHidden((v) => !v);
-        }
+        e.preventDefault();
+        if (!isVideoFile && !isAudioFile) pulseResizeBlur();
+        setMiniChromeHidden((v) => !v);
         return;
       }
-      if (key === 't') {
-        e.preventDefault();
-        // T does nothing for audio (its fullscreen is F).
-        if (isAudioFile) return;
-        // Video, 3D models, images and text all expand in place (animated).
-        if (isVideoFile || isModelFile || isImageFile || isTextFile) toggleExpanded();
-        else onMaximize?.();
-      } else if (key === 'f' && (isImageFile || isTextFile)) {
+      if (key === 'f' && (isImageFile || isTextFile)) {
         // Images and text: F = fullscreen (covers the header too), like video.
         e.preventDefault();
         toggleFullscreen();
       } else if (key === 'f' && isModelFile) {
-        // For 3D models F does exactly what T does (animated in-place expand).
         e.preventDefault();
-        toggleExpanded();
+        toggleFullscreen();
       } else if (key === 'f' && isAudioFile) {
         // Audio fullscreen is F only (video handles its own F in VideoPlayer).
         e.preventDefault();
@@ -427,7 +417,6 @@ export function PreviewPane({
     isTextFile,
     onMaximize,
     toggleMini,
-    toggleExpanded,
     toggleFullscreen,
     togglePinned
   ]);
@@ -474,10 +463,10 @@ export function PreviewPane({
   // For 3D models the control strip (view / environment / grid / capture)
   // moves inside the popped-out container so it stays visible while the
   // container is position: fixed (expanded or mini player).
-  const stripInside = isModel && (mini || isPopped);
+  const stripInside = isModel;
 
   // Interface hidden in the mini player (3D models only).
-  const hideChrome = mini && miniChromeHidden;
+  const hideChrome = miniChromeHidden;
   const videoCompact = hideChrome && isVideo;
   const audioCompact = hideChrome && isAudio;
 
@@ -523,15 +512,12 @@ export function PreviewPane({
     onRerenderThumb(file.id);
   };
 
-  // Videos and 3D models expand in place; everything else keeps opening the
-  // modal viewer.
-  const handleMaximizeClick = () => {
-    if (isVideo || isModel || isImage || isText) {
-      toggleExpanded();
-    } else {
-      onMaximize?.();
-    }
+  // Hide / show the interface (right-click menu item and the O key).
+  const onToggleChrome = () => {
+    if (!isVideo && !isAudio) pulseResizeBlur();
+    setMiniChromeHidden((v) => !v);
   };
+  void onMaximize;
 
   const containerStyle: CSSProperties = mini
     ? {
@@ -893,33 +879,6 @@ export function PreviewPane({
                   ', opacity 260ms ease, filter 260ms ease'
               }}
             >
-              {/* Shown for every file type. For 3D models it hides the file
-                  name bar and the control panel; for everything else only the
-                  file name bar. */}
-              {(
-                <Tooltip
-                  label={
-                    hideChrome ? 'Show options (O)' : 'Hide options (O)'
-                  }
-                  withinPortal
-                >
-                  <ActionIcon
-                    variant="subtle"
-                    color={hideChrome ? 'indigo' : 'gray'}
-                    size="sm"
-                    onClick={() => {
-                      // Frost the whole window while the interface collapses/returns,
-                      // same blur layer the expand / mini-player changes use.
-                      if (!isVideo && !isAudio) pulseResizeBlur();
-                      setMiniChromeHidden((v) => !v);
-                    }}
-                    aria-label={hideChrome ? 'Show options' : 'Hide options'}
-                    aria-pressed={hideChrome}
-                  >
-                    <ChromeToggleIcon hidden={hideChrome} size={14} />
-                  </ActionIcon>
-                </Tooltip>
-              )}
               <Tooltip
                 label={pinned ? 'Always on top: ON (Ctrl+T)' : 'Always on top: OFF (Ctrl+T)'}
                 withinPortal
@@ -974,6 +933,8 @@ export function PreviewPane({
               onFullscreen={toggleFullscreen}
               isFullscreen={isFull}
               compact={videoCompact}
+              chromeHidden={hideChrome}
+              onToggleChrome={onToggleChrome}
             />
           ) : isAudio ? (
             <AudioPreview
@@ -988,6 +949,8 @@ export function PreviewPane({
               onFullscreen={toggleFullscreen}
               isFullscreen={isFull}
               compact={audioCompact}
+              chromeHidden={hideChrome}
+              onToggleChrome={onToggleChrome}
             />
           ) : isText ? (
             // The expand / mini buttons live inside the text card's header, to
@@ -998,20 +961,6 @@ export function PreviewPane({
               actions={
                 mini ? undefined : (
                   <>
-                    <Tooltip
-                      label={isPopped ? 'Shrink (T / Esc)' : 'Expand (T) · Fullscreen (F)'}
-                      withinPortal
-                    >
-                      <ActionIcon
-                        variant="subtle"
-                        color="gray"
-                        size="sm"
-                        onClick={handleMaximizeClick}
-                        aria-label={isPopped ? 'Shrink preview' : 'Expand preview'}
-                      >
-                        {isPopped ? <IconMinimize size={14} /> : <IconMaximize size={14} />}
-                      </ActionIcon>
-                    </Tooltip>
                     <Tooltip label="Mini player (I)" withinPortal>
                       <ActionIcon
                         variant="subtle"
@@ -1023,13 +972,19 @@ export function PreviewPane({
                         }}
                         aria-label="Open mini player"
                       >
-                        <IconPictureInPicture size={14} />
+                        <MiniIcon size={14} />
                       </ActionIcon>
                     </Tooltip>
                   </>
                 )
               }
             />
+          ) : isImage ? (
+            isIcoExtension(file.ext) ? (
+              <IconPreview key={file.id} libraryId={libraryId} file={file} />
+            ) : (
+              <ImagePreview key={file.id} libraryId={libraryId} file={file} />
+            )
           ) : (
             <ModelViewer
               ref={viewerRef}
@@ -1045,41 +1000,6 @@ export function PreviewPane({
           {/* Thumbnail frame, only for 3D models and only when toggled on */}
           {!is2DOrDoc && showFrame && <CropOverlay size={cropSize} />}
 
-          {!isAudio && !isText && !mini && (
-            <Tooltip
-              label={
-                isModel
-                  ? isPopped
-                    ? 'Shrink (T / F / Esc)'
-                    : 'Expand (T / F)'
-                  : isPopped
-                    ? 'Shrink (T / Esc)'
-                    : isVideo
-                      ? 'Expand (T)'
-                      : 'Expand (T) · Fullscreen (F)'
-              }
-              position="left"
-              withinPortal
-            >
-              <ActionIcon
-                className={GLASS_BUTTON_CLASS}
-                variant="subtle"
-                color="gray"
-                size="md"
-                onClick={handleMaximizeClick}
-                aria-label={isPopped ? 'Shrink preview' : 'Expand preview'}
-                style={{
-                  position: 'absolute',
-                  top: 8,
-                  right: 8,
-                  zIndex: 5
-                }}
-              >
-                {isPopped ? <IconMinimize size={16} /> : <IconMaximize size={16} />}
-              </ActionIcon>
-            </Tooltip>
-          )}
-
           {/* Mini player button, just under the expand button (every type except
               audio, which has its own mini button inside its player) */}
           {!isAudio && !isText && !mini && (
@@ -1088,22 +1008,28 @@ export function PreviewPane({
                 className={GLASS_BUTTON_CLASS}
                 variant="subtle"
                 color="gray"
-                size="md"
+                // Images and icons: round, bottom right, just above the fullscreen button.
+                size={isImage ? 38 : 'md'}
+                radius={isImage ? 'xl' : undefined}
                 onClick={() => {
                   setLayout('normal');
                   toggleMini();
                 }}
                 aria-label="Open mini player"
-                style={{
-                  position: 'absolute',
-                  top: 42,
-                  right: 8,
-                  zIndex: 5
-                }}
+                style={
+                  isImage
+                    ? { position: 'absolute', bottom: 62, right: 12, zIndex: 6 }
+                    : { position: 'absolute', top: 8, right: 8, zIndex: 5 }
+                }
               >
-                <IconPictureInPicture size={16} />
+                <MiniIcon size={isImage ? 18 : 16} />
               </ActionIcon>
             </Tooltip>
+          )}
+
+          {/* Fullscreen button (images and icons): runs the same toggle as the F key */}
+          {isImage && !mini && (
+            <PreviewFullscreenButton onClick={toggleFullscreen} isFullscreen={isFull} />
           )}
 
           {selectionCount > 1 && !mini && (
@@ -1171,7 +1097,7 @@ export function PreviewPane({
       )}
 
       {/* Control Strip (normal layout only; popped-out 3D renders it inside) */}
-      {!stripInside && controlStrip}
+      {!stripInside && !is2DOrDoc && controlStrip}
     </Stack>
   );
 }
@@ -1184,8 +1110,12 @@ function AudioPreview({
   isMini,
   onFullscreen,
   isFullscreen,
-  compact
+  compact,
+  chromeHidden,
+  onToggleChrome
 }: {
+  chromeHidden?: boolean;
+  onToggleChrome?: () => void;
   libraryId: string;
   file: FileRecord;
   activeAudio?: { fileId: number; autoPlay: boolean } | null;
@@ -1236,6 +1166,8 @@ function AudioPreview({
         onFullscreen={onFullscreen}
         isFullscreen={isFullscreen}
         compact={compact}
+        chromeHidden={chromeHidden}
+        onToggleChrome={onToggleChrome}
       />
     </Box>
   );

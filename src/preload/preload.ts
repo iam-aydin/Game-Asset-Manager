@@ -15,6 +15,7 @@ import type {
   ExportResult,
   FileQueryRequest,
   FileRecord,
+  FolderInfoResult,
   FolderTreeNode,
   GetFileRequest,
   IpcApi,
@@ -44,7 +45,16 @@ import type { ColorLabel } from '@shared/ratings';
 import type { ExternalAppRegistration, PreferencesFile } from '@shared/preferences';
 import type { SmartQuery } from '@shared/smart-query';
 
-const api: IpcApi = {
+const api: IpcApi & {
+  listSubtitles: (libraryId: string, fileId: number) => Promise<{ label: string; vtt: string }[]>;
+  openContextMenu: (req: { x: number; y: number; state: unknown }) => Promise<void>;
+  makePlayableVideo: (libraryId: string, fileId: number) => Promise<string | null>;
+  getContextMenuInit: () => Promise<{ x: number; y: number; state: unknown } | null>;
+  ctxMenuReady: () => Promise<void>;
+  ctxMenuAction: (action: unknown) => void;
+  closeContextMenu: () => void;
+  onContextMenuAction: (handler: (action: unknown) => void) => () => void;
+} = {
   pickFolder: () => ipcRenderer.invoke(IPC.pickFolder) as Promise<PickFolderResult>,
   listLibraries: () => ipcRenderer.invoke(IPC.listLibraries) as Promise<LibrarySummary[]>,
   addLibrary: (req: AddLibraryRequest) =>
@@ -62,6 +72,9 @@ const api: IpcApi = {
     ipcRenderer.invoke(IPC.revealFolder, libraryId, folderPath) as Promise<RevealFolderResult>,
   rescanFolder: (libraryId: string, folderPath: string) =>
     ipcRenderer.invoke(IPC.rescanFolder, libraryId, folderPath) as Promise<RescanFolderResult>,
+
+  getFolderInfo: (libraryId: string, folderPath: string) =>
+    ipcRenderer.invoke('folders:getInfo', libraryId, folderPath) as Promise<FolderInfoResult>,
 
   listFolders: (req: ListFoldersRequest) =>
     ipcRenderer.invoke(IPC.listFolders, req) as Promise<FolderTreeNode | null>,
@@ -145,6 +158,7 @@ const api: IpcApi = {
   importData: () => ipcRenderer.invoke(IPC.importData),
   checkForUpdates: () => ipcRenderer.invoke(IPC.checkForUpdates),
   getAppVersion: () => ipcRenderer.invoke(IPC.getAppVersion) as Promise<string>,
+  saveImageAs: (req) => ipcRenderer.invoke(IPC.saveImageAs, req),
   createSmartCollection: (libraryId: string, name: string, query: SmartQuery) =>
     ipcRenderer.invoke(IPC.createSmartCollection, libraryId, name, query) as Promise<CollectionRecord>,
   updateSmartQuery: (libraryId: string, id: number, query: SmartQuery) =>
@@ -223,10 +237,30 @@ batchRename: (libraryId: string, plan: BatchRenameItem[]) =>
       | { ok: true; label: string }
       | { ok: false; reason: 'failed'; label: string; error: string }
     >,
+  makePlayableVideo: (libraryId: string, fileId: number) =>
+    ipcRenderer.invoke('video:makePlayable', libraryId, fileId) as Promise<string | null>,
   setMiniMode: (on: boolean) =>
     ipcRenderer.invoke('window:setMiniMode', on) as Promise<void>,
   setMiniAlwaysOnTop: (on: boolean) =>
     ipcRenderer.invoke('window:setMiniAlwaysOnTop', on) as Promise<void>,
+  listSubtitles: (libraryId: string, fileId: number) =>
+    ipcRenderer.invoke('subtitles:list', libraryId, fileId) as Promise<
+      { label: string; vtt: string }[]
+    >,
+  openContextMenu: (req: { x: number; y: number; state: unknown }) =>
+    ipcRenderer.invoke('ctxmenu:open', req) as Promise<void>,
+  getContextMenuInit: () =>
+    ipcRenderer.invoke('ctxmenu:getInit') as Promise<{ x: number; y: number; state: unknown } | null>,
+  ctxMenuReady: () => ipcRenderer.invoke('ctxmenu:ready') as Promise<void>,
+  ctxMenuAction: (action: unknown) => ipcRenderer.send('ctxmenu:action', action),
+  closeContextMenu: () => ipcRenderer.send('ctxmenu:close'),
+  onContextMenuAction: (handler: (action: unknown) => void) => {
+    const listener = (_e: IpcRendererEvent, action: unknown) => handler(action);
+    ipcRenderer.on('ctxmenu:action', listener);
+    return () => {
+      ipcRenderer.off('ctxmenu:action', listener);
+    };
+  },
   onLibraryEvent: (handler: (event: LibraryFilesEvent) => void) => {
     const listener = (_e: IpcRendererEvent, event: LibraryFilesEvent) => handler(event);
     ipcRenderer.on(IPC_EVENT.libraryEvent, listener);

@@ -42,7 +42,17 @@ function buildCss(isLight: boolean): string {
   ${isLight ? '' : 'text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);'}
 }
 .${PLAYER_GLASS_CLASS} { border-radius: 20px !important; }
-.${PLAYER_GLASS_POPOVER_CLASS} { border-radius: 16px !important; }
+.${PLAYER_GLASS_POPOVER_CLASS} {
+  border-radius: 16px !important;
+  /* dark backing so text stays readable over any video frame */
+  background: ${tint}, ${isLight ? 'rgba(250, 251, 253, 0.9)' : 'rgba(14, 15, 20, 0.88)'} !important;
+}
+:root[data-gam-glass='off'] .${PLAYER_GLASS_CLASS},
+:root[data-gam-glass='off'] .${PLAYER_GLASS_POPOVER_CLASS} {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  background: var(--mantine-color-dark-7) !important;
+}
 /* Popover arrow must match the glass, or it shows as a solid grey notch */
 .${PLAYER_GLASS_POPOVER_CLASS} .mantine-Popover-arrow { display: none; }
 /* Reset confirmation modal uses the popover glass: header/body must be see-through */

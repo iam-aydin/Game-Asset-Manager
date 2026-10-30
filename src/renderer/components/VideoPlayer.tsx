@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
+import { handleKey, matchesAction } from '../keybinds';
 import {
   ActionIcon,
   Alert,
@@ -29,6 +30,12 @@ import {
 } from '@tabler/icons-react';
 import { PlayerGlassStyles, PLAYER_GLASS_CLASS, PLAYER_GLASS_POPOVER_CLASS } from './PlayerGlass';
 import { useVerticalDragGesture } from '../util/gestures';
+import { MediaMenuSections, OutputDeviceList } from './PlayerMediaMenu';
+import { PlayerContextMenu, OptionList } from './PlayerContextMenu';
+import { FontList, resolveSubFont } from './SubtitleFonts';
+import { applyOutput, outputStore, useAudioOutput } from './audioOutput';
+import { parseVtt, cueAt, type SubCue } from './subtitleCues';
+import type { CtxSnapshot } from './ContextMenuWindow';
 import { VIDEO_COMPACT_BAR, videoCompactBarCss } from '@shared/transition';
 import {
   BOOST_COLOR,
@@ -99,6 +106,9 @@ interface VideoPlayerProps {
    *  pin button and its hide-title-bar (eye) button). Only rendered in compact mode. */
   compactStartSlot?: React.ReactNode;
   compactEndSlot?: React.ReactNode;
+  /** Interface hidden (PreviewPane owns it). The right-click menu toggles it. */
+  chromeHidden?: boolean;
+  onToggleChrome?: () => void;
 }
 
 // Same volume range/snap as AudioPlayer. Above 100% goes through a Web Audio gain node.
@@ -435,6 +445,74 @@ const formatTime = (timeSec: number) => {
   return `${mins}:${ss}`;
 };
 
+interface SubCfg {
+  delay: number;
+  size: number;
+  lift: number;
+  font: string;
+  color: string;
+  boxOn: boolean;
+  box: string;
+  boxAlpha: number;
+  outline: number;
+  shadow: number;
+}
+
+const DEFAULT_SUB: SubCfg = {
+  delay: 0,
+  size: 1,
+  lift: 0,
+  font: 'auto',
+  color: '#ffffff',
+  boxOn: true,
+  box: '#000000',
+  boxAlpha: 0.55,
+  outline: 0,
+  shadow: 3
+};
+
+
+const SUB_PRESETS: { label: string; cfg: Partial<SubCfg> }[] = [
+  {
+    label: 'Classic: white on black box',
+    cfg: { color: '#ffffff', boxOn: true, box: '#000000', boxAlpha: 0.65, outline: 0, shadow: 0 }
+  },
+  {
+    label: 'White on gray box',
+    cfg: { color: '#ffffff', boxOn: true, box: '#5a5a5a', boxAlpha: 0.85, outline: 0, shadow: 0 }
+  },
+  {
+    label: 'Yellow, black outline',
+    cfg: { color: '#ffe44d', boxOn: false, outline: 1.5, shadow: 4 }
+  },
+  {
+    label: 'White, black outline',
+    cfg: { color: '#ffffff', boxOn: false, outline: 1.5, shadow: 3 }
+  },
+  {
+    label: 'Cinema: soft shadow',
+    cfg: { color: '#ffffff', boxOn: false, outline: 0, shadow: 9 }
+  }
+];
+
+function hexRgba(hex: string, a: number): string {
+  const h = hex.replace('#', '');
+  const n = parseInt(h.length === 3 ? h.split('').map((c) => c + c).join('') : h, 16) || 0;
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+}
+
+function subTextShadow(c: SubCfg): string {
+  const parts: string[] = [];
+  if (c.outline > 0) {
+    const dirs = [[-1, -1], [1, -1], [-1, 1], [1, 1], [0, -1], [0, 1], [-1, 0], [1, 0]];
+    for (const [x, y] of dirs) parts.push(`${x * c.outline}px ${y * c.outline}px 0 #000`);
+  }
+  if (c.shadow > 0) {
+    parts.push(`0 2px ${c.shadow}px rgba(0, 0, 0, 0.95)`, `0 0 ${c.shadow * 2}px rgba(0, 0, 0, 0.6)`);
+  }
+  return parts.length ? parts.join(', ') : 'none';
+}
+
 export function VideoPlayer({
   libraryId,
   fileId,
@@ -449,7 +527,9 @@ export function VideoPlayer({
   isMini = false,
   compact = false,
   compactStartSlot,
-  compactEndSlot
+  compactEndSlot,
+  chromeHidden,
+  onToggleChrome
 }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
@@ -479,7 +559,14 @@ export function VideoPlayer({
   const [isPlaying, setIsPlaying] = useState(false);
   const [isBuffering, setIsBuffering] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [errorDetail, setErrorDetail] = useState<string | null>(null);
+  const [errorDetail, setErrorDetail] = useState<string | null>(null);
+  // Fallback: a remuxed copy (audio re-encoded to plain stereo AAC-LC) for files Chromium can't decode.
+  const [fallbackSrc, setFallbackSrc] = useState<string | null>(null);
+  const triedFallbackRef = useRef(false);
+  useEffect(() => {
+    setFallbackSrc(null);
+    triedFallbackRef.current = false;
+  }, [libraryId, fileId]);
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [volume, setVolume] = useState(() => videoPrefsStore.get().volume);
@@ -497,6 +584,100 @@ export function VideoPlayer({
     setRoll({ p: r.p, s: r.s, v: r.v });
   }, []);
   const [volumeOpen, setVolumeOpen] = useState(false);
+
+  // ---- Subtitles (GAM-SUBS2) ----
+  // Sidecar files (.srt / .vtt / .ass next to the video) are converted to WebVTT by the main
+  // process (subtitles:list). They are painted by us (overlay further down) instead of a <track>,
+  // because blob: media can be blocked by the app's CSP. Pickers: volume menu + right-click menu.
+  const [subs, setSubs] = useState<{ label: string; cues: SubCue[] }[]>([]);
+  const [subIndex, setSubIndex] = useState(-1); // -1 = off; on by default when a file exists
+  const [subsOpen, setSubsOpen] = useState(false); // (kept so older references still compile)
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    let dead = false;
+    const api = (window as any).gam;
+    if (!api?.listSubtitles) console.warn('[subtitles] window.gam.listSubtitles is missing (preload)');
+    Promise.resolve(api?.listSubtitles?.(libraryId, fileId))
+      .then((list: { label: string; vtt: string }[] | undefined) => {
+        if (dead || !list) return;
+        console.info('[subtitles]', list.length, 'file(s) found');
+        const tracks = list.map((s) => ({ label: s.label, cues: parseVtt(s.vtt) }));
+        setSubs(tracks);
+        setSubIndex(tracks.length ? 0 : -1);
+      })
+      .catch((err: unknown) => console.warn('[subtitles] listing failed', err));
+    return () => {
+      dead = true;
+      setSubs([]);
+      setSubIndex(-1);
+    };
+  }, [libraryId, fileId]);
+  // Subtitle settings: delay (s, + = later), size multiplier, extra height (px). Saved.
+  const [subCfg, setSubCfg] = useState<SubCfg>(() => {
+    try {
+      const p = JSON.parse(localStorage.getItem('gam:subCfg') ?? 'null');
+      return { ...DEFAULT_SUB, ...(p && typeof p === 'object' ? p : {}) };
+    } catch {
+      return { ...DEFAULT_SUB };
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem('gam:subCfg', JSON.stringify(subCfg));
+    } catch {
+      // ignore
+    }
+  }, [subCfg]);
+  const shiftDragRef = useRef(false);
+  const subText =
+    subIndex >= 0 && subs[subIndex] ? cueAt(subs[subIndex].cues, currentTime - subCfg.delay) : '';
+
+  // ---- Embedded audio tracks (e.g. an .mkv with German + English) ----
+  // Needs Chromium's AudioVideoTracks flag (src/main/ipc/media-flags.ts). Without it the list stays empty.
+  const [audioTracks, setAudioTracks] = useState<{ label: string; enabled: boolean }[]>([]);
+  useEffect(() => {
+    const v = videoRef.current as any;
+    const list = v?.audioTracks;
+    if (!v || !list) {
+      setAudioTracks([]);
+      return undefined;
+    }
+    const read = () => {
+      const out: { label: string; enabled: boolean }[] = [];
+      for (let i = 0; i < list.length; i++) {
+        const t = list[i];
+        const name = [t.label, t.language && t.language !== t.label ? t.language : '']
+          .filter(Boolean)
+          .join(' \u00b7 ');
+        out.push({ label: name || `Track ${i + 1}`, enabled: !!t.enabled });
+      }
+      setAudioTracks(out);
+    };
+    read();
+    list.addEventListener?.('addtrack', read);
+    list.addEventListener?.('removetrack', read);
+    list.addEventListener?.('change', read);
+    v.addEventListener('loadedmetadata', read);
+    return () => {
+      list.removeEventListener?.('addtrack', read);
+      list.removeEventListener?.('removetrack', read);
+      list.removeEventListener?.('change', read);
+      v.removeEventListener('loadedmetadata', read);
+    };
+  }, [fileId]);
+  const selectAudioTrack = (index: number) => {
+    const list = (videoRef.current as any)?.audioTracks;
+    if (!list) return;
+    for (let i = 0; i < list.length; i++) list[i].enabled = i === index;
+    setAudioTracks((prev) => prev.map((t, i) => ({ ...t, enabled: i === index })));
+  };
+
+  // ---- Output device (shared with AudioPlayer, saved between launches) ----
+  const audioOut = useAudioOutput();
+  useEffect(() => {
+    void applyOutput(audioOut.deviceId, [videoRef.current, graphRef.current?.ctx]);
+  }, [audioOut.deviceId]);
+
   const [confirmResetOpen, setConfirmResetOpen] = useState(false);
   resetOpenRef.current = confirmResetOpen;
 
@@ -565,7 +746,7 @@ export function VideoPlayer({
   const barHoverRef = useRef(false);
   const barTimerRef = useRef<number | undefined>(undefined);
   const menusOpenRef = useRef(false);
-  menusOpenRef.current = fxOpen || volumeOpen || confirmResetOpen;
+  menusOpenRef.current = fxOpen || volumeOpen || subsOpen || confirmResetOpen || !!ctxMenu;
 
   // I / F shortcuts: close the menus with no fade-out BEFORE the window resizes.
   const [instantClose, setInstantClose] = useState(false);
@@ -574,6 +755,7 @@ export function VideoPlayer({
       setInstantClose(true);
       setFxOpen(false);
       setVolumeOpen(false);
+      setSubsOpen(false);
     });
     requestAnimationFrame(() => setInstantClose(false));
   };
@@ -608,7 +790,7 @@ export function VideoPlayer({
   useEffect(() => {
     if (compact) armBarHide();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fxOpen, volumeOpen, confirmResetOpen, armBarHide]);
+  }, [fxOpen, volumeOpen, subsOpen, confirmResetOpen, armBarHide]);
 
   // Any mouse movement over the player brings the bar back.
   const handlePlayerMouseMove = () => {
@@ -723,7 +905,7 @@ export function VideoPlayer({
   }
   const videoTransform = transformParts.length > 0 ? transformParts.join(' ') : undefined;
 
-  const src = `wh3d-file://${libraryId}/${fileId}`;
+  const src = fallbackSrc ?? `wh3d-file://${libraryId}/${fileId}`;
 
   // Fullscreen is no longer OS fullscreen (PreviewPane fills the app window
   // with an animation instead), so menus and tooltips can portal to
@@ -835,6 +1017,7 @@ export function VideoPlayer({
     if (!graphRef.current) {
       try {
         graphRef.current = buildVideoAudioGraph(v);
+        void applyOutput(outputStore.get(), [graphRef.current.ctx]);
       } catch (e) {
         console.error('[VideoPlayer] could not start the audio effects engine', e);
         return;
@@ -886,6 +1069,8 @@ export function VideoPlayer({
   useEffect(() => {
     setFxOpen(false);
     setVolumeOpen(false);
+    setSubsOpen(false);
+    setCtxMenu(null);
   }, [isFullscreen, isMini, compact]);
 
   // Scroll wheel over the picture:
@@ -948,27 +1133,39 @@ export function VideoPlayer({
     const el = surfaceRef.current;
     if (!el) return;
 
-    if (e.button === 0) {
+    if (e.button === 0 && !e.shiftKey) {
       gesture.onMouseDown(e);
       return;
     }
 
-    if (e.button !== 2) return;
+    if (e.button !== 0 || !e.shiftKey) return;
     e.preventDefault();
     const rect = el.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return;
     let lastX = e.clientX;
     let lastY = e.clientY;
+    let moved = 0; // GAM-SUBS: % of the player moved while the right button was down
     const onMove = (ev: MouseEvent) => {
       const dx = ((ev.clientX - lastX) / rect.width) * 100;
       const dy = ((ev.clientY - lastY) / rect.height) * 100;
       lastX = ev.clientX;
       lastY = ev.clientY;
+      moved += Math.abs(dx) + Math.abs(dy);
       panBy(dx, dy);
     };
-    const onUp = () => {
+    const onUp = (ev: MouseEvent) => {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
+      shiftDragRef.current = true;
+      window.setTimeout(() => {
+        shiftDragRef.current = false;
+      }, 0);
+      if (moved < 0.6) {
+        // a plain right-click, not a pan
+        setFxOpen(false);
+        setVolumeOpen(false);
+        void ev;
+      }
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
@@ -1177,90 +1374,49 @@ export function VideoPlayer({
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       const tag = target?.tagName;
-      if (target && (tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable)) return;
+      if (target && (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable)) return;
+      if (matchesAction(e, 'video.volumeMenu')) {
+        if (resetOpenRef.current) return;
+        e.preventDefault();
+        e.stopPropagation();
+        setFxOpen(false);
+        setVolumeOpen((o) => !o);
+        return;
+      }
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (resetOpenRef.current) return;
 
       const a = actionsRef.current;
-      const key = e.key.toLowerCase();
 
       // I (mini / compact) and F (fullscreen): close any open menu first.
-      if ((key === 'i' || key === 'f') && !e.shiftKey && menusOpenRef.current) {
+      if ((e.code === 'KeyI' || matchesAction(e, 'video.fullscreen')) && !e.shiftKey && menusOpenRef.current) {
         closeMenusNow();
       }
 
-      // --- Scale / position keys. These are handled FIRST and always return, so
-      // a Shift combo never falls through to the plain-key action below
-      // (Shift+W pans; it does NOT raise the volume, Shift+S does NOT play/pause...).
-      if (e.shiftKey && (key === 'w' || key === 'a' || key === 's' || key === 'd')) {
-        e.preventDefault();
-        e.stopPropagation();
-        if (key === 'w') panBy(0, -PAN_STEP);
-        else if (key === 's') panBy(0, PAN_STEP);
-        else if (key === 'a') panBy(-PAN_STEP, 0);
-        else panBy(PAN_STEP, 0);
-        return;
-      }
-      if (e.key === '+' || e.key === '=') {
-        e.preventDefault();
-        zoomBy(ZOOM_STEP);
-        return;
-      }
-      if (e.key === '-' || e.key === '_') {
-        e.preventDefault();
-        zoomBy(-ZOOM_STEP);
-        return;
-      }
-      // [ = stretch vertically, ] = stretch horizontally. Add Shift to shrink.
-      if (e.code === 'BracketLeft') {
-        e.preventDefault();
-        stretchBy('y', e.shiftKey ? -STRETCH_STEP : STRETCH_STEP);
-        return;
-      }
-      if (e.code === 'BracketRight') {
-        e.preventDefault();
-        stretchBy('x', e.shiftKey ? -STRETCH_STEP : STRETCH_STEP);
-        return;
-      }
-
-      // Any other Shift combo does nothing here.
-      if (e.shiftKey) return;
-
-      if (e.code === 'Space' || key === 's') {
-        e.preventDefault();
-        e.stopPropagation();
-        a.togglePlay(true);
-      } else if (key === 'a') {
-        e.preventDefault();
-        a.seekRelative(-1);
-      } else if (key === 'd') {
-        e.preventDefault();
-        a.seekRelative(1);
-      } else if (key === 'w') {
-        e.preventDefault();
-        a.adjustVolumeRelative(5);
-      } else if (key === 'x') {
-        e.preventDefault();
-        a.adjustVolumeRelative(-5);
-      } else if (key === 'm') {
-        e.preventDefault();
-        a.toggleMute();
-      } else if (key === 'j') {
-        e.preventDefault();
-        a.changeSpeedStep('down');
-      } else if (key === 'l') {
-        e.preventDefault();
-        a.changeSpeedStep('up');
-      } else if (key === 'k') {
-        e.preventDefault();
-        a.changeSpeedStep('reset');
-      } else if (key === 'f') {
-        e.preventDefault();
-        a.toggleFullscreen();
-      } else if (key === 'r') {
-        e.preventDefault();
-        setConfirmResetOpen(true);
-      }
+      // Bindings live in keybinds.ts (physical keys, so they work in any language).
+      handleKey(e, 'video', {
+        'video.playPause': (ev) => { ev.stopPropagation(); a.togglePlay(true); },
+        'video.seekBack': () => a.seekRelative(-1),
+        'video.seekForward': () => a.seekRelative(1),
+        'video.volumeUp': () => a.adjustVolumeRelative(5),
+        'video.volumeDown': () => a.adjustVolumeRelative(-5),
+        'video.mute': () => a.toggleMute(),
+        'video.speedDown': () => a.changeSpeedStep('down'),
+        'video.speedUp': () => a.changeSpeedStep('up'),
+        'video.speedReset': () => a.changeSpeedStep('reset'),
+        'video.fullscreen': () => a.toggleFullscreen(),
+        'video.reset': () => setConfirmResetOpen(true),
+        'video.zoomIn': () => zoomBy(ZOOM_STEP),
+        'video.zoomOut': () => zoomBy(-ZOOM_STEP),
+        'video.stretchVPlus': () => stretchBy('y', STRETCH_STEP),
+        'video.stretchVMinus': () => stretchBy('y', -STRETCH_STEP),
+        'video.stretchHPlus': () => stretchBy('x', STRETCH_STEP),
+        'video.stretchHMinus': () => stretchBy('x', -STRETCH_STEP),
+        'video.panUp': (ev) => { ev.stopPropagation(); panBy(0, -PAN_STEP); },
+        'video.panDown': (ev) => { ev.stopPropagation(); panBy(0, PAN_STEP); },
+        'video.panLeft': (ev) => { ev.stopPropagation(); panBy(-PAN_STEP, 0); },
+        'video.panRight': (ev) => { ev.stopPropagation(); panBy(PAN_STEP, 0); }
+      });
     };
 
     window.addEventListener('keydown', handleKeyDown, true);
@@ -1271,7 +1427,28 @@ export function VideoPlayer({
   const handleError = () => {
     const code = videoRef.current?.error?.code;
     setErrorDetail(videoRef.current?.error?.message || null);
-    console.error('[VideoPlayer] playback error', videoRef.current?.error);
+    console.error('[VideoPlayer] playback error', videoRef.current?.error);
+    const gamApi = (window as any).gam;
+    if (!triedFallbackRef.current && gamApi?.makePlayableVideo) {
+      triedFallbackRef.current = true;
+      setIsBuffering(true);
+      Promise.resolve(gamApi.makePlayableVideo(libraryId, fileId))
+        .then((url: string | null) => {
+          if (url) {
+            setError(null);
+            setErrorDetail(null);
+            setFallbackSrc(url);
+          } else {
+            setError('This fileâ€™s codec isnâ€™t supported by the built-in player.');
+            setIsBuffering(false);
+          }
+        })
+        .catch(() => {
+          setError('This fileâ€™s codec isnâ€™t supported by the built-in player.');
+          setIsBuffering(false);
+        });
+      return;
+    }
     const lower = (ext ?? '').replace(/^\./, '').toLowerCase();
     // 4 === MEDIA_ERR_SRC_NOT_SUPPORTED
     if (lower === 'avi') {
@@ -1291,6 +1468,115 @@ export function VideoPlayer({
 
   const setV = (partial: Partial<VideoFx>) => setVfx((prev) => ({ ...prev, ...partial }));
   const setA = (partial: Partial<AudioFx>) => setAfx((prev) => ({ ...prev, ...partial }));
+
+  // ---- Right-click menu in its own window (mini player only) ----
+  // The mini window is smaller than the menu, so there it is drawn by a separate window
+  // (ContextMenuWindow.tsx, src/main/ipc/context-menu.ts) that sends its changes back here.
+  const ctxOwnerRef = useRef(false);
+  const ctxActionRef = useRef<(a: any) => void>(() => undefined);
+  ctxActionRef.current = (a: any) => {
+    switch (a.op) {
+      case 'sub':
+        setSubIndex(a.index);
+        break;
+      case 'track':
+        selectAudioTrack(a.index);
+        break;
+      case 'output':
+        outputStore.set(a.id);
+        break;
+      case 'vfx':
+        setV(a.partial);
+        break;
+      case 'vfxReset':
+        setVfx((p) => ({ ...DEFAULT_VIDEO_FX, rotate: p.rotate }));
+        break;
+      case 'scaleMode':
+        updateVz((p) => ({ ...p, mode: a.mode as ScaleMode }));
+        break;
+      case 'chrome':
+        onToggleChrome?.();
+        break;
+      case 'speed':
+        setSpeed(a.value);
+        break;
+      case 'modular':
+        setModular({ ...modularRef.current, ...a.partial });
+        break;
+      case 'subcfg':
+        setSubCfg((c) => ({ ...c, ...a.partial }));
+        break;
+      case 'subPreset':
+        setSubCfg((c) => ({ ...c, ...SUB_PRESETS[a.index].cfg }));
+        break;
+      case 'subReset':
+        setSubCfg({ ...DEFAULT_SUB });
+        break;
+      case 'scaleReset':
+        setVz({ ...DEFAULT_VZ });
+        setV({ rotate: 0 });
+        break;
+      case 'afx':
+        setA(a.partial);
+        break;
+      case 'afxReset':
+        setAfx({ ...DEFAULT_AUDIO_FX });
+        break;
+    }
+  };
+  useEffect(() => {
+    const g = (window as any).gam;
+    if (!g?.onContextMenuAction) return undefined;
+    return g.onContextMenuAction((a: unknown) => {
+      if (ctxOwnerRef.current) ctxActionRef.current(a);
+    }) as () => void;
+  }, []);
+  const openContextMenuAt = (ev: { clientX: number; clientY: number; screenX: number; screenY: number }) => {
+    const g = (window as any).gam;
+    if (isMini && g?.openContextMenu) {
+      ctxOwnerRef.current = true;
+      const snap: CtxSnapshot = {
+        kind: 'video',
+        subs: subs.map((s) => s.label),
+        subIndex,
+        tracks: audioTracks,
+        vfx: { ...vfx },
+        afx: {
+          pitch: afx.pitch,
+          reverbWet: afx.reverbWet,
+          subBass: afx.subBass,
+          bass: afx.bass,
+          treble: afx.treble
+        },
+        scaleMode: vz.mode,
+        speed,
+        modular: {
+          pitchOn: modular.pitchOn,
+          speedOn: modular.speedOn,
+          volumeOn: modular.volumeOn
+        },
+        subCfg: {
+          delay: subCfg.delay,
+          size: subCfg.size,
+          lift: subCfg.lift,
+          outline: subCfg.outline,
+          shadow: subCfg.shadow,
+          boxOn: subCfg.boxOn,
+          boxAlpha: subCfg.boxAlpha
+        },
+        subPresets: SUB_PRESETS.map((p) => p.label),
+        chromeHidden: !!chromeHidden,
+        pitchOn,
+        defaults: {
+          vfx: { ...DEFAULT_VIDEO_FX },
+          afx: { pitch: 0, reverbWet: 0, subBass: 0, bass: 0, treble: 0 }
+        }
+      };
+      void g.openContextMenu({ x: ev.screenX, y: ev.screenY, state: snap });
+      return;
+    }
+    setCtxMenu({ x: ev.clientX, y: ev.clientY });
+  };
 
   const panLimX = panLimit(vz.zoom, vz.stretchX);
   const panLimY = panLimit(vz.zoom, vz.stretchY);
@@ -1678,6 +1964,14 @@ export function VideoPlayer({
                 onWheel={onWheelAdjust((dir) => adjustVolumeRelative(dir * 5))}
               >
                 <GlassScroll maxHeight={volumeMaxH - 20}>
+                  <MediaMenuSections
+                    subs={subs.map((s) => s.label)}
+                    subIndex={subIndex}
+                    onSubIndex={setSubIndex}
+                    audioTracks={audioTracks}
+                    onAudioTrack={selectAudioTrack}
+                  />
+                  <Divider my={8} />
                   <Dim off={volumeOn}>
                   <Group gap="xs" wrap="nowrap">
                     <ActionIcon
@@ -1788,7 +2082,12 @@ export function VideoPlayer({
       <Box
         ref={surfaceRef}
         onMouseDown={handleSurfaceMouseDown}
-        onContextMenu={(e: React.MouseEvent) => e.preventDefault()}
+        onContextMenu={(e: React.MouseEvent) => {
+          e.preventDefault();
+          setFxOpen(false);
+          setVolumeOpen(false);
+          openContextMenuAt(e);
+        }}
         style={{
           position: 'absolute',
           top: 0,
@@ -1815,6 +2114,7 @@ export function VideoPlayer({
           onClick={(e) => {
             // A drag up / down gesture just fired: that release is not a play / pause click.
             if (gesture.shouldSuppressClick()) return;
+            if (e.shiftKey || shiftDragRef.current) return;
             // Own double-click check: two clicks only count when they are close in
             // time AND place, so a click a couple of seconds later is just a click.
             const now = performance.now();
@@ -1895,7 +2195,8 @@ export function VideoPlayer({
             transform: videoTransform,
             transformOrigin: '50% 50%'
           }}
-        />
+        >
+        </video>
 
         {isBuffering && !error && (
           <Center style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
@@ -1928,12 +2229,454 @@ export function VideoPlayer({
         )}
 
         {/* Play / pause circle + status pill (shared with AudioPlayer) */}
+        {subText && (
+          <div
+            style={{
+              position: 'absolute',
+              left: 16,
+              right: 16,
+              bottom: (overlayControls || compact ? 72 : 16) + subCfg.lift,
+              textAlign: 'center',
+              pointerEvents: 'none',
+              zIndex: 1
+            }}
+          >
+            <span
+              style={{
+                display: 'inline-block',
+                padding: '2px 10px',
+                borderRadius: 6,
+                background: subCfg.boxOn ? hexRgba(subCfg.box, subCfg.boxAlpha) : 'transparent',
+                color: subCfg.color,
+                fontFamily: resolveSubFont(subCfg.font, subText),
+                unicodeBidi: 'plaintext',
+                fontSize: `calc(clamp(14px, 2.2vw, 28px) * ${subCfg.size})`,
+                lineHeight: 1.35,
+                whiteSpace: 'pre-line',
+                textShadow: subTextShadow(subCfg)
+              }}
+            >
+              {subText}
+            </span>
+          </div>
+        )}
         <PlaybackIndicators api={pi} />
       </Box>
 
       {/* Control bar. Always the same element (so its collapse animation can run):
           under the video by default, floating over it with overlayControls or in compact mode. */}
       {controlBar}
+
+      {ctxMenu && (
+        <PlayerContextMenu
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          onClose={() => setCtxMenu(null)}
+          sections={[
+            {
+              id: 'ui',
+              label: 'Interface',
+              width: 220,
+              content: (
+                <Switch
+                  size="xs"
+                  label="Hide interface (O)"
+                  checked={!!chromeHidden}
+                  onChange={() => {
+                    onToggleChrome?.();
+                    setCtxMenu(null);
+                  }}
+                />
+              )
+            },
+            {
+              id: 'subs',
+              label: 'Subtitles',
+              content:
+                subs.length === 0 ? (
+                  <Text size="xs" c="dimmed">
+                    No subtitle files found next to this video.
+                  </Text>
+                ) : (
+                  <OptionList
+                    items={[
+                      { label: 'Off', checked: subIndex < 0 },
+                      ...subs.map((s, i) => ({ label: s.label, checked: subIndex === i }))
+                    ]}
+                    onPick={(i) => {
+                      setSubIndex(i - 1);
+                      setCtxMenu(null);
+                    }}
+                  />
+                )
+            },
+            {
+              id: 'playback',
+              label: 'Playback',
+              width: 250,
+              content: (
+                <Stack gap={8}>
+                  <Dim off={speedOn}>
+                    <FxSlider
+                      label="Speed"
+                      display={`${speed}x`}
+                      value={speed}
+                      min={0.25}
+                      max={4}
+                      step={0.05}
+                      onChange={(v) => setSpeed(Math.round(v * 100) / 100)}
+                      marks={[{ value: 1 }]}
+                    />
+                  </Dim>
+                  <Text size="10px" c="dimmed" tt="uppercase" fw={700}>
+                    Modular (random each play / loop)
+                  </Text>
+                  <Switch
+                    size="xs"
+                    label="Modular pitch"
+                    checked={modular.pitchOn}
+                    onChange={(e) => {
+                      const v = e.currentTarget.checked;
+                      setModular({ ...modular, pitchOn: v });
+                    }}
+                  />
+                  <Switch
+                    size="xs"
+                    label="Modular speed"
+                    checked={modular.speedOn}
+                    onChange={(e) => {
+                      const v = e.currentTarget.checked;
+                      setModular({ ...modular, speedOn: v });
+                    }}
+                  />
+                  <Switch
+                    size="xs"
+                    label="Modular volume"
+                    checked={modular.volumeOn}
+                    onChange={(e) => {
+                      const v = e.currentTarget.checked;
+                      setModular({ ...modular, volumeOn: v });
+                    }}
+                  />
+                  <UnstyledButton
+                    onClick={() => {
+                      setSpeed(1);
+                      setModular({ ...modular, pitchOn: false, speedOn: false, volumeOn: false });
+                    }}
+                  >
+                    <Text size="xs" c="dimmed">
+                      Reset
+                    </Text>
+                  </UnstyledButton>
+                </Stack>
+              )
+            },
+            {
+              id: 'subset',
+              label: 'Subtitle Settings',
+              width: 250,
+              content: (
+                <Stack gap={8}>
+                  <FxSlider
+                    label="Delay"
+                    display={`${subCfg.delay > 0 ? '+' : ''}${subCfg.delay.toFixed(1)} s`}
+                    value={subCfg.delay}
+                    min={-10}
+                    max={10}
+                    step={0.1}
+                    onChange={(v) => setSubCfg((p) => ({ ...p, delay: v }))}
+                    marks={[{ value: 0 }]}
+                  />
+                  <FxSlider
+                    label="Size"
+                    display={`${Math.round(subCfg.size * 100)}%`}
+                    value={subCfg.size}
+                    min={0.5}
+                    max={2.5}
+                    step={0.05}
+                    onChange={(v) => setSubCfg((p) => ({ ...p, size: v }))}
+                    marks={[{ value: 1 }]}
+                  />
+                  <FxSlider
+                    label="Height"
+                    display={`${subCfg.lift} px`}
+                    value={subCfg.lift}
+                    min={0}
+                    max={300}
+                    step={2}
+                    onChange={(v) => setSubCfg((p) => ({ ...p, lift: v }))}
+                    marks={[{ value: 0 }]}
+                  />
+                  <Text size="10px" c="dimmed" tt="uppercase" fw={700}>
+                    Presets
+                  </Text>
+                  <OptionList
+                    items={SUB_PRESETS.map((p) => ({ label: p.label, checked: false }))}
+                    onPick={(i) => setSubCfg((c) => ({ ...c, ...SUB_PRESETS[i].cfg }))}
+                  />
+                  <Group justify="space-between" wrap="nowrap">
+                    <Text size="xs" c="dimmed">
+                      Text color
+                    </Text>
+                    <input
+                      type="color"
+                      value={subCfg.color}
+                      onChange={(e) => {
+                        const v = e.currentTarget.value;
+                        setSubCfg((c) => ({ ...c, color: v }));
+                      }}
+                      style={{ width: 34, height: 22, border: 'none', background: 'none', padding: 0 }}
+                    />
+                  </Group>
+                  <Switch
+                    size="xs"
+                    label="Background box"
+                    checked={subCfg.boxOn}
+                    onChange={(e) => {
+                      const v = e.currentTarget.checked;
+                      setSubCfg((c) => ({ ...c, boxOn: v }));
+                    }}
+                  />
+                  {subCfg.boxOn && (
+                    <>
+                      <Group justify="space-between" wrap="nowrap">
+                        <Text size="xs" c="dimmed">
+                          Box color
+                        </Text>
+                        <input
+                          type="color"
+                          value={subCfg.box}
+                          onChange={(e) => {
+                            const v = e.currentTarget.value;
+                            setSubCfg((c) => ({ ...c, box: v }));
+                          }}
+                          style={{ width: 34, height: 22, border: 'none', background: 'none', padding: 0 }}
+                        />
+                      </Group>
+                      <FxSlider
+                        label="Box opacity"
+                        display={`${Math.round(subCfg.boxAlpha * 100)}%`}
+                        value={subCfg.boxAlpha}
+                        min={0.1}
+                        max={1}
+                        step={0.05}
+                        onChange={(v) => setSubCfg((c) => ({ ...c, boxAlpha: v }))}
+                        marks={[{ value: 0.55 }]}
+                      />
+                    </>
+                  )}
+                  <FxSlider
+                    label="Outline"
+                    display={`${subCfg.outline.toFixed(1)} px`}
+                    value={subCfg.outline}
+                    min={0}
+                    max={4}
+                    step={0.5}
+                    onChange={(v) => setSubCfg((c) => ({ ...c, outline: v }))}
+                    marks={[{ value: 0 }]}
+                  />
+                  <FxSlider
+                    label="Drop shadow blur"
+                    display={`${subCfg.shadow} px`}
+                    value={subCfg.shadow}
+                    min={0}
+                    max={16}
+                    step={1}
+                    onChange={(v) => setSubCfg((c) => ({ ...c, shadow: v }))}
+                    marks={[{ value: 0 }]}
+                  />
+                  <UnstyledButton onClick={() => setSubCfg({ ...DEFAULT_SUB })}>
+                    <Text size="xs" c="dimmed">
+                      Reset
+                    </Text>
+                  </UnstyledButton>
+                </Stack>
+              )
+            },
+            {
+              id: 'subfont',
+              label: 'Subtitle Font',
+              width: 270,
+              content: (
+                <FontList
+                  value={subCfg.font}
+                  onChange={(f) => setSubCfg((c) => ({ ...c, font: f }))}
+                />
+              )
+            },
+{
+              id: 'audio',
+              label: 'Audio',
+              content: (
+                <Stack gap={8}>
+                  {audioTracks.length > 1 && (
+                    <>
+                      <Text size="10px" c="dimmed" tt="uppercase" fw={700}>
+                        Audio track
+                      </Text>
+                      <OptionList
+                        items={audioTracks.map((t) => ({ label: t.label, checked: t.enabled }))}
+                        onPick={(i) => {
+                          selectAudioTrack(i);
+                          setCtxMenu(null);
+                        }}
+                      />
+                    </>
+                  )}
+                  <Text size="10px" c="dimmed" tt="uppercase" fw={700}>
+                    Output device
+                  </Text>
+                  <OutputDeviceList onPicked={() => setCtxMenu(null)} />
+                </Stack>
+              )
+            },
+            {
+              id: 'video',
+              label: 'Video Effects',
+              width: 250,
+              content: (
+                <Stack gap={8}>
+                  <FxSlider
+                    label="Brightness"
+                    display={`${vfx.brightness}%`}
+                    value={vfx.brightness}
+                    min={50}
+                    max={150}
+                    step={1}
+                    onChange={(v) => setV({ brightness: v })}
+                    marks={[{ value: 100 }]}
+                  />
+                  <FxSlider
+                    label="Contrast"
+                    display={`${vfx.contrast}%`}
+                    value={vfx.contrast}
+                    min={50}
+                    max={150}
+                    step={1}
+                    onChange={(v) => setV({ contrast: v })}
+                    marks={[{ value: 100 }]}
+                  />
+                  <FxSlider
+                    label="Saturation"
+                    display={`${vfx.saturation}%`}
+                    value={vfx.saturation}
+                    min={0}
+                    max={200}
+                    step={1}
+                    onChange={(v) => setV({ saturation: v })}
+                    marks={[{ value: 100 }]}
+                  />
+                  <FxSlider
+                    label="Hue"
+                    display={`${vfx.hue > 0 ? '+' : ''}${vfx.hue}\u00b0`}
+                    value={vfx.hue}
+                    min={-180}
+                    max={180}
+                    step={1}
+                    onChange={(v) => setV({ hue: v })}
+                    marks={[{ value: 0 }]}
+                  />
+                  <Switch
+                    size="xs"
+                    label="Mirror horizontally"
+                    checked={vfx.flip}
+                    onChange={(e) => setV({ flip: e.currentTarget.checked })}
+                  />
+                  <Switch
+                    size="xs"
+                    label="Mirror vertically"
+                    checked={vfx.flipV}
+                    onChange={(e) => setV({ flipV: e.currentTarget.checked })}
+                  />
+                  <UnstyledButton onClick={() => setVfx((p) => ({ ...DEFAULT_VIDEO_FX, rotate: p.rotate }))}>
+                    <Text size="xs" c="dimmed">
+                      Reset
+                    </Text>
+                  </UnstyledButton>
+                </Stack>
+              )
+            },
+            {
+              id: 'scale',
+              label: 'Scale & Position',
+              width: 250,
+              content: (
+                <Stack gap={10}>
+                  <GlassSegmented
+                    value={vz.mode}
+                    onChange={(v) => updateVz((p) => ({ ...p, mode: v as ScaleMode }))}
+                    data={[
+                      { value: 'fit', label: 'Fit' },
+                      { value: 'stretch', label: 'Stretch' },
+                      { value: 'actual', label: 'Actual' },
+                      { value: 'custom', label: 'Custom' }
+                    ]}
+                  />
+                  <div>
+                    <Text size="xs" c="dimmed" mb={4}>
+                      Rotate
+                    </Text>
+                    <GlassSegmented
+                      value={String(vfx.rotate)}
+                      onChange={(v) => setV({ rotate: Number(v) })}
+                      data={[
+                        { value: '0', label: '0\u00b0' },
+                        { value: '90', label: '90\u00b0' },
+                        { value: '180', label: '180\u00b0' },
+                        { value: '270', label: '270\u00b0' }
+                      ]}
+                    />
+                  </div>
+                  <UnstyledButton
+                    onClick={() => {
+                      setVz({ ...DEFAULT_VZ });
+                      setV({ rotate: 0 });
+                    }}
+                  >
+                    <Text size="xs" c="dimmed">
+                      Reset
+                    </Text>
+                  </UnstyledButton>
+                </Stack>
+              )
+            },
+            {
+              id: 'afx',
+              label: 'Audio Effects',
+              width: 250,
+              content: (
+                <Stack gap={8}>
+                  <Dim off={pitchOn}>
+                    <FxSlider
+                      label="Pitch"
+                      display={`${afx.pitch > 0 ? '+' : ''}${afx.pitch} st`}
+                      value={afx.pitch}
+                      min={PITCH_MIN_ST}
+                      max={PITCH_MAX_ST}
+                      step={1}
+                      color="violet"
+                      onChange={(v) => setA({ pitch: v })}
+                      marks={[{ value: 0 }]}
+                    />
+                  </Dim>
+                  <Divider />
+                  <ReverbControls wet={afx.reverbWet} onWet={(v) => setA({ reverbWet: v })} />
+                  <Divider />
+                  <EqControls
+                    values={{ subBass: afx.subBass, bass: afx.bass, treble: afx.treble }}
+                    onChange={(v) => setA(v)}
+                  />
+                  <UnstyledButton onClick={() => setAfx({ ...DEFAULT_AUDIO_FX })}>
+                    <Text size="xs" c="dimmed">
+                      Reset
+                    </Text>
+                  </UnstyledButton>
+                </Stack>
+              )
+            }
+          ]}
+        />
+      )}
 
       {/* Reset confirmation (R key or middle mouse button) */}
       <Modal

@@ -220,6 +220,18 @@ export function EffectSection({
   );
 }
 
+const appleSliderStyles = {
+  track: { height: 4 },
+  bar: { borderRadius: 999 },
+  thumb: {
+    width: 12,
+    height: 12,
+    background: '#ffffff',
+    border: 'none',
+    boxShadow: '0 1px 2px rgba(0, 0, 0, 0.4)'
+  }
+} as const;
+
 export function FxSlider({
   label,
   display,
@@ -251,7 +263,7 @@ export function FxSlider({
     onChange(Math.max(min, Math.min(max, next)));
   };
   return (
-    <div onWheel={onWheel}>
+    <div onWheel={onWheel} style={{ padding: '5px 0' }}>
       <Group justify="space-between" mb={2} wrap="nowrap">
         <Text size="xs" c="dimmed">
           {label}
@@ -261,7 +273,7 @@ export function FxSlider({
         </Text>
       </Group>
       <Slider
-        size="xs"
+        size={4}
         min={min}
         max={max}
         step={step}
@@ -270,7 +282,7 @@ export function FxSlider({
         label={() => display}
         marks={marks}
         color={color}
-        styles={{ thumb: sliderThumbStyle }}
+        styles={appleSliderStyles}
       />
     </div>
   );
@@ -457,7 +469,7 @@ export function PlayerSettingsMenu({
 
   return (
     <Popover
-      width={280}
+      width={250}
       position="top"
       shadow="md"
       withArrow={false}

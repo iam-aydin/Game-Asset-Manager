@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { MantineProvider, Tooltip, createTheme } from '@mantine/core';
 import { Notifications } from '@mantine/notifications';
 import { App } from './App';
+import { ContextMenuWindow } from './components/ContextMenuWindow';
 import { TOOLTIP_PROPS } from './components/Glasseffect';
 
 import '@mantine/core/styles.css';
@@ -19,13 +20,20 @@ const theme = createTheme({
   }
 });
 
+// The mini player's right-click menu runs in its own window and loads this same page with #ctx-menu.
+const isCtxMenu = window.location.hash.startsWith('#ctx-menu');
 const container = document.getElementById('root');
 if (!container) throw new Error('Root container missing');
 createRoot(container).render(
   <React.StrictMode>
     <MantineProvider theme={theme} defaultColorScheme="dark">
-      <Notifications position="bottom-right" />
-      <App />
-    </MantineProvider>
+      {isCtxMenu ? (
+        <ContextMenuWindow />
+      ) : (
+        <>
+          <Notifications position="bottom-right" />
+          <App />
+        </>
+      )}    </MantineProvider>
   </React.StrictMode>
 );

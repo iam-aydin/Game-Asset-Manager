@@ -14,6 +14,7 @@ import {
 } from 'node:fs';
 import { dirname, join, parse, relative, resolve, sep } from 'node:path';
 import archiver from 'archiver';
+import { copyFile, writeFile as writeFileAsync } from 'node:fs/promises';
 import { scopedLogger } from '@main/logger';
 
 const zlog = scopedLogger('zip');
@@ -410,6 +411,38 @@ export function registerDataTransferIpc(): void {
   ipcMain.handle(IPC.zipContainerToDesktop, async (_e, id: number) => zipContainerTo(id));
 
   ipcMain.handle(IPC.getAppVersion, () => app.getVersion());
+
+  ipcMain.handle(
+    IPC.saveImageAs,
+    async (
+      event,
+      req: { libraryId: string; fileId: number; defaultName: string; data: Uint8Array | null }
+    ) => {
+      const lib = manager.getOpenLibrary(req.libraryId);
+      if (!lib) return { ok: false as const, error: 'Library is not open' };
+      const win = BrowserWindow.fromWebContents(event.sender);
+      const ext = parse(req.defaultName).ext.slice(1).toLowerCase() || 'png';
+      const opts = {
+        title: 'Save image as',
+        defaultPath: join(app.getPath('pictures'), safeName(req.defaultName)),
+        filters: [{ name: ext.toUpperCase(), extensions: [ext] }]
+      };
+      const res = win ? await dialog.showSaveDialog(win, opts) : await dialog.showSaveDialog(opts);
+      if (res.canceled || !res.filePath) return { ok: true as const, canceled: true as const };
+      try {
+        if (req.data) {
+          await writeFileAsync(res.filePath, Buffer.from(req.data));
+        } else {
+          const f = lib.files.getById(req.fileId);
+          if (!f) return { ok: false as const, error: 'File not found' };
+          await copyFile(lib.resolver.toAbsolute(f.relPath), res.filePath);
+        }
+        return { ok: true as const, canceled: false as const, path: res.filePath };
+      } catch (err) {
+        return { ok: false as const, error: (err as Error).message };
+      }
+    }
+  );
 
   ipcMain.handle(IPC.checkForUpdates, async () => {
     const current = app.getVersion();

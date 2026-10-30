@@ -38,6 +38,7 @@ export const IPC = {
   importData: 'data:import',
   checkForUpdates: 'app:checkUpdate',
   getAppVersion: 'app:version',
+  saveImageAs: 'files:saveImageAs',
   createCollection: 'collections:create',
   renameCollection: 'collections:rename',
   deleteCollection: 'collections:delete',

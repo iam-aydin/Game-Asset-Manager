@@ -12,7 +12,8 @@ export const IMAGE_EXTENSIONS = [
   'png',
   'jpg',
   'jpeg',
-  'bmp'
+  'bmp',
+  'ico'
 ] as const;
 
 export const AUDIO_EXTENSIONS = [
@@ -81,6 +82,11 @@ export function isVideoExtension(ext: string): ext is VideoExtension {
 
 export function isTextExtension(ext: string): ext is TextExtension {
   return TEXT_SET.has(ext.toLowerCase());
+}
+
+/** Windows icon files: one file holding several sizes. Gets its own viewer (not the plain image viewer). */
+export function isIconExtension(ext: string): boolean {
+  return ext.toLowerCase() === 'ico';
 }
 
 export function extensionOf(filename: string): string {

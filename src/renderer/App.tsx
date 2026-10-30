@@ -85,7 +85,8 @@ import { FullscreenPreviewModal } from './components/FullscreenPreviewModal';
 import { DeleteConfirmModal } from './components/DeleteConfirmModal';
 import { MoveConfirmModal } from './components/MoveConfirmModal';
 import { CompareModal } from './components/CompareModal';
-import { FolderRenameModal } from './components/FolderRenameModal';
+import { FolderRenameGlassModal } from './components/FolderRenameGlassModal';
+import { FolderInfoGlassModal } from './components/FolderInfoGlassModal';
 // Glass look is always on for now. The on/off switch (theme menu) is commented
 // out below; search for "GLASS TOGGLE" to bring it back. NormalLook.tsx exports
 // the same names, so the switch renders one or the other.
@@ -93,6 +94,7 @@ import { GlassStyles, GLASS_CLASS, GLASS_POPOVER_CLASS } from './components/Glas
 import { ScrollbarStyles } from './components/ScrollbarStyles';
 // GLASS TOGGLE: import { GlassStyles as NormalStyles } from './components/NormalLook';
 import { ipc } from './ipc-client';
+import { matchesAction, type ActionId } from './keybinds';
 import { SUPPORTED_EXTENSIONS, isAudioExtension, isVideoExtension } from '@shared/formats';
 
 const SEARCH_DEBOUNCE_MS = 200;
@@ -348,6 +350,15 @@ function findFolderNode(root: FolderTreeNode | null, path: string): FolderTreeNo
 }
 export function App() {
   useEffect(() => installResizeBlur(), []);
+  // Glass effect switch (Preferences > Theme). Saved in localStorage, default on.
+  useEffect(() => {
+    try {
+      document.documentElement.dataset.gamGlass =
+        localStorage.getItem('gam:glassUi') === 'off' ? 'off' : 'on';
+    } catch {
+      document.documentElement.dataset.gamGlass = 'on';
+    }
+  }, []);
   const [libraries, setLibraries] = useState<LibrarySummary[]>([]);
   const [selectedLibraryId, setSelectedLibraryId] = useState<string | null>(null);
   const [folderTree, setFolderTree] = useState<FolderTreeNode | null>(null);
@@ -408,6 +419,11 @@ export function App() {
     folderPath: string;
     currentName: string;
   }>({ open: false, folderPath: '', currentName: '' });
+  const [folderInfo, setFolderInfo] = useState<{ open: boolean; path: string; name: string }>({
+    open: false,
+    path: '',
+    name: ''
+  });
   const [scanStatus, setScanStatus] = useState<ScanProgress | null>(null);
   const [cacheStatus, setCacheStatus] = useState<CacheProgress | null>(null);
   const [thumbVersions, setThumbVersions] = useState<Map<number, number>>(() => new Map());
@@ -741,7 +757,7 @@ export function App() {
       if (scope === 'tree') {
         const list = await ipc.queryFiles({
           libraryId,
-          parentDir: '',
+          parentDir,
           recursive: true,
           query: query.trim() || undefined,
           extensions: extensions.size > 0 ? [...extensions] : undefined,
@@ -1167,7 +1183,7 @@ export function App() {
         notifications.show({
           color: 'gray',
           title: 'Scan cancelled',
-          message: `Stopped after ${event.progress.filesSeen} files. Nothing was changed.`,
+          message: `Stopped after ${event.progress.filesSeen} files. Files already read stay in your library.`,
           autoClose: 3000
         });
         return;
@@ -1249,6 +1265,117 @@ export function App() {
     }
   }, []);
 
+  // Index the current folder (and its subfolders) for "Show all files" and the filters.
+  // Folders are normally indexed only when opened, so this reads the rest of the folder tree in
+  // the background. It can be stopped at any time: clear the filters, turn Show all off, click
+  // another folder, use the X in the top bar, or the Stop button in the notice (big folders).
+  const indexRequestedRef = useRef<Set<string>>(new Set());
+  const indexActiveRef = useRef<string | null>(null);
+  const indexSawScanRef = useRef(false);
+  const folderTreeRef = useRef<FolderTreeNode | null>(null);
+  folderTreeRef.current = folderTree;
+  const scanStatusRef = useRef<ScanProgress | null>(null);
+  scanStatusRef.current = scanStatus;
+
+  useEffect(() => {
+    if (!selectedLibraryId) return;
+    const wantAll = (viewScope === 'tree' || filterActive) && selectedCollectionId == null;
+
+    if (!wantAll) {
+      // The user undid it: stop reading.
+      const active = indexActiveRef.current;
+      if (active) {
+        indexActiveRef.current = null;
+        indexSawScanRef.current = false;
+        indexRequestedRef.current.delete(active);
+        notifications.hide('index-all');
+        if (scanStatusRef.current?.state === 'scanning') {
+          void ipc.cancelScan(splitFolderKey(active).libraryId);
+        }
+      }
+      return;
+    }
+
+    const libraryId = selectedLibraryId;
+    const key = folderKey(libraryId, selectedFolderPath);
+    if (indexRequestedRef.current.has(key)) return;
+    // An older request for another folder is replaced by this one.
+    const prev = indexActiveRef.current;
+    if (prev && prev !== key) indexRequestedRef.current.delete(prev);
+    indexRequestedRef.current.add(key);
+    indexActiveRef.current = key;
+    indexSawScanRef.current = false;
+
+    notifications.hide('index-all');
+    const total = findFolderNode(folderTreeRef.current, selectedFolderPath)?.recursiveFileCount ?? 0;
+    if (total > 2000) {
+      const stop = (): void => {
+        notifications.hide('index-all');
+        indexRequestedRef.current.delete(key);
+        indexActiveRef.current = null;
+        indexSawScanRef.current = false;
+        void ipc.cancelScan(libraryId);
+        setViewScope('normal');
+        setSelectedExtensions(new Set());
+        setSelectedTagIds(new Set());
+        setMinRating(0);
+        setSelectedColorLabels(new Set());
+        setDuplicatesOnly(false);
+        setSearchInput('');
+        setSearchQuery('');
+      };
+      notifications.show({
+        id: 'index-all',
+        color: 'indigo',
+        title: 'Reading this folder',
+        autoClose: false,
+        message: (
+          <Stack gap={6}>
+            <Text size="sm">
+              About {total.toLocaleString()} files. This runs in the background, so you can keep
+              working. Thumbnails appear as files are read.
+            </Text>
+            <Group>
+              <Button size="compact-xs" variant="light" color="gray" onClick={stop}>
+                Stop and undo
+              </Button>
+            </Group>
+          </Stack>
+        )
+      });
+    }
+
+    void ipc
+      .rescanFolder(libraryId, selectedFolderPath === '' ? '*' : `*/${selectedFolderPath}`)
+      .then((r) => {
+        if (!r.ok) {
+          indexRequestedRef.current.delete(key);
+          if (indexActiveRef.current === key) indexActiveRef.current = null;
+          notifications.hide('index-all');
+        }
+      });
+  }, [selectedLibraryId, selectedFolderPath, selectedCollectionId, viewScope, filterActive]);
+
+  // When the reading finishes (or is cancelled from the top bar), close the notice.
+  useEffect(() => {
+    if (!indexActiveRef.current) return;
+    if (scanStatus?.state === 'scanning') {
+      indexSawScanRef.current = true;
+      return;
+    }
+    if (!indexSawScanRef.current) return;
+    indexActiveRef.current = null;
+    indexSawScanRef.current = false;
+    notifications.hide('index-all');
+    if (scanStatus?.state === 'watching') {
+      notifications.show({
+        color: 'green',
+        title: 'Done reading folders',
+        message: `${scanStatus.filesSeen.toLocaleString()} files can now be filtered and listed.`,
+        autoClose: 3000
+      });
+    }
+  }, [scanStatus]);
   // Jump to a folder from the global Favorites/Recent lists. Entries from another
   // library switch the library first; the reset effect then applies the folder.
   const openFolderKey = useCallback(
@@ -1320,7 +1447,6 @@ export function App() {
     }
     preTreeRef.current = { folder: selectedFolderPath, collectionId: selectedCollectionId };
     setViewScope('tree');
-    setSelectedFolderPath('');
     setSelectedCollectionId(null);
   }, [viewScope, selectedFolderPath, selectedCollectionId]);
 
@@ -1708,6 +1834,10 @@ export function App() {
     [selectedLibraryId]
   );
 
+  const openFolderInfo = useCallback((path: string, name: string) => {
+    setFolderInfo({ open: true, path, name });
+  }, []);
+
   const handleRenameFolder = useCallback((folderPath: string) => {
     // Opens FolderRenameModal (rendered below) instead of window.prompt(),
     // which Electron doesn't implement (it returns null with no dialog).
@@ -1854,24 +1984,22 @@ export function App() {
 
       // Color labels — modifier + 1..5 = red..purple, modifier + 0 = clear.
       const mod = e.metaKey || e.ctrlKey;
-      if (mod && !e.shiftKey && !e.altKey) {
-        if (e.key === '0') {
+      if (matchesAction(e, 'label.clear')) {
+        e.preventDefault();
+        void handleBulkSetColorLabel(null);
+        return;
+      }
+      for (let i = 0; i < COLOR_LABELS.length && i < 5; i++) {
+        if (matchesAction(e, ('label.' + (i + 1)) as ActionId)) {
           e.preventDefault();
-          void handleBulkSetColorLabel(null);
-          return;
-        }
-        const idx = '12345'.indexOf(e.key);
-        if (idx >= 0 && idx < COLOR_LABELS.length) {
-          e.preventDefault();
-          void handleBulkSetColorLabel(COLOR_LABELS[idx]);
+          void handleBulkSetColorLabel(COLOR_LABELS[i]);
           return;
         }
       }
 
       // Ratings — plain number keys 0..5
-      if (!mod && !e.altKey && !e.shiftKey) {
-        const n = '012345'.indexOf(e.key);
-        if (n >= 0) {
+      for (let n = 0; n <= 5; n++) {
+        if (matchesAction(e, ('rate.' + n) as ActionId)) {
           if (selectedFileIds.size === 0) return;
           e.preventDefault();
           void handleBulkSetRating(n);
@@ -1894,7 +2022,7 @@ export function App() {
       }
 
       // Cmd/Ctrl+D → duplicate selection.
-      if (mod && !e.shiftKey && !e.altKey && (e.key === 'd' || e.key === 'D')) {
+      if (matchesAction(e, 'file.duplicate')) {
         if (selectedFileIds.size === 0) return;
         e.preventDefault();
         void performDuplicate();
@@ -2216,7 +2344,7 @@ export function App() {
       <Stack gap="sm" style={{ padding: 8, flexShrink: 0 }}>
         {selectedLibrary && (
           <ShowAllInLibraryLink
-            libraryName={selectedLibrary.name}
+            folderName={selectedFolderPath ? (selectedFolderPath.split('/').pop() ?? selectedFolderPath) : selectedLibrary.name}
             active={viewScope === 'tree'}
             onClick={selectAllInCurrentLibrary}
           />
@@ -2229,7 +2357,7 @@ export function App() {
             root={folderTree}
             rootLabel={selectedLibrary.name}
             selectedPath={
-              viewScope !== 'normal' || selectedCollectionId != null ? null : selectedFolderPath
+              selectedCollectionId != null ? null : selectedFolderPath
             }
             onSelect={selectFolder}
             isFavorite={isFavoriteFolder}
@@ -2237,6 +2365,7 @@ export function App() {
             onRename={handleRenameFolder}
             onReveal={handleRevealFolder}
             onRescan={handleRescanFolder}
+            onInfo={openFolderInfo}
           />
         ) : (
           <Text size="sm" c="dimmed" p="md">
@@ -2322,13 +2451,14 @@ export function App() {
   const navCrumbs: { label: string; path: string | null }[] = [];
   if (selectedLibrary) {
     navCrumbs.push({ label: selectedLibrary.name, path: '' });
-    if (viewScope === 'tree') {
-      navCrumbs.push({ label: 'All models', path: null });
-    } else if (selectedCollection) {
+    if (selectedCollection) {
       navCrumbs.push({ label: selectedCollection.name, path: null });
-    } else if (selectedFolderPath) {
-      const segs = selectedFolderPath.split('/');
-      segs.forEach((s, i) => navCrumbs.push({ label: s, path: segs.slice(0, i + 1).join('/') }));
+    } else {
+      if (selectedFolderPath) {
+        const segs = selectedFolderPath.split('/');
+        segs.forEach((s, i) => navCrumbs.push({ label: s, path: segs.slice(0, i + 1).join('/') }));
+      }
+      if (viewScope === 'tree') navCrumbs.push({ label: 'All files', path: null });
     }
   }
   const inlineNav = (
@@ -2430,6 +2560,7 @@ export function App() {
         onRename={handleRenameFolder}
         onReveal={handleRevealFolder}
         onRescan={handleRescanFolder}
+        onInfo={openFolderInfo}
       />
     </Stack>
   );
@@ -2479,6 +2610,24 @@ export function App() {
     <>
     <GlassStyles />
     <ScrollbarStyles />
+    <style>{`
+      /* Glass effect OFF: no blur anywhere, glass surfaces get a solid background */
+      :root[data-gam-glass='off'] *,
+      :root[data-gam-glass='off'] *::before,
+      :root[data-gam-glass='off'] *::after {
+        -webkit-backdrop-filter: none !important;
+        backdrop-filter: none !important;
+      }
+      :root[data-gam-glass='off'] .${GLASS_CLASS},
+      :root[data-gam-glass='off'] .${GLASS_POPOVER_CLASS},
+      :root[data-gam-glass='off'] .gam-root,
+      :root[data-gam-glass='off'] .mantine-Notification-root,
+      :root[data-gam-glass='off'] .mantine-Menu-dropdown,
+      :root[data-gam-glass='off'] .mantine-Popover-dropdown {
+        background: var(--mantine-color-dark-7) !important;
+        background-image: none !important;
+      }
+    `}</style>
     <FolderGlyphStyles />
     <style>{`
       /* wh3d-round: capsule shapes in the top bar (colors and sizes untouched) */
@@ -2512,6 +2661,12 @@ export function App() {
       .mantine-Notification-title { color: var(--mantine-color-text) !important; font-weight: 600; }
       .mantine-Notification-description { color: var(--mantine-color-dimmed) !important; }
       .mantine-Notification-closeButton { border-radius: 50% !important; }
+      /* Long names in menu titles end with ... instead of leaving the box */
+      .mantine-Menu-label {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
     `}</style>
     {/* GLASS TOGGLE: {glassUi ? <GlassStyles /> : <NormalStyles />} */}
     <AppShell header={{ height: 88 }} padding={0}>
@@ -2821,11 +2976,19 @@ export function App() {
         onConfirm={() => void performDelete()}
       />
 
-      <FolderRenameModal
+      <FolderRenameGlassModal
         opened={folderRenameModal.open}
         currentName={folderRenameModal.currentName}
         onCancel={() => setFolderRenameModal({ open: false, folderPath: '', currentName: '' })}
         onConfirm={confirmFolderRename}
+      />
+
+      <FolderInfoGlassModal
+        opened={folderInfo.open}
+        libraryId={selectedLibraryId}
+        path={folderInfo.path}
+        name={folderInfo.name}
+        onClose={() => setFolderInfo((i) => ({ ...i, open: false }))}
       />
 
       <MoveConfirmModal
@@ -2960,41 +3123,48 @@ function InlineNav({
 }
 
 function ShowAllInLibraryLink({
-  libraryName,
+  folderName,
   active,
   onClick
 }: {
-  libraryName: string;
+  folderName: string;
   active: boolean;
   onClick: () => void;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      style={{
-        appearance: 'none',
-        border: 'none',
-        font: 'inherit',
-        textAlign: 'left',
-        cursor: 'pointer',
-        display: 'block',
-        width: '100%',
-        boxSizing: 'border-box',
-        padding: '6px 8px',
-        borderRadius: 4,
-        fontSize: 13,
-        lineHeight: 1.5,
-        color: active ? 'var(--mantine-color-indigo-3)' : 'var(--mantine-color-gray-3)',
-        background: active ? 'var(--mantine-color-dark-5)' : 'transparent',
-        fontWeight: active ? 600 : 500,
-        whiteSpace: 'normal'
-      }}
-      title={`Show all files in current library: ${libraryName}`}
+    <Tooltip
+      label={
+        active
+          ? 'Click again to go back to the normal view'
+          : `List every file inside "${folderName}" and all of its subfolders`
+      }
     >
-      Show all files in current library:{' '}
-      <span style={{ color: 'var(--mantine-color-indigo-3)' }}>{libraryName}</span>
-    </button>
+      <button
+        type="button"
+        onClick={onClick}
+        style={{
+          appearance: 'none',
+          border: 'none',
+          font: 'inherit',
+          textAlign: 'left',
+          cursor: 'pointer',
+          display: 'block',
+          width: '100%',
+          boxSizing: 'border-box',
+          padding: '6px 8px',
+          borderRadius: 4,
+          fontSize: 13,
+          lineHeight: 1.5,
+          color: active ? 'var(--mantine-color-indigo-3)' : 'var(--mantine-color-gray-3)',
+          background: active ? 'var(--mantine-color-dark-5)' : 'transparent',
+          fontWeight: active ? 600 : 500,
+          whiteSpace: 'normal'
+        }}
+      >
+        Show all files in current folder:{' '}
+        <span style={{ color: 'var(--mantine-color-indigo-3)' }}>{folderName}</span>
+      </button>
+    </Tooltip>
   );
 }
 
@@ -3017,8 +3187,7 @@ function Breadcrumbs({
         No library
       </Text>
     );
-  const segments =
-    scope === 'tree' || collectionName ? [] : folderPath ? folderPath.split('/') : [];
+  const segments = collectionName ? [] : folderPath ? folderPath.split('/') : [];
   return (
     <Group
       gap={4}
@@ -3032,21 +3201,12 @@ function Breadcrumbs({
         border: '1px solid color-mix(in srgb, var(--mantine-color-indigo-4) 45%, transparent)',
         boxShadow: 'inset 0 1px 0 rgba(255, 255, 255, 0.12)'
       }}
-    >      <UnstyledButton onClick={() => onNavigate('')}>
+    >
+      <UnstyledButton onClick={() => onNavigate('')}>
         <Text size="sm" fw={600} c="indigo.2" truncate>
           {library.name}
         </Text>
       </UnstyledButton>
-      {scope === 'tree' && (
-        <Group gap={4} wrap="nowrap">
-          <Text size="sm" c="dimmed">
-            /
-          </Text>
-          <Badge size="sm" variant="light" color="teal">
-            All models
-          </Badge>
-        </Group>
-      )}
       {collectionName != null && (
         <Group gap={4} wrap="nowrap">
           <Text size="sm" c="dimmed">
@@ -3069,6 +3229,16 @@ function Breadcrumbs({
           </UnstyledButton>
         </Group>
       ))}
+      {scope === 'tree' && collectionName == null && (
+        <Group gap={4} wrap="nowrap">
+          <Text size="sm" c="dimmed">
+            /
+          </Text>
+          <Badge size="sm" variant="light" color="teal">
+            All files
+          </Badge>
+        </Group>
+      )}
     </Group>
   );
 }

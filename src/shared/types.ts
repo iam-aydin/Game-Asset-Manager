@@ -180,6 +180,23 @@ export type RevealFolderResult =
   | { ok: true }
   | { ok: false; error: string };
 
+export interface FolderInfo {
+  /** Absolute path of the folder on disk. */
+  absolutePath: string;
+  /** Parent directory of the folder (the "Location" row). */
+  location: string;
+  sizeBytes: number;
+  sizeOnDiskBytes: number;
+  fileCount: number;
+  folderCount: number;
+  createdMs: number;
+  modifiedMs: number;
+}
+
+export type FolderInfoResult =
+  | { ok: true; info: FolderInfo }
+  | { ok: false; error: string };
+
 export type RescanFolderResult =
   | { ok: true }
   | { ok: false; error: string };
@@ -507,6 +524,8 @@ export interface IpcApi {
    * true scoped scan can be dropped in later without touching callers.
    */
   rescanFolder(libraryId: string, folderPath: string): Promise<RescanFolderResult>;
+  /** Disk-based properties of a folder: size, size on disk, file/folder counts, dates. */
+  getFolderInfo(libraryId: string, folderPath: string): Promise<FolderInfoResult>;
 
   listFolders(req: ListFoldersRequest): Promise<FolderTreeNode | null>;
   listFiles(req: ListFilesRequest): Promise<FileRecord[]>;
@@ -598,6 +617,17 @@ export interface IpcApi {
     | { ok: false; error: string }
   >;
   getAppVersion(): Promise<string>;
+  /** Save an image: data = rendered bytes, or null to copy the original file. Shows a Save dialog. */
+  saveImageAs(req: {
+    libraryId: string;
+    fileId: number;
+    defaultName: string;
+    data: Uint8Array | null;
+  }): Promise<
+    | { ok: true; canceled: true }
+    | { ok: true; canceled: false; path: string }
+    | { ok: false; error: string }
+  >;
   /** Load a .gamdata file, asking where each library lives on this machine. */
   importData(): Promise<
     | { ok: true; canceled: true }

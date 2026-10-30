@@ -14,20 +14,24 @@ import {
   Popover,
   Slider,
   Stack,
+  Switch,
   Text,
   Tooltip,
   UnstyledButton,
   useComputedColorScheme
 } from '@mantine/core';
 import {
+  IconArrowsMaximize,
+  IconArrowsMinimize,
   IconPlayerPause,
   IconPlayerPlay,
-  IconRepeat,
-  IconPictureInPicture,
-  IconPictureInPictureOff,
-  IconArrowsMaximize,
-  IconArrowsMinimize
+  IconRepeat
 } from '@tabler/icons-react';
+import { MiniIcon, MiniOffIcon } from './PlayerIcons';
+import { MediaMenuSections, OutputDeviceList } from './PlayerMediaMenu';
+import { PlayerContextMenu } from './PlayerContextMenu';
+import { applyOutput, outputStore, useAudioOutput } from './audioOutput';
+import type { CtxSnapshot } from './ContextMenuWindow';
 import { VIDEO_COMPACT_BAR, videoCompactBarCss } from '@shared/transition';
 import { useAutoHideBar } from '../util/autohide';
 import { PlaybackIndicators, VolumeIcon, usePlaybackIndicators } from './PlaybackIndicators';
@@ -95,6 +99,9 @@ interface AudioPlayerProps {
   /** Shown at the left / right end of the compact bar. Only rendered in compact mode. */
   compactStartSlot?: React.ReactNode;
   compactEndSlot?: React.ReactNode;
+  /** Interface hidden (PreviewPane owns it). The right-click menu toggles it. */
+  chromeHidden?: boolean;
+  onToggleChrome?: () => void;
 }
 
 // CSS variables read by the collapse animation in transition.ts: the size the
@@ -486,7 +493,9 @@ export function AudioPlayer({
   scopedKeys = false,
   compact,
   compactStartSlot,
-  compactEndSlot
+  compactEndSlot,
+  chromeHidden,
+  onToggleChrome
 }: AudioPlayerProps) {
   const [isPlaying, setIsPlaying] = useState(false);
   // Published by the audio graph once a file has decoded; drives the stage canvas.
@@ -527,6 +536,11 @@ export function AudioPlayer({
   // One menu now holds speed, pitch, EQ and reverb.
   const [fxOpen, setFxOpen] = useState(false);
   const [volumeOpen, setVolumeOpen] = useState(false);
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
+  const audioOut = useAudioOutput();
+  useEffect(() => {
+    void applyOutput(audioOut.deviceId, [audioCtxRef.current]);
+  }, [audioOut.deviceId]);
 
   // ---- Stage layout ----
   // `showHero` / `heroHeight` still work: showHero={false} -> no stage.
@@ -550,8 +564,9 @@ export function AudioPlayer({
   const compactAware = compact !== undefined;
   const isCompact = !!compact;
   const scrubbingRef = useRef(false);
+  const scrubWasPlayingRef = useRef(false);
   const menusOpenRef = useRef(false);
-  menusOpenRef.current = fxOpen || volumeOpen || confirmResetOpen;
+  menusOpenRef.current = fxOpen || volumeOpen || confirmResetOpen || !!ctxMenu;
 
   const bar = useAutoHideBar({
     compact: isCompact,
@@ -677,6 +692,7 @@ export function AudioPlayer({
   useEffect(() => {
     setFxOpen(false);
     setVolumeOpen(false);
+    setCtxMenu(null);
   }, [isMini, isFullscreen, compact]);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -953,6 +969,7 @@ export function AudioPlayer({
 
         const ctx = getSharedAudioContext();
         audioCtxRef.current = ctx;
+        void applyOutput(outputStore.get(), [ctx]);
 
         const decodedBuffer = await ctx.decodeAudioData(arrayBuffer);
         if (!active) return;
@@ -1469,7 +1486,7 @@ export function AudioPlayer({
       const tag = target?.tagName;
       if (
         target &&
-        (tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable)
+        (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable)
       ) {
         return;
       }
@@ -1677,6 +1694,56 @@ export function AudioPlayer({
     setTreble(0);
   };
 
+  // ---- Right-click menu in its own window (mini player only) ----
+  // The mini window is smaller than the menu, so there it is drawn by a separate window
+  // (ContextMenuWindow.tsx, src/main/ipc/context-menu.ts) that sends its changes back here.
+  const ctxOwnerRef = useRef(false);
+  const ctxActionRef = useRef<(a: any) => void>(() => undefined);
+  ctxActionRef.current = (a: any) => {
+    if (a.op === 'chrome') {
+      onToggleChrome?.();
+    } else if (a.op === 'output') {
+      outputStore.set(a.id);
+    } else if (a.op === 'afxReset') {
+      setPitchSt(0);
+      setReverbWet(0);
+      resetEq();
+    } else if (a.op === 'afx') {
+      const p = a.partial ?? {};
+      if (typeof p.pitch === 'number') setPitchSt(p.pitch);
+      if (typeof p.reverbWet === 'number') setReverbWet(p.reverbWet);
+      if (typeof p.subBass === 'number') setSubBass(p.subBass);
+      if (typeof p.bass === 'number') setBass(p.bass);
+      if (typeof p.treble === 'number') setTreble(p.treble);
+    }
+  };
+  useEffect(() => {
+    const g = (window as any).gam;
+    if (!g?.onContextMenuAction) return undefined;
+    return g.onContextMenuAction((a: unknown) => {
+      if (ctxOwnerRef.current) ctxActionRef.current(a);
+    }) as () => void;
+  }, []);
+  const openContextMenuAt = (ev: { clientX: number; clientY: number; screenX: number; screenY: number }) => {
+    const g = (window as any).gam;
+    if (isMini && g?.openContextMenu) {
+      ctxOwnerRef.current = true;
+      const snap: CtxSnapshot = {
+        kind: 'audio',
+        chromeHidden: !!chromeHidden,
+        subs: [],
+        subIndex: -1,
+        tracks: [],
+        afx: { pitch: pitchSt, reverbWet, subBass, bass, treble },
+        pitchOn: modular.pitchOn,
+        defaults: { afx: { pitch: 0, reverbWet: 0, subBass: 0, bass: 0, treble: 0 } }
+      };
+      void g.openContextMenu({ x: ev.screenX, y: ev.screenY, state: snap });
+      return;
+    }
+    setCtxMenu({ x: ev.clientX, y: ev.clientY });
+  };
+
   // Visualizer stage. It owns click, wheel and the ONE set of indicators.
   // Fill layout: absolutely positioned, leaving room for the bar underneath
   // (all of it while compact, so it grows as the bar collapses).
@@ -1703,6 +1770,13 @@ export function AudioPlayer({
       ref={stageRef}
       onMouseDown={handleStageMouseDown}
       onClick={handleStageClick}
+      onContextMenu={(e) => {
+        // GAM-RCLICK2: right-click opens the player's own context menu
+        e.preventDefault();
+        setFxOpen(false);
+        setVolumeOpen(false);
+        openContextMenuAt(e);
+      }}
       style={stageStyle}
     >
       <VisualizerCanvas bars={44} analyser={analyser} isPlaying={isPlaying} />
@@ -1831,13 +1905,30 @@ export function AudioPlayer({
               step={0.1}
               value={currentTime}
               onChange={(val) => {
-                scrubbingRef.current = true;
-                handleSeek(val);
+                if (!scrubbingRef.current) {
+                  scrubbingRef.current = true;
+                  scrubWasPlayingRef.current = isPlayingRef.current;
+                  if (isPlayingRef.current) {
+                    // Silence the sound while the knob is held (no harsh scratching).
+                    const here = getPosition();
+                    stopSource(0.03);
+                    cancelFrame();
+                    isPlayingRef.current = false;
+                    positionRef.current = here;
+                  }
+                }
+                resetSeekbarTimer();
+                positionRef.current = val;
+                setCurrentTime(val);
                 // Show where the click / drag landed (e.g. 1:32) in the status pill.
                 pi.flashHud({ kind: 'seek', text: formatTime(val) });
               }}
-              onChangeEnd={() => {
+              onChangeEnd={(val) => {
                 scrubbingRef.current = false;
+                if (scrubWasPlayingRef.current) {
+                  scrubWasPlayingRef.current = false;
+                  void startPlayback(val);
+                }
               }}
               label={formatTime}
               color="indigo"
@@ -1965,6 +2056,8 @@ export function AudioPlayer({
                 style={{ padding: '8px 12px' }}
                 onWheel={onWheelAdjust((dir) => adjustVolumeRelative(dir * 5))}
               >
+                <MediaMenuSections />
+                <Divider my={8} />
                 <Dim off={modular.volumeOn}>
                 <Group gap="xs" wrap="nowrap">
                   <ActionIcon variant="subtle" size="sm" onClick={toggleMute}
@@ -2007,7 +2100,7 @@ export function AudioPlayer({
                   aria-label="Mini player"
                   onClick={onMini}
                 >
-                  {isMini ? <IconPictureInPictureOff size={16} /> : <IconPictureInPicture size={16} />}
+                  {isMini ? <MiniOffIcon size={16} /> : <MiniIcon size={16} />}
                 </ActionIcon>
               </Tooltip>
             )}
@@ -2069,6 +2162,81 @@ export function AudioPlayer({
         </div>
       ) : (
         barNode
+      )}
+
+      {ctxMenu && (
+        <PlayerContextMenu
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          onClose={() => setCtxMenu(null)}
+          sections={[
+            {
+              id: 'ui',
+              label: 'Interface',
+              width: 220,
+              content: (
+                <Switch
+                  size="xs"
+                  label="Hide interface (O)"
+                  checked={!!chromeHidden}
+                  onChange={() => {
+                    onToggleChrome?.();
+                    setCtxMenu(null);
+                  }}
+                />
+              )
+            },
+            {
+              id: 'audio',
+              label: 'Output Device',
+              content: <OutputDeviceList onPicked={() => setCtxMenu(null)} />
+            },
+            {
+              id: 'afx',
+              label: 'Audio Effects',
+              width: 280,
+              content: (
+                <Stack gap={8}>
+                  <Dim off={modular.pitchOn}>
+                    <FxSlider
+                      label="Pitch"
+                      display={`${pitchSt > 0 ? '+' : ''}${pitchSt} st`}
+                      value={pitchSt}
+                      min={PITCH_MIN_ST}
+                      max={PITCH_MAX_ST}
+                      step={1}
+                      color="violet"
+                      onChange={setPitchSt}
+                      marks={[{ value: 0 }]}
+                    />
+                  </Dim>
+                  <Divider />
+                  <ReverbControls wet={reverbWet} onWet={setReverbWet} />
+                  <Divider />
+                  <EqControls
+                    values={{ subBass, bass, treble }}
+                    onChange={(v) => {
+                      setSubBass(v.subBass);
+                      setBass(v.bass);
+                      setTreble(v.treble);
+                    }}
+                  />
+                  <UnstyledButton
+                    onClick={() => {
+                      setPitchSt(0);
+                      setReverbWet(0);
+                      resetEq();
+                    }}
+                  >
+                    <Text size="xs" c="dimmed">
+                      Reset
+                    </Text>
+                  </UnstyledButton>
+                </Stack>
+              )
+            }
+          ]}
+        />
       )}
 
       {/* Reset Confirmation Modal */}

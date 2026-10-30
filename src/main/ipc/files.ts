@@ -597,6 +597,15 @@ export function registerFilesIpc(): void {
     const lib = getOpenLibrary(req.libraryId);
     if (!lib) return [];
     const { libraryId: _, ...rest } = req;
+    // Explorer style: opening a folder indexes just that folder (first time only).
+    if (
+      rest.parentDir != null &&
+      !rest.recursive &&
+      rest.collectionId == null &&
+      !rest.query?.trim()
+    ) {
+      await scanner.ensureFolder(req.libraryId, rest.parentDir);
+    }
     // Containers are global; their membership is stored outside the library DB.
     if (rest.collectionId != null) return queryContainerFiles(lib, rest);
     return lib.files.query(rest);

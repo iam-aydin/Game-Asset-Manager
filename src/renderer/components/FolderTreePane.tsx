@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Text } from '@mantine/core';
+import { Text, Tooltip } from '@mantine/core';
 import {
   IconChevronDown,
   IconChevronRight,
@@ -23,6 +23,7 @@ interface Props {
   onRename: (path: string) => void;
   onReveal: (path: string) => void;
   onRescan: (path: string) => void;
+  onInfo?: (path: string, name: string) => void;
 }
 
 /** Windows Explorer style navigation pane: the library's folders as a tree. */
@@ -35,7 +36,8 @@ export function FolderTreePane({
   onToggleFavorite,
   onRename,
   onReveal,
-  onRescan
+  onRescan,
+  onInfo
 }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(['']));
   const [menu, setMenu] = useState<FolderMenuState>({
@@ -45,6 +47,7 @@ export function FolderTreePane({
     path: '',
     name: ''
   });
+
 
   // Whenever the location changes, open the path down to it (and the folder itself).
   useEffect(() => {
@@ -78,7 +81,7 @@ export function FolderTreePane({
       </div>
     );
   }
-  if (root.recursiveFileCount === 0) {
+  if (root.recursiveFileCount === 0 && root.children.length === 0) {
     return (
       <div style={{ flex: 1, minHeight: 0, padding: 12 }}>
         <Text size="sm" c="dimmed">
@@ -113,10 +116,12 @@ export function FolderTreePane({
         onRename={onRename}
         onReveal={onReveal}
         onRescan={onRescan}
+        onInfo={onInfo}
       />
     </div>
   );
 }
+
 
 function MiniFolder({ open, hasFiles }: { open: boolean; hasFiles: boolean }) {
   return <GlassFolderMini open={open} hasFiles={hasFiles} />;
@@ -166,11 +171,11 @@ function TreeRow({
 
   return (
     <div>
+      <Tooltip label={node.path || label || node.name} position="right">
       <div
         ref={rowRef}
         role="treeitem"
         aria-selected={selected}
-        title={node.path || label}
         onClick={() => onSelect(node.path)}
         onDoubleClick={() => hasChildren && toggle(node.path)}
         onContextMenu={(e) => {
@@ -189,12 +194,12 @@ function TreeRow({
           paddingLeft: 2 + depth * 14,
           paddingRight: 6,
           borderRadius: 6,
-          cursor: 'pointer',
+          cursor: isRoot ? 'default' : 'pointer',
           boxSizing: 'border-box',
           background: selected
-            ? 'rgba(177, 186, 196, 0.14)'
+            ? 'color-mix(in srgb, var(--wh3d-waveform-played, var(--mantine-color-indigo-4)) 26%, transparent)'
             : hover
-              ? 'rgba(177, 186, 196, 0.08)'
+              ? 'color-mix(in srgb, var(--wh3d-waveform-played, var(--mantine-color-indigo-4)) 13%, transparent)'
               : 'transparent'
         }}
       >
@@ -207,7 +212,7 @@ function TreeRow({
               bottom: 6,
               width: 3,
               borderRadius: 2,
-              background: 'var(--mantine-color-indigo-4)'
+              background: 'var(--wh3d-waveform-played, var(--mantine-color-indigo-4))'
             }}
           />
         )}
@@ -266,10 +271,11 @@ function TreeRow({
           </span>
         ) : (
           <span style={{ fontSize: 11, color: 'var(--mantine-color-dimmed)', flexShrink: 0 }}>
-            {node.recursiveFileCount}
+            {node.recursiveFileCount > 0 ? node.recursiveFileCount : ''}
           </span>
         )}
       </div>
+      </Tooltip>
       {children.map((child) => (
         <TreeRow
           key={child.path}

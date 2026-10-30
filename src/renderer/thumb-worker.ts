@@ -54,6 +54,7 @@ function mimeForImageExt(ext: string): string {
     case 'jpg':
     case 'jpeg': return 'image/jpeg';
     case 'bmp': return 'image/bmp';
+    case 'ico': return 'image/x-icon';
     default: return 'application/octet-stream';
   }
 }
@@ -129,6 +130,35 @@ function drawExtensionTile(
   ctx2d.textBaseline = 'alphabetic';
 }
 
+/**
+ * .ico files hold several sizes. Returns the biggest one as a PNG blob when it is stored as PNG,
+ * so the thumbnail is sharp. Null means "decode the whole file the normal way".
+ */
+function icoBestBlob(buf: ArrayBuffer, ext: string): Blob | null {
+  if (ext.toLowerCase() !== 'ico' || buf.byteLength < 22) return null;
+  const v = new DataView(buf);
+  if (v.getUint16(0, true) !== 0 || v.getUint16(2, true) !== 1) return null;
+  const n = v.getUint16(4, true);
+  let best = -1;
+  let bestArea = -1;
+  for (let i = 0; i < n; i++) {
+    const e = 6 + i * 16;
+    if (e + 16 > buf.byteLength) break;
+    const w = v.getUint8(e) || 256;
+    const h = v.getUint8(e + 1) || 256;
+    if (w * h > bestArea) {
+      bestArea = w * h;
+      best = i;
+    }
+  }
+  if (best < 0) return null;
+  const e = 6 + best * 16;
+  const len = v.getUint32(e + 8, true);
+  const off = v.getUint32(e + 12, true);
+  if (len < 8 || off + len > buf.byteLength) return null;
+  if (v.getUint32(off, false) !== 0x89504e47) return null; // not PNG-coded: let the browser decode it
+  return new Blob([buf.slice(off, off + len)], { type: 'image/png' });
+}
 async function renderImageThumbnail(req: ThumbRenderRequest): Promise<RenderOutput> {
   const buffer = await fs.readFile(req.absPath);
   const arrayBuffer = buffer.buffer.slice(
@@ -136,7 +166,7 @@ async function renderImageThumbnail(req: ThumbRenderRequest): Promise<RenderOutp
     buffer.byteOffset + buffer.byteLength
   ) as ArrayBuffer;
 
-  const blob = new Blob([arrayBuffer], { type: mimeForImageExt(req.ext) });
+  const blob = icoBestBlob(arrayBuffer, req.ext) ?? new Blob([arrayBuffer], { type: mimeForImageExt(req.ext) });
   const bitmap = await createImageBitmap(blob);
   const width = bitmap.width;
   const height = bitmap.height;

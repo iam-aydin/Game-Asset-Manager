@@ -8,6 +8,10 @@ import { registerTagsIpc } from '@main/ipc/tags';
 import { registerCollectionsIpc } from '@main/ipc/collections';
 import { registerPreferencesIpc } from '@main/ipc/preferences';
 import { registerExportIpc } from '@main/ipc/export';
+import { registerFoldersIpc } from '@main/ipc/folders';
+import { registerSubtitlesIpc } from '@main/ipc/subtitles';
+import { registerVideoFallbackIpc } from '@main/ipc/video-fallback';
+import { registerContextMenuIpc } from '@main/ipc/context-menu';
 import { registerDataTransferIpc } from '@main/ipc/data-transfer';
 import * as manager from '@main/libraries/manager';
 import {
@@ -54,6 +58,10 @@ registerAssetSchemes();
 // Lets Chromium publish the Media Session (title, play / pause, seek) to the
 // Windows media panel in quick settings and to hardware media keys. Must be set
 // before the app is ready.
+// Windows treats a window as "hidden" when another window covers part of it, and
+// Chromium then stops drawing its video. The mini player's right-click menu is
+// such a window, so turn that check off.
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
 app.commandLine.appendSwitch(
   'enable-features',
   'HardwareMediaKeyHandling,MediaSessionService'
@@ -188,6 +196,7 @@ function createMainWindow(): BrowserWindow {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      backgroundThrottling: false,
       sandbox: false
     }
   });
@@ -227,7 +236,20 @@ function createMainWindow(): BrowserWindow {
   return win;
 }
 
+// Only one copy of the app may run. A second launch focuses the open window.
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.exit(0);
+}
+app.on('second-instance', () => {
+  const win = BrowserWindow.getAllWindows().find((w) => !w.isDestroyed() && (w.isVisible() || w.isMinimized()));
+  if (!win) return;
+  if (win.isMinimized()) win.restore();
+  win.focus();
+});
+
 void app.whenReady().then(() => {
+  if (!gotLock) return;
   // Init the logger with the default level FIRST, then read prefs and adjust.
   // Reading prefs may itself want to log (corrupt file recovery), so the
   // logger must be ready to receive those entries with the right file path.
@@ -247,6 +269,10 @@ void app.whenReady().then(() => {
   registerExportIpc();
   registerDataTransferIpc();
   registerWindowIpc();
+  registerFoldersIpc();
+  registerSubtitlesIpc();
+  registerVideoFallbackIpc();
+  registerContextMenuIpc();
   // Best-effort restore of registered libraries; failures show as offline.
   // After each library opens its scanner kicks off a scan, and on completion
   // the queue runner reconciles thumbnails.

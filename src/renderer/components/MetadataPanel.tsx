@@ -20,6 +20,7 @@ import { usePreferences } from '../util/use-preferences';
 import { LicenseSection } from './LicenseSection';
 import { compareKind } from './compare-kind';
 import { ipc } from '../ipc-client';
+import { isIcoExtension, summarizeIcoSizes, useIcoEntries } from '../util/ico';
 
 // Local on purpose: works even if @shared/formats has no video helper yet.
 const VIDEO_EXTENSIONS = ['mp4', 'webm', 'mov', 'mkv', 'avi', 'bik', 'm4v', 'ogv'];
@@ -223,6 +224,7 @@ export function FileInfoBlock({ libraryId, file }: { libraryId: string; file: Fi
   const isImage = isImageExtension(file.ext);
   const isAudio = isAudioExtension(file.ext);
   const isVideo = isVideoExtension(file.ext);
+  const icoEntries = useIcoEntries(libraryId, file, isIcoExtension(file.ext));
 
   // Explicitly check for 3D model status
   const isModel =
@@ -277,6 +279,18 @@ export function FileInfoBlock({ libraryId, file }: { libraryId: string; file: Fi
         <>
           <Divider />
           <ImageStats metadata={metadata} width={width} height={height} />
+        </>
+      )}
+
+      {/* Icon sizes (.ico) */}
+      {icoEntries && (
+        <>
+          <Divider />
+          <Field label="Icon sizes" value={summarizeIcoSizes(icoEntries)} />
+          <Field
+            label="Contains"
+            value={icoEntries.map((e) => e.width + 'Ã—' + e.height).join(', ')}
+          />
         </>
       )}
     </>

@@ -10,6 +10,7 @@ import { isCoverCapableExt, readAudioCover, readAudioCoverThumb } from '@main/au
 import type { AudioCover } from '@main/audio-cover';
 import { scopedLogger } from '@main/logger';
 import { isVideoPath, serveRangedFile } from './serve-file';
+import { playableCachePath } from '@main/ipc/video-fallback';
 
 const log = scopedLogger('protocol');
 
@@ -249,6 +250,8 @@ export function registerAssetProtocols(): void {
       });
       return notFound('File missing on disk');
     }
+    const pb = new URL(req.url).searchParams.get('pb') === '1' ? playableCachePath(parsed.libraryId, parsed.fileId) : null;
+    if (pb && existsSync(pb)) return serveRangedFile(req, pb);
     return serveAssetFile(req, abs);
   });
 

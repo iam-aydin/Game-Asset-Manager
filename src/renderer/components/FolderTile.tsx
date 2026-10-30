@@ -1,7 +1,13 @@
 import { useState } from 'react';
 import type React from 'react';
 import { Menu } from '@mantine/core';
-import { IconEdit, IconFolderOpen, IconRefresh, IconStar } from '@tabler/icons-react';
+import {
+  IconEdit,
+  IconFolderOpen,
+  IconInfoCircle,
+  IconRefresh,
+  IconStar
+} from '@tabler/icons-react';
 import type { FolderTreeNode } from '@shared/types';
 import { GlassFolderBig } from './FolderGlyphs';
 
@@ -139,7 +145,8 @@ export function FolderContextMenu({
   onToggleFavorite,
   onRename,
   onReveal,
-  onRescan
+  onRescan,
+  onInfo
 }: {
   state: FolderMenuState;
   onClose: () => void;
@@ -148,6 +155,8 @@ export function FolderContextMenu({
   onRename: (path: string) => void;
   onReveal: (path: string) => void;
   onRescan: (path: string) => void;
+  /** When provided, a "Folder info" item is shown. Receives the folder path and name. */
+  onInfo?: (path: string, name: string) => void;
 }) {
   const run = (fn: (p: string) => void) => () => {
     const p = state.path;
@@ -190,6 +199,19 @@ export function FolderContextMenu({
         <Menu.Item leftSection={<IconFolderOpen size={14} />} onClick={run(onReveal)}>
           Show in folder
         </Menu.Item>
+        {onInfo && (
+          <Menu.Item
+            leftSection={<IconInfoCircle size={14} />}
+            onClick={() => {
+              const p = state.path;
+              const n = state.name;
+              onClose();
+              onInfo(p, n);
+            }}
+          >
+            Folder info
+          </Menu.Item>
+        )}
         <Menu.Divider />
         <Menu.Item leftSection={<IconRefresh size={14} />} onClick={run(onRescan)}>
           Rescan folder

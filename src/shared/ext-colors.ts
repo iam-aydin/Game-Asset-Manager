@@ -29,6 +29,7 @@ export const EXT_COLORS: Record<string, string> = {
   jpg: IMAGE,
   jpeg: IMAGE,
   bmp: IMAGE,
+  ico: IMAGE,
   webp: IMAGE,
   gif: IMAGE,
   // 3D

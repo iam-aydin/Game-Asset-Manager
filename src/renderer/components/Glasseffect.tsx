@@ -17,6 +17,11 @@ export const GLASS_BUTTON_CLASS = 'gam-glass-btn';
 export const GLASS_RING_CLASS = 'gam-camera-ring';
 export const GLASS_RING_BUTTON_CLASS = 'gam-camera-btn';
 
+/** Wide pill action buttons inside menus (Save as file, Shrink, Fit ...). Glass like
+ *  everything else, tinted from dark blue (left) to dark red (right). Put it on an
+ *  UnstyledButton; data-tone="soft" makes it quieter. */
+export const GLASS_ACTION_CLASS = 'gam-glass-action';
+
 /** Hover time before a tooltip appears. */
 export const TOOLTIP_DELAY_MS = 2000;
 
@@ -69,6 +74,22 @@ function buildCss(isLight: boolean): string {
     : 'drop-shadow(0 1px 2px rgba(0, 0, 0, 0.85)) drop-shadow(0 0 6px rgba(0, 0, 0, 0.5))';
   const btnHover = isLight ? 'rgba(255, 255, 255, 0.2)' : hover;
   const btnHoverLayer = `linear-gradient(${btnHover}, ${btnHover})`;
+
+  // Action buttons: darker and more solid on light backgrounds so the white text stays readable.
+  const actBg = isLight
+    ? 'linear-gradient(100deg, rgba(28, 46, 140, 0.88), rgba(128, 18, 34, 0.88))'
+    : 'linear-gradient(100deg, rgba(22, 38, 110, 0.5), rgba(104, 14, 26, 0.5))';
+  const actBgSoft = isLight
+    ? 'linear-gradient(100deg, rgba(28, 46, 140, 0.74), rgba(128, 18, 34, 0.74))'
+    : 'linear-gradient(100deg, rgba(22, 38, 110, 0.3), rgba(104, 14, 26, 0.3))';
+  const actHover = isLight
+    ? 'linear-gradient(100deg, rgba(36, 58, 160, 0.96), rgba(150, 22, 40, 0.96))'
+    : 'linear-gradient(100deg, rgba(30, 50, 135, 0.62), rgba(128, 18, 32, 0.62))';
+  const actHoverSoft = isLight
+    ? 'linear-gradient(100deg, rgba(36, 58, 160, 0.86), rgba(150, 22, 40, 0.86))'
+    : 'linear-gradient(100deg, rgba(30, 50, 135, 0.42), rgba(128, 18, 32, 0.42))';
+  const actText = isLight ? '#ffffff' : 'inherit';
+  const actBorder = isLight ? 'rgba(20, 24, 60, 0.35)' : 'rgba(255, 255, 255, 0.16)';
 
   return `
 .${GLASS_CLASS},
@@ -214,6 +235,35 @@ function buildCss(isLight: boolean): string {
   transform: scale(1.06);
 }
 .${GLASS_RING_CLASS} .${GLASS_RING_BUTTON_CLASS}:active { transform: scale(0.96); }
+
+/* ── Action buttons in menus ─────────────────────────────────────────────
+   Flat pill: no sheen, no inner highlight, no drop shadow. A dark blue (left) to
+   dark red (right) tint over blurred glass, with a thin soft border. */
+.${GLASS_ACTION_CLASS} {
+  width: 100%;
+  padding: 8px 16px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  text-align: center;
+  color: ${actText};
+  background: ${actBg};
+  -webkit-backdrop-filter: blur(16px) saturate(120%);
+  backdrop-filter: blur(16px) saturate(120%);
+  border: 1px solid ${actBorder};
+  box-shadow: none;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+.${GLASS_ACTION_CLASS}[data-tone='soft'] {
+  background: ${actBgSoft};
+}
+.${GLASS_ACTION_CLASS}:hover {
+  background: ${actHover};
+}
+.${GLASS_ACTION_CLASS}[data-tone='soft']:hover {
+  background: ${actHoverSoft};
+}
 `;
 }
 

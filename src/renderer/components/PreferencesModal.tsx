@@ -47,6 +47,7 @@ import {
   type RenderQuality
 } from '@shared/render-quality';
 import { ipc } from '../ipc-client';
+import { Switch } from '@mantine/core';
 import { savePreferences, usePreferences } from '../util/use-preferences';
 import { THEMES, DEFAULT_THEME_ID } from '../themes';
 
@@ -56,7 +57,7 @@ import { THEMES, DEFAULT_THEME_ID } from '../themes';
 // Formats").
 const EXTENSION_GROUPS = [
   { id: '3d', label: '3D models', extensions: ['fbx', 'gltf', 'glb', 'obj', 'stl', 'ply', '3mf'] },
-  { id: 'image', label: 'Images', extensions: ['png', 'jpg', 'jpeg', 'bmp'] },
+  { id: 'image', label: 'Images', extensions: ['png', 'jpg', 'jpeg', 'bmp', 'ico'] },
   { id: 'audio', label: 'Audio', extensions: ['wav', 'mp3', 'flac'] },
   { id: 'text', label: 'Text & notes', extensions: ['txt', 'md'] }
 ] as const;
@@ -737,10 +738,36 @@ function ThemeSection({
         </div>
       </Category>
 
+      <GlassCategory />
+
       <UnitsCategory prefs={prefs} />
     </Stack>
   );
 }
+/** Glass effect on/off, shown inside the Theme tab. */
+function GlassCategory() {
+  const [on, setOn] = useState(() => document.documentElement.dataset.gamGlass !== 'off');
+  const apply = (next: boolean) => {
+    setOn(next);
+    document.documentElement.dataset.gamGlass = next ? 'on' : 'off';
+    try {
+      localStorage.setItem('gam:glassUi', next ? 'on' : 'off');
+    } catch {
+      // ignore
+    }
+  };
+  return (
+    <Category title="Effects">
+      <Property
+        label="Glass effect"
+        hint="Frosted blur behind panels and menus. Turn off for solid backgrounds."
+      >
+        <Switch checked={on} onChange={(e) => apply(e.currentTarget.checked)} />
+      </Property>
+    </Category>
+  );
+}
+
 /** Display units, shown inside the Theme tab. */
 function UnitsCategory({ prefs }: { prefs: PreferencesFile }) {
   const [unit, setUnit] = useState<Unit>(prefs.unit ?? 'mm');

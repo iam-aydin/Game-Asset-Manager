@@ -9,11 +9,9 @@ import {
   IconPlayerPlayFilled,
   IconRefresh,
   IconRepeat,
-  IconRepeatOff,
-  IconVolume,
-  IconVolume2,
-  IconVolumeOff
+  IconRepeatOff
 } from '@tabler/icons-react';
+import { SpeakerIcon } from './PlayerIcons';
 import { GLASS_CLASS } from './Glasseffect';
 import {
   PLAYBACK_INDICATOR,
@@ -27,9 +25,9 @@ export const BOOST_COLOR = '#ff922b';
 
 // Volume icon follows the level: muted, one wave at 50% or below, two waves above.
 export function VolumeIcon({ pct, muted, size }: { pct: number; muted: boolean; size: number }) {
-  if (muted || pct <= 0) return <IconVolumeOff size={size} />;
-  if (pct <= 50) return <IconVolume2 size={size} />;
-  return <IconVolume size={size} />;
+  if (muted || pct <= 0) return <SpeakerIcon level="off" size={size} />;
+  if (pct <= 50) return <SpeakerIcon level="low" size={size} />;
+  return <SpeakerIcon level="high" size={size} />;
 }
 
 // Status pill (top of the player): what it shows for each kind of action.
