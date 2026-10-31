@@ -10,10 +10,13 @@ import { formatAction } from '../keybinds';
  */
 export function PreviewFullscreenButton({
   onClick,
-  isFullscreen = false
+  isFullscreen = false,
+  placement = 'bottom'
 }: {
   onClick: () => void;
   isFullscreen?: boolean;
+  /** 'bottom' = bottom right corner; 'top' = top right, under the mini player button. */
+  placement?: 'top' | 'bottom';
 }) {
   return (
     <Tooltip
@@ -33,7 +36,12 @@ export function PreviewFullscreenButton({
           e.currentTarget.blur();
           onClick();
         }}
-        style={{ position: 'absolute', right: 12, bottom: 12, zIndex: 6 }}
+        style={{
+          position: 'absolute',
+          right: 12,
+          zIndex: 6,
+          ...(placement === 'top' ? { top: 62 } : { bottom: 12 })
+        }}
       >
         {isFullscreen ? <IconArrowsMinimize size={18} /> : <IconArrowsMaximize size={18} />}
       </ActionIcon>

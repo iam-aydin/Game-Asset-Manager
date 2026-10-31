@@ -45,6 +45,8 @@ import { DEFAULT_HDRI, type HdriId } from '@shared/hdri';
 import { isAudioExtension, isImageExtension, isVideoExtension } from '@shared/formats';
 import { LIGHTING_PRESETS } from '../three/lighting-presets';
 import { HDRI_PRESETS, getHdriPreset } from '../three/hdri-presets';
+import { useHdriAdjust } from '../three/hdri-adjust';
+import { HdriAdjustButton } from '../three/AdjustHdri';
 import { ModelViewer, type ModelViewerHandle } from '../three/ModelViewer';
 import { CropOverlay } from './CropOverlay';
 import { MiniIcon } from './PlayerIcons';
@@ -174,6 +176,7 @@ export function PreviewPane({
   const miniBg = colorScheme === 'light' ? MINI_BG_LIGHT : MINI_BG_DARK;
   const renderQuality = prefs?.renderQuality ?? DEFAULT_RENDER_QUALITY;
   const hdri: HdriId = prefs?.hdri ?? DEFAULT_HDRI;
+  const [hdriAdjust] = useHdriAdjust(hdri);
   const showGrid = prefs?.showGrid ?? false;
   const [cropSize, setCropSize] = useState(0);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
@@ -464,6 +467,8 @@ export function PreviewPane({
   // moves inside the popped-out container so it stays visible while the
   // container is position: fixed (expanded or mini player).
   const stripInside = isModel;
+  // Viewers that use the round glass mini + fullscreen buttons in the bottom right corner.
+  const roundBtns = isImage || isModel;
 
   // Interface hidden in the mini player (3D models only).
   const hideChrome = miniChromeHidden;
@@ -621,12 +626,15 @@ export function PreviewPane({
                 {!mini && (
                   <>
                     <ControlBlock label="Environment" hint={getHdriPreset(hdri).label}>
-                      <SegmentedControl
-                        size="xs"
-                        value={hdri}
-                        onChange={(v) => handleHdriChange(v as HdriId)}
-                        data={HDRI_PRESETS.map((p) => ({ value: p.id, label: p.label }))}
-                      />
+                      <Group gap={4} wrap="nowrap">
+                        <SegmentedControl
+                          size="xs"
+                          value={hdri}
+                          onChange={(v) => handleHdriChange(v as HdriId)}
+                          data={HDRI_PRESETS.map((p) => ({ value: p.id, label: p.label }))}
+                        />
+                        <HdriAdjustButton hdri={hdri} />
+                      </Group>
                     </ControlBlock>
 
                     <ControlBlock label="Grid" hint={showGrid ? 'On' : 'Off'}>
@@ -731,12 +739,15 @@ export function PreviewPane({
             {mini && miniMore && (
               <Group gap="md" wrap="wrap">
                 <ControlBlock label="Environment" hint={getHdriPreset(hdri).label}>
-                  <SegmentedControl
-                    size="xs"
-                    value={hdri}
-                    onChange={(v) => handleHdriChange(v as HdriId)}
-                    data={HDRI_PRESETS.map((p) => ({ value: p.id, label: p.label }))}
-                  />
+                  <Group gap={4} wrap="nowrap">
+                    <SegmentedControl
+                      size="xs"
+                      value={hdri}
+                      onChange={(v) => handleHdriChange(v as HdriId)}
+                      data={HDRI_PRESETS.map((p) => ({ value: p.id, label: p.label }))}
+                    />
+                    <HdriAdjustButton hdri={hdri} />
+                  </Group>
                 </ControlBlock>
 
                 <ControlBlock label="Grid" hint={showGrid ? 'On' : 'Off'}>
@@ -992,6 +1003,7 @@ export function PreviewPane({
               file={file}
               lightingStyle={lightingStyle}
               hdri={hdri}
+              hdriAdjust={hdriAdjust}
               showGrid={showGrid}
               renderQuality={renderQuality}
             />
@@ -1008,28 +1020,35 @@ export function PreviewPane({
                 className={GLASS_BUTTON_CLASS}
                 variant="subtle"
                 color="gray"
-                // Images and icons: round, bottom right, just above the fullscreen button.
-                size={isImage ? 38 : 'md'}
-                radius={isImage ? 'xl' : undefined}
+                // Images, icons and 3D models: round, bottom right, just above the fullscreen button.
+                size={roundBtns ? 38 : 'md'}
+                radius={roundBtns ? 'xl' : undefined}
                 onClick={() => {
                   setLayout('normal');
                   toggleMini();
                 }}
                 aria-label="Open mini player"
                 style={
-                  isImage
-                    ? { position: 'absolute', bottom: 62, right: 12, zIndex: 6 }
-                    : { position: 'absolute', top: 8, right: 8, zIndex: 5 }
+                  isModel
+                    ? // 3D: top right (the XYZ gizmo lives in the bottom right)
+                      { position: 'absolute', top: 12, right: 12, zIndex: 6 }
+                    : roundBtns
+                      ? { position: 'absolute', bottom: 62, right: 12, zIndex: 6 }
+                      : { position: 'absolute', top: 8, right: 8, zIndex: 5 }
                 }
               >
-                <MiniIcon size={isImage ? 18 : 16} />
+                <MiniIcon size={roundBtns ? 18 : 16} />
               </ActionIcon>
             </Tooltip>
           )}
 
-          {/* Fullscreen button (images and icons): runs the same toggle as the F key */}
-          {isImage && !mini && (
-            <PreviewFullscreenButton onClick={toggleFullscreen} isFullscreen={isFull} />
+          {/* Fullscreen button (images, icons, 3D models): runs the same toggle as the F key */}
+          {roundBtns && !mini && (
+            <PreviewFullscreenButton
+              onClick={toggleFullscreen}
+              isFullscreen={isFull}
+              placement={isModel ? 'top' : 'bottom'}
+            />
           )}
 
           {selectionCount > 1 && !mini && (

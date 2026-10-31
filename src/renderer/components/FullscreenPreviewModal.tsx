@@ -17,6 +17,7 @@ import { isAudioExtension, isImageExtension } from '@shared/formats';
 import { ModelViewer } from '../three/ModelViewer';
 import { LIGHTING_PRESETS } from '../three/lighting-presets';
 import { HDRI_PRESETS, getHdriPreset } from '../three/hdri-presets';
+import { useHdriAdjust } from '../three/hdri-adjust';
 import { TextPreview } from './TextPreview';
 import { AudioPlayer } from './AudioPlayer';
 import { usePreferences, savePreferences } from '../util/use-preferences';
@@ -261,6 +262,7 @@ export function FullscreenPreviewModal({
   const { prefs } = usePreferences();
   const renderQuality = prefs?.renderQuality ?? DEFAULT_RENDER_QUALITY;
   const hdri: HdriId = prefs?.hdri ?? DEFAULT_HDRI;
+  const [hdriAdjust] = useHdriAdjust(hdri);
   const showGrid = prefs?.showGrid ?? false;
 
   // Local copy of the view mode so the picker works even when the parent
@@ -380,6 +382,7 @@ const modalStyles = {
               file={file}
               lightingStyle={viewMode}
               hdri={hdri}
+              hdriAdjust={hdriAdjust}
               showGrid={showGrid}
               renderQuality={renderQuality}
             />
@@ -410,12 +413,14 @@ const modalStyles = {
               </ControlBlock>
 
               <ControlBlock label="Environment" hint={getHdriPreset(hdri).label}>
-                <SegmentedControl
-                  size="xs"
-                  value={hdri}
-                  onChange={(v) => handleHdriChange(v as HdriId)}
-                  data={HDRI_PRESETS.map((p) => ({ value: p.id, label: p.label }))}
-                />
+                <Group gap={4} wrap="nowrap">
+                  <SegmentedControl
+                    size="xs"
+                    value={hdri}
+                    onChange={(v) => handleHdriChange(v as HdriId)}
+                    data={HDRI_PRESETS.map((p) => ({ value: p.id, label: p.label }))}
+                  />
+                </Group>
               </ControlBlock>
 
               <ControlBlock label="Grid" hint={showGrid ? 'On' : 'Off'}>

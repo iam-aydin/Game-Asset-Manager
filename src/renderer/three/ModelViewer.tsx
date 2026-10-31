@@ -7,8 +7,9 @@ import { frameObject, objectCenter, objectRadius } from './framing';
 import { DEFAULT_LIGHTING_STYLE, LightingRig, type LightingStyle } from './lighting';
 import { applyViewMode, releaseViewMode } from './view-modes'; // VIEW MODE (1/4): new import
 import { applyOrientation } from './orientation';
+import { DEFAULT_HDRI_ADJUST, type HdriAdjust } from './hdri-adjust';
 import { DEFAULT_HDRI, type HdriId } from '@shared/hdri'; // HDRI (1/3)
-import { getHdriPreset } from './hdri-presets';
+import { HDRI_PRESETS, getHdriPreset } from './hdri-presets';
 import { loadHdri } from './hdri-loader';
 import { createViewerGrid, type ViewerGrid } from './grid'; // GRID (1/4)
 import { AxisGizmo } from './axis-gizmo'; // GIZMO (1/3)
@@ -67,6 +68,23 @@ const NAV_SPEED_HUD_MS = 1400;                   // how long the speed readout s
 // How long the camera swing takes after clicking an axis on the gizmo.
 const GIZMO_SNAP_MS = 280;
 
+// HDRI SWITCH: decode the other HDRIs in the background (one at a time, after the
+// first one is on screen), so switching later doesn't stall on loading a 4K file.
+let hdriPreloadStarted = false;
+function preloadOtherHdris(): void {
+  if (hdriPreloadStarted) return;
+  hdriPreloadStarted = true;
+  const list = HDRI_PRESETS.filter((p) => p.url);
+  let i = 0;
+  const next = () => {
+    if (i >= list.length) return;
+    const p = list[i++];
+    void loadHdri(p.id, p.url as string)
+      .catch(() => undefined)
+      .then(() => window.setTimeout(next, 600));
+  };
+  window.setTimeout(next, 2500);
+}
 interface Props {
   libraryId: string | null;
   file: FileRecord;
@@ -74,6 +92,7 @@ interface Props {
   hdri?: HdriId;
   showGrid?: boolean;
   renderQuality?: RenderQuality;
+  hdriAdjust?: HdriAdjust;
 }
 
 function shadowFilterToThree(filter: 'basic' | 'pcf' | 'pcfsoft'): THREE.ShadowMapType {
@@ -142,7 +161,8 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     lightingStyle = DEFAULT_LIGHTING_STYLE,
     hdri = DEFAULT_HDRI,
     showGrid = false,
-    renderQuality = DEFAULT_RENDER_QUALITY
+    renderQuality = DEFAULT_RENDER_QUALITY,
+    hdriAdjust = DEFAULT_HDRI_ADJUST
   },
   ref
 ) {
@@ -189,6 +209,33 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
   // that finishes loading after the user switched modes still gets the right one.
   const viewModeRef = useRef<LightingStyle>(lightingStyle);
   viewModeRef.current = lightingStyle;
+
+  // HDRI ADJUST: always-current values for async code.
+  const hdriRef = useRef(hdri);
+  hdriRef.current = hdri;
+  const hdriAdjustRef = useRef(hdriAdjust);
+  hdriAdjustRef.current = hdriAdjust;
+  // HDRI SWITCH: the HDRI that is really on screen. The adjust values are only applied to
+  // it, never to the previous sky while the next one is still loading (that was the dimming).
+  const loadedHdriRef = useRef<HdriId | null>(null);
+  const prevHdriRef = useRef<HdriId | null>(null);
+  // Applies the Adjust-popover values on top of the preset. Reads refs only, so it
+  // is safe to call from async code.
+  const applyHdriAdjust = () => {
+    const ctx = ctxRef.current;
+    if (!ctx) return;
+    const preset = getHdriPreset(hdriRef.current);
+    if (!preset.url) return;
+    if (loadedHdriRef.current !== preset.id) return;
+    const adj = hdriAdjustRef.current;
+    const s = ctx.scene;
+    s.backgroundBlurriness = THREE.MathUtils.clamp(preset.backgroundBlurriness + adj.blur, 0, 1);
+    s.backgroundIntensity = preset.backgroundIntensity * adj.brightness;
+    s.environmentIntensity = preset.environmentIntensity * adj.light;
+    const rot = THREE.MathUtils.degToRad(adj.rotation);
+    s.backgroundRotation.y = rot;
+    s.environmentRotation.y = rot;
+  };
 
   // GRID (2/4): reference grid at the world origin. The ref mirrors the prop so
   // the async model loader sees the current value.
@@ -574,40 +621,89 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     syncGrid();
   }, [showGrid, renderQuality]);
 
-  // HDRI (2/3): background + image-based lighting. The rig keeps the setup, so
-  // later view-mode changes re-apply it (lights the model in Lit only, the
-  // background shows in every mode). `renderQuality` is a dep because that
-  // change rebuilds the renderer and the rig with it.
-  useEffect(() => {
-    const ctx = ctxRef.current;
-    if (!ctx) return;
-    const preset = getHdriPreset(hdri);
-    if (!preset.url) {
-      ctx.lighting.setHdri(null);
-      return;
-    }
-    let canceled = false;
-    loadHdri(preset.id, preset.url)
-      .then((texture) => {
-        if (canceled || ctxRef.current !== ctx) return;
-        ctx.lighting.setHdri({
-          texture,
-          environmentIntensity: preset.environmentIntensity,
-          backgroundIntensity: preset.backgroundIntensity,
-          backgroundBlurriness: preset.backgroundBlurriness,
-          exposure: preset.exposure,
-          lightScale: preset.lightScale
-        });
-      })
-      .catch((err) => {
-        if (canceled) return;
-        console.error(`HDRI "${preset.id}" failed to load`, err);
-        ctx.lighting.setHdri(null);
-      });
-    return () => {
-      canceled = true;
-    };
+  // HDRI (2/3): background + image-based lighting. The rig keeps the setup, so
+  // later view-mode changes re-apply it (lights the model in Lit only, the
+  // background shows in every mode). `renderQuality` is a dep because that
+  // change rebuilds the renderer and the rig with it.
+  //
+  // HDRI SWITCH: when the environment changes, the view blurs (CSS) while the new HDRI
+  // loads and is applied, then un-blurs smoothly. The old sky stays untouched until the
+  // new one is ready (loadedHdriRef blocks the adjust values in the meantime).
+  useEffect(() => {
+    const ctx = ctxRef.current;
+    if (!ctx) return;
+    const canvas = ctx.renderer.domElement;
+    const preset = getHdriPreset(hdri);
+    const animate = prevHdriRef.current !== null && prevHdriRef.current !== hdri;
+    prevHdriRef.current = hdri;
+    loadedHdriRef.current = null;
+    let canceled = false;
+
+    const BLUR_PX = 14;
+    const BLUR_IN_MS = 160;
+    const BLUR_OUT_MS = 450;
+    const setBlur = (px: number, ms: number) => {
+      canvas.style.transition = `filter ${ms}ms ease`;
+      canvas.style.filter = px > 0 ? `blur(${px}px)` : '';
+    };
+    const unblur = () => {
+      // two frames later, so the heavy first render of the new HDRI is already done
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          if (!canceled) setBlur(0, BLUR_OUT_MS);
+        })
+      );
+    };
+    const wait = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+
+    if (!preset.url) {
+      if (animate) {
+        setBlur(BLUR_PX, BLUR_IN_MS);
+        void wait(BLUR_IN_MS + 10).then(() => {
+          if (canceled || ctxRef.current !== ctx) return;
+          ctx.lighting.setHdri(null);
+          unblur();
+        });
+      } else {
+        ctx.lighting.setHdri(null);
+      }
+      return () => {
+        canceled = true;
+      };
+    }
+
+    if (animate) setBlur(BLUR_PX, BLUR_IN_MS);
+    Promise.all([loadHdri(preset.id, preset.url), animate ? wait(BLUR_IN_MS + 10) : Promise.resolve()])
+      .then(([texture]) => {
+        if (canceled || ctxRef.current !== ctx) return;
+        loadedHdriRef.current = preset.id;
+        ctx.lighting.setHdri({
+          texture,
+          environmentIntensity: preset.environmentIntensity,
+          backgroundIntensity: preset.backgroundIntensity,
+          backgroundBlurriness: preset.backgroundBlurriness,
+          exposure: preset.exposure,
+          lightScale: preset.lightScale
+        });
+        applyHdriAdjust();
+        if (animate) unblur();
+        preloadOtherHdris();
+      })
+      .catch((err) => {
+        if (canceled) return;
+        console.error(`HDRI "${preset.id}" failed to load`, err);
+        ctx.lighting.setHdri(null);
+        if (animate) unblur();
+      });
+    return () => {
+      canceled = true;
+    };
   }, [hdri, renderQuality]);
+
+  // HDRI ADJUST: re-apply the popover values (after lighting.apply on view-mode changes).
+  useEffect(() => {
+    applyHdriAdjust();
+  }, [hdriAdjust, hdri, lightingStyle, renderQuality]);
 
   useEffect(() => {
     const ctx = ctxRef.current;

@@ -24,6 +24,7 @@ import {
 import { ModelViewer, type ModelViewerHandle } from '../three/ModelViewer';
 import { LIGHTING_PRESETS } from '../three/lighting-presets';
 import { HDRI_PRESETS, getHdriPreset } from '../three/hdri-presets';
+import { useHdriAdjust } from '../three/hdri-adjust';
 import { usePreferences, savePreferences } from '../util/use-preferences';
 import { GLASS_CLASS, GLASS_TOOLTIP_CLASS } from './Glasseffect';
 import { AudioPlayer } from './AudioPlayer';
@@ -385,12 +386,14 @@ export function CompareModal({
                   </ControlBlock>
 
                   <ControlBlock label="Environment" hint={getHdriPreset(hdri).label}>
-                    <SegmentedControl
-                      size="xs"
-                      value={hdri}
-                      onChange={(v) => handleHdriChange(v as HdriId)}
-                      data={HDRI_PRESETS.map((p) => ({ value: p.id, label: p.label }))}
-                    />
+                    <Group gap={4} wrap="nowrap">
+                      <SegmentedControl
+                        size="xs"
+                        value={hdri}
+                        onChange={(v) => handleHdriChange(v as HdriId)}
+                        data={HDRI_PRESETS.map((p) => ({ value: p.id, label: p.label }))}
+                      />
+                    </Group>
                   </ControlBlock>
 
                   <ControlBlock label="Grid" hint={showGrid ? 'On' : 'Off'}>
@@ -437,6 +440,7 @@ function ComparePane({
 }) {
   const kind = paneKind(file);
   const [infoOpen, setInfoOpen] = useState(true);
+  const [hdriAdjust] = useHdriAdjust(hdri);
   return (
     <div
       data-key-scope
@@ -478,6 +482,7 @@ function ComparePane({
           file={file}
           lightingStyle={lightingStyle}
           hdri={hdri}
+          hdriAdjust={hdriAdjust}
           showGrid={showGrid}
           renderQuality={renderQuality}
         />
