@@ -1,13 +1,14 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { ColorPicker, Divider, Group, NumberInput, Stack, Switch, Text, UnstyledButton } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
+import { IconArrowBackUp } from '@tabler/icons-react';
 import type { FileRecord } from '@shared/types';
 import { ipc } from '../ipc-client';
 import { formatBytes } from '../util/format';
 import { GLASS_ACTION_CLASS } from './Glasseffect';
 import { PlayerContextMenu, type CtxSection } from './PlayerContextMenu';
 import { PlayerGlassStyles } from './PlayerGlass';
-import { FxSlider, GlassSegmented, PresetPills } from './PlayerMenu';
+import { FxSlider as FxSliderBase, GlassSegmented, PresetPills } from './PlayerMenu';
 import { ZoomControl } from './ZoomControl';
 import { VIEW_ZOOM_STEP, useSmoothView, wheelZoomFactor } from '../util/smooth-zoom';
 import {
@@ -428,6 +429,147 @@ function WheelStep({ onStep, children }: { onStep: (dir: 1 | -1) => void; childr
   return <div ref={ref}>{children}</div>;
 }
 
+// ---- Snap to multiple of 4 (Resize menu) ----------------------------------------------
+// Block-compressed textures (BC1 / BC3 / BC7) work on 4 x 4 pixel blocks, so game engines
+// want sizes that are a multiple of 4.
+//   pad    = transparent pixels around the picture (white for JPG): no pixel is changed
+//   resize = scale to the nearest multiple of 4
+//   auto   = pad for pixel art and small images, resize for everything else
+type SnapMode = 'auto' | 'pad' | 'resize';
+
+const snapUp4 = (n: number): number => Math.max(4, Math.ceil(n / 4) * 4);
+const snapNear4 = (n: number): number => Math.max(4, Math.round(n / 4) * 4);
+
+function snapPlan(w: number, h: number, mode: SnapMode, pixel: boolean) {
+  const how: 'pad' | 'resize' =
+    mode === 'auto' ? (pixel || Math.max(w, h) <= 256 ? 'pad' : 'resize') : mode;
+  const nw = how === 'pad' ? snapUp4(w) : snapNear4(w);
+  const nh = how === 'pad' ? snapUp4(h) : snapNear4(h);
+  return { how, w: nw, h: nh, changed: nw !== w || nh !== h };
+}
+
+/** `opaque` = the file format has no transparency (JPG): the padding is white, not black. */
+function applySnap(src: HTMLCanvasElement, mode: SnapMode, pixel: boolean, opaque: boolean): HTMLCanvasElement {
+  const p = snapPlan(src.width, src.height, mode, pixel);
+  if (!p.changed) return src;
+  const out = document.createElement('canvas');
+  out.width = p.w;
+  out.height = p.h;
+  const ctx = out.getContext('2d');
+  if (!ctx) throw new Error('Canvas is not available');
+  if (opaque) {
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, p.w, p.h);
+  }
+  if (p.how === 'pad') {
+    ctx.drawImage(src, Math.floor((p.w - src.width) / 2), Math.floor((p.h - src.height) / 2));
+  } else {
+    ctx.imageSmoothingEnabled = !pixel;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(src, 0, 0, p.w, p.h);
+  }
+  return out;
+}
+
+// ---- Resetting a value -----------------------------------------------------------------
+// Three ways back to the default, with no extra buttons on screen:
+//   1) click the number of a slider (for example "173%")
+//   2) double-click the slider (label, track or handle)
+//   3) "Return to default" at the bottom of each effect (shown once something was changed)
+type FxSliderProps = React.ComponentProps<typeof FxSliderBase>;
+
+/** Hover look of a slider number that can be reset: pointer cursor + underline sliding in from the left. */
+const FX_VALUE_CSS = `
+.fx-val-hot {
+  cursor: pointer;
+  width: fit-content;
+  background-image: linear-gradient(currentColor, currentColor);
+  background-repeat: no-repeat;
+  background-position: 0 100%;
+  background-size: 0% 1px;
+  transition: background-size 0.25s ease-out;
+}
+.fx-val-hot:hover {
+  background-size: 100% 1px;
+}
+`;
+
+function ensureFxValueStyle() {
+  if (document.getElementById('fx-val-style')) return;
+  const s = document.createElement('style');
+  s.id = 'fx-val-style';
+  s.textContent = FX_VALUE_CSS;
+  document.head.appendChild(s);
+}
+/** Finds the element that shows the value text (for example "173%") inside the slider. */
+function findValueEl(root: HTMLElement, text: string): HTMLElement | null {
+  // First match = the label row. The slider's tooltip bubble (same text) comes later in the DOM.
+  for (const el of Array.from(root.querySelectorAll<HTMLElement>('*'))) {
+    if (el.childElementCount === 0 && (el.textContent ?? '').trim() === text) return el;
+  }
+  return null;
+}
+
+/** The normal slider. Click its number or double-click it to return to `def`. */
+function FxSlider(props: FxSliderProps & { def?: number; onReset?: () => void }) {
+  const { def, onReset, ...rest } = props;
+  const changed = def !== undefined && Math.abs(rest.value - def) > 1e-6;
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const shown = String((rest as { display?: unknown }).display ?? '');
+  const reset = () => {
+    if (!changed) return;
+    // onReset only puts the value back (it must not switch the effect on); plain sliders use onChange.
+    if (onReset) onReset();
+    else if (def !== undefined) rest.onChange(def);
+  };
+
+  // The number looks clickable only while it differs from the default.
+  const apply = () => {
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+    ensureFxValueStyle();
+    const el = findValueEl(wrap, shown);
+    for (const o of Array.from(wrap.querySelectorAll<HTMLElement>('.fx-val-hot'))) {
+      if (o !== el) {
+        o.classList.remove('fx-val-hot');
+        o.title = '';
+      }
+    }
+    if (!el) return;
+    el.classList.toggle('fx-val-hot', changed);
+    el.title = changed ? 'Click to return to default' : '';
+  };
+  const applyRef = useRef(apply);
+  applyRef.current = apply;
+  useLayoutEffect(apply);
+
+  // The slider can swap its number element without our wrapper redrawing: look again when that happens.
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    if (!wrap) return undefined;
+    const mo = new MutationObserver(() => applyRef.current());
+    mo.observe(wrap, { childList: true, subtree: true, characterData: true });
+    return () => mo.disconnect();
+  }, []);
+
+  return (
+    <div
+      ref={wrapRef}
+      onClick={(e) => {
+        const wrap = wrapRef.current;
+        if (!wrap) return;
+        const el = findValueEl(wrap, shown);
+        if (el && el.contains(e.target as Node)) reset();
+      }}
+      onDoubleClick={(e) => {
+        e.stopPropagation(); // do not also trigger "fit to window" of the viewer
+        reset();
+      }}
+    >
+      <FxSliderBase {...(rest as FxSliderProps)} />
+    </div>
+  );
+}
 function renderToCanvas(bmp: ImageBitmap, f: ImgFx, scale: number, crop?: Rect | null): HTMLCanvasElement {
   const rot = f.rotate % 180 !== 0;
   const w0 = bmp.width;
@@ -505,6 +647,8 @@ export function ImagePreview({
   const [busy, setBusy] = useState<string | null>(null);
   const [resizePct, setResizePct] = useState(50);
   const [targetMb, setTargetMb] = useState(1);
+  const [snap4On, setSnap4On] = useState(false);
+  const snapMode: SnapMode = 'auto'; // pad vs resize is picked automatically
   // Game-dev effects (pixelize, normal map, trim, outline, pad). `prev` is the processed picture
   // that replaces the plain image on screen while any of them is on.
   const [post, setPost] = useState<PostFx>({ ...DEFAULT_POST });
@@ -731,6 +875,10 @@ export function ImagePreview({
     return lowRes && !post.pxUpscale && r.k > 1 ? downscaleNearest(r.canvas, r.k) : r.canvas;
   };
 
+  /** "Snap to multiple of 4" from the Resize menu, applied to the finished picture. */
+  const maybeSnap = (c: HTMLCanvasElement, opaque: boolean): HTMLCanvasElement =>
+    snap4On ? applySnap(c, snapMode, post.pixelize, opaque) : c;
+
   /** Effects that need transparency or exact pixels are always saved as PNG. */
   const fmtOf = () => (postActive(post) ? { mime: 'image/png', ext: 'png' } : pickFormat(file.ext, fx));
 
@@ -821,7 +969,7 @@ export function ImagePreview({
     run('Resizing...', async () => {
       const bmp = await getBitmap();
       const fmt = fmtOf();
-      const c = renderOut(bmp, resizePct / 100, true);
+      const c = maybeSnap(renderOut(bmp, resizePct / 100, true), fmt.mime === 'image/jpeg');
       const blob = await toBlob(c, fmt.mime, 0.92);
       const p = await saveBlob(blob, `${base} ${c.width}x${c.height}.${fmt.ext}`);
       if (p) {
@@ -840,7 +988,7 @@ export function ImagePreview({
       const limit = Math.floor(targetMb * 1024 * 1024) - 2048;
       const lossy = fmt.mime !== 'image/png';
       const enc = async (scale: number, q: number) => {
-        const c = renderOut(bmp, scale, true);
+        const c = maybeSnap(renderOut(bmp, scale, true), fmt.mime === 'image/jpeg');
         return { blob: await toBlob(c, fmt.mime, q), w: c.width, h: c.height };
       };
       const fits = (b: Blob) => b.size <= limit;
@@ -896,18 +1044,32 @@ export function ImagePreview({
 
   const setF = (partial: Partial<ImgFx>) => setFx((p) => ({ ...p, ...partial }));
   const setP = (partial: Partial<PostFx>) => setPost((p) => ({ ...p, ...partial }));
+  const postChanged = (...keys: (keyof PostFx)[]) => keys.some((k) => post[k] !== DEFAULT_POST[k]);
+  const resetPost = (...keys: (keyof PostFx)[]) =>
+    setPost((p) => {
+      const n: PostFx = { ...p };
+      for (const k of keys) (n as Record<string, unknown>)[k] = DEFAULT_POST[k];
+      return n;
+    });
   const curW = cropPx ? cropPx.w : eW;
   const curH = cropPx ? cropPx.h : eH;
   const rw = Math.max(1, Math.round(curW * (resizePct / 100)));
   const rh = Math.max(1, Math.round(curH * (resizePct / 100)));
+  const snapNow = snap4On ? snapPlan(rw, rh, snapMode, post.pixelize) : null;
+  const rwOut = snapNow ? snapNow.w : rw;
+  const rhOut = snapNow ? snapNow.h : rh;
 
-  const resetLink = (onClick: () => void) => (
-    <UnstyledButton onClick={onClick}>
-      <Text size="xs" c="dimmed">
-        Reset
-      </Text>
-    </UnstyledButton>
-  );
+  const resetLink = (onClick: () => void, show = true) =>
+    show ? (
+      <UnstyledButton onClick={onClick}>
+        <Group gap={4} wrap="nowrap">
+          <IconArrowBackUp size={13} />
+          <Text size="xs" c="dimmed">
+            Return to default
+          </Text>
+        </Group>
+      </UnstyledButton>
+    ) : null;
 
   const saveRow = (id: string, label: string, fn: () => void): CtxSection => ({
     id,
@@ -948,8 +1110,21 @@ export function ImagePreview({
             data={[100, 75, 50, 25].map((p) => ({ value: String(p), label: `${p}%` }))}
           />
           <Text size="xs">
-            Result: <b>{rw} x {rh} px</b>
+            Result: <b>{rwOut} x {rhOut} px</b>
           </Text>
+          <Switch
+            size="xs"
+            label="Snap to multiple of 4"
+            checked={snap4On}
+            onChange={(e) => setSnap4On(e.currentTarget.checked)}
+          />
+          {snap4On && (
+            <Text size="10px" c="dimmed" style={{ lineHeight: 1.4 }}>
+              {snapNow && snapNow.changed
+                ? `${rw} x ${rh} px becomes ${snapNow.w} x ${snapNow.h} px (${snapNow.how === 'pad' ? 'empty pixels added around it' : 'slightly resized'}).`
+                : 'Already a multiple of 4.'}
+            </Text>
+          )}
           <GlassButton onClick={() => { setMenu(null); void doResize(); }}>Save as file...</GlassButton>
           <Divider />
           <Text size="10px" c="dimmed" tt="uppercase" fw={700}>
@@ -1045,7 +1220,14 @@ export function ImagePreview({
             Close this menu, then drag the box to move it and the handles to resize it. The dark area is
             cut away when you save, copy or resize.
           </Text>
-          {resetLink(() => setCrop(null))}
+          {/* crop corner radius */}
+          <Divider />
+          <FxSlider label="Corner radius" display={`${fx.radius}%`} value={fx.radius} def={DEFAULT_FX.radius} min={0} max={50} step={1} onChange={(v) => setF({ radius: v })} marks={[{ value: 0 }]} />
+          <Text size="10px" c="dimmed" style={{ lineHeight: 1.4 }}>
+            Rounds the corners of the crop box (of the whole picture when there is no box). Saved as a
+            transparent PNG; JPG and BMP fill the corners with white.
+          </Text>
+          {resetLink(() => { setCrop(null); setF({ radius: DEFAULT_FX.radius }); }, !!crop || fx.radius !== DEFAULT_FX.radius)}
         </Stack>
       )
     },
@@ -1055,23 +1237,17 @@ export function ImagePreview({
       children: [
         {
       id: 'fx-color',
-      label: 'Color & Shape',
+      label: 'Color Adjustments',
       width: 250,
       content: (
         <Stack gap={8}>
-          <FxSlider label="Brightness" display={`${fx.brightness}%`} value={fx.brightness} min={0} max={200} step={1} onChange={(v) => setF({ brightness: v })} marks={[{ value: 100 }]} />
-          <FxSlider label="Contrast" display={`${fx.contrast}%`} value={fx.contrast} min={0} max={200} step={1} onChange={(v) => setF({ contrast: v })} marks={[{ value: 100 }]} />
-          <FxSlider label="Saturation" display={`${fx.saturation}%`} value={fx.saturation} min={0} max={300} step={1} onChange={(v) => setF({ saturation: v })} marks={[{ value: 100 }]} />
-          <FxSlider label="Hue" display={`${fx.hue > 0 ? '+' : ''}${fx.hue}\u00b0`} value={fx.hue} min={-180} max={180} step={1} onChange={(v) => setF({ hue: v })} marks={[{ value: 0 }]} />
+          <FxSlider label="Brightness" display={`${fx.brightness}%`} value={fx.brightness} def={DEFAULT_FX.brightness} min={0} max={200} step={1} onChange={(v) => setF({ brightness: v })} marks={[{ value: 100 }]} />
+          <FxSlider label="Contrast" display={`${fx.contrast}%`} value={fx.contrast} def={DEFAULT_FX.contrast} min={0} max={200} step={1} onChange={(v) => setF({ contrast: v })} marks={[{ value: 100 }]} />
+          <FxSlider label="Saturation" display={`${fx.saturation}%`} value={fx.saturation} def={DEFAULT_FX.saturation} min={0} max={300} step={1} onChange={(v) => setF({ saturation: v })} marks={[{ value: 100 }]} />
+          <FxSlider label="Hue" display={`${fx.hue > 0 ? '+' : ''}${fx.hue}\u00b0`} value={fx.hue} def={DEFAULT_FX.hue} min={-180} max={180} step={1} onChange={(v) => setF({ hue: v })} marks={[{ value: 0 }]} />
           <Switch size="xs" label="Black & white" checked={fx.gray} onChange={(e) => setF({ gray: e.currentTarget.checked })} />
           <Switch size="xs" label="Invert" checked={fx.invert} onChange={(e) => setF({ invert: e.currentTarget.checked })} />
-          <Divider />
-          <FxSlider label="Corner radius" display={`${fx.radius}%`} value={fx.radius} min={0} max={50} step={1} onChange={(v) => setF({ radius: v })} marks={[{ value: 0 }]} />
-          <Text size="10px" c="dimmed">
-            Rounded corners are saved as a transparent PNG or ICO. JPG and BMP fill them with white. With a
-            crop box on, the corners round the crop box.
-          </Text>
-          {resetLink(() => setFx((p) => ({ ...DEFAULT_FX, rotate: p.rotate, flipH: p.flipH, flipV: p.flipV })))}
+          {resetLink(() => setFx((p) => ({ ...DEFAULT_FX, rotate: p.rotate, flipH: p.flipH, flipV: p.flipV, radius: p.radius })), fx.brightness !== DEFAULT_FX.brightness || fx.contrast !== DEFAULT_FX.contrast || fx.saturation !== DEFAULT_FX.saturation || fx.hue !== DEFAULT_FX.hue || fx.gray !== DEFAULT_FX.gray || fx.invert !== DEFAULT_FX.invert)}
         </Stack>
       )
         },
@@ -1082,7 +1258,7 @@ export function ImagePreview({
           content: (
             <Stack gap={8}>
               <Switch size="xs" label="Pixelize" checked={post.pixelize} onChange={(e) => setP({ pixelize: e.currentTarget.checked })} />
-              <FxSlider label="Target width" display={`${post.pxWidth} px`} value={post.pxWidth} min={8} max={256} step={1} onChange={(v) => setP({ pxWidth: v, pixelize: true })} marks={[{ value: 32 }, { value: 64 }, { value: 128 }]} />
+              <FxSlider label="Target width" display={`${post.pxWidth} px`} value={post.pxWidth} def={DEFAULT_POST.pxWidth} onReset={() => resetPost('pxWidth')} min={8} max={256} step={1} onChange={(v) => setP({ pxWidth: v, pixelize: true })} marks={[{ value: 32 }, { value: 64 }, { value: 128 }]} />
               <PresetPills
                 items={[16, 32, 48, 64, 128].map((n) => ({ id: String(n), name: String(n) }))}
                 selected={String(post.pxWidth)}
@@ -1119,7 +1295,7 @@ export function ImagePreview({
                 Averages each block, then maps to the palette. Turn "Save at original size" off to save the true
                 low-res sprite (for example 64 x 64).
               </Text>
-              {resetLink(() => setP({ pixelize: false, pxWidth: 64, palette: 'none', dither: 'none', hardAlpha: true, pxUpscale: true }))}
+              {resetLink(() => resetPost('pixelize', 'pxWidth', 'palette', 'dither', 'hardAlpha', 'pxUpscale'), postChanged('pixelize', 'pxWidth', 'palette', 'dither', 'hardAlpha', 'pxUpscale'))}
             </Stack>
           )
         },
@@ -1130,12 +1306,12 @@ export function ImagePreview({
           content: (
             <Stack gap={8}>
               <Switch size="xs" label="Make normal map" checked={post.normal} onChange={(e) => setP({ normal: e.currentTarget.checked })} />
-              <FxSlider label="Strength" display={post.normalStrength.toFixed(1)} value={post.normalStrength} min={0.5} max={8} step={0.1} onChange={(v) => setP({ normalStrength: v, normal: true })} marks={[{ value: 2 }]} />
+              <FxSlider label="Strength" display={post.normalStrength.toFixed(1)} value={post.normalStrength} def={DEFAULT_POST.normalStrength} onReset={() => resetPost('normalStrength')} min={0.5} max={8} step={0.1} onChange={(v) => setP({ normalStrength: v, normal: true })} marks={[{ value: 2 }]} />
               <Switch size="xs" label="Flip green (DirectX)" checked={post.flipGreen} onChange={(e) => setP({ flipGreen: e.currentTarget.checked })} />
               <Text size="10px" c="dimmed" style={{ lineHeight: 1.4 }}>
                 Brightness is used as height. Default is OpenGL (green up). Saved as PNG.
               </Text>
-              {resetLink(() => setP({ normal: false, normalStrength: 2, flipGreen: false }))}
+              {resetLink(() => resetPost('normal', 'normalStrength', 'flipGreen'), postChanged('normal', 'normalStrength', 'flipGreen'))}
             </Stack>
           )
         },
@@ -1147,7 +1323,7 @@ export function ImagePreview({
             <Stack gap={8}>
               <Switch size="xs" label="Trim transparent borders" checked={post.trim} onChange={(e) => setP({ trim: e.currentTarget.checked })} />
               <Switch size="xs" label="Outline" checked={post.outline} onChange={(e) => setP({ outline: e.currentTarget.checked })} />
-              <FxSlider label="Outline width" display={`${post.outlineW} px`} value={post.outlineW} min={1} max={20} step={1} onChange={(v) => setP({ outlineW: v, outline: true })} marks={[{ value: 1 }]} />
+              <FxSlider label="Outline width" display={`${post.outlineW} px`} value={post.outlineW} def={DEFAULT_POST.outlineW} onReset={() => resetPost('outlineW')} min={1} max={20} step={1} onChange={(v) => setP({ outlineW: v, outline: true })} marks={[{ value: 1 }]} />
               <ColorChoice
                 value={post.outlineColor}
                 onChange={(c) => setP({ outlineColor: c, outline: true })}
@@ -1162,13 +1338,13 @@ export function ImagePreview({
               />
               <Divider />
               <Switch size="xs" label="Add padding" checked={post.padOn} onChange={(e) => setP({ padOn: e.currentTarget.checked })} />
-              <FxSlider label="Padding" display={`${post.padPx} px`} value={post.padPx} min={1} max={128} step={1} onChange={(v) => setP({ padPx: v, padOn: true })} marks={[{ value: 8 }]} />
+              <FxSlider label="Padding" display={`${post.padPx} px`} value={post.padPx} def={DEFAULT_POST.padPx} onReset={() => resetPost('padPx')} min={1} max={128} step={1} onChange={(v) => setP({ padPx: v, padOn: true })} marks={[{ value: 8 }]} />
               <Switch size="xs" label="Pad to power of two" checked={post.pow2} onChange={(e) => setP({ pow2: e.currentTarget.checked })} />
               <Text size="10px" c="dimmed" style={{ lineHeight: 1.4 }}>
                 Padding adds transparent space on every side. Outline and padding are counted in sprite pixels when
                 Pixelize is on. Everything is saved as PNG.
               </Text>
-              {resetLink(() => setP({ trim: false, outline: false, outlineW: 1, outlineColor: '#000000', padOn: false, padPx: 8, pow2: false }))}
+              {resetLink(() => resetPost('trim', 'outline', 'outlineW', 'outlineColor', 'padOn', 'padPx', 'pow2'), postChanged('trim', 'outline', 'outlineW', 'outlineColor', 'padOn', 'padPx', 'pow2'))}
             </Stack>
           )
         },
@@ -1178,9 +1354,9 @@ export function ImagePreview({
           width: 250,
           content: (
             <Stack gap={8}>
-              <FxSlider label="Amount" display={`${post.sharpen}%`} value={post.sharpen} min={0} max={300} step={5} onChange={(v) => setP({ sharpen: v })} marks={[{ value: 100 }]} />
+              <FxSlider label="Amount" display={`${post.sharpen}%`} value={post.sharpen} def={DEFAULT_POST.sharpen} onReset={() => resetPost('sharpen')} min={0} max={300} step={5} onChange={(v) => setP({ sharpen: v })} marks={[{ value: 100 }]} />
               <Text size="10px" c="dimmed">0 turns it off. Brings out edges and fine detail.</Text>
-              {resetLink(() => setP({ sharpen: 0 }))}
+              {resetLink(() => resetPost('sharpen'), postChanged('sharpen'))}
             </Stack>
           )
         },
@@ -1190,9 +1366,9 @@ export function ImagePreview({
           width: 250,
           content: (
             <Stack gap={8}>
-              <FxSlider label="Radius" display={`${post.blur} px`} value={post.blur} min={0} max={40} step={0.5} onChange={(v) => setP({ blur: v })} marks={[{ value: 0 }]} />
+              <FxSlider label="Radius" display={`${post.blur} px`} value={post.blur} def={DEFAULT_POST.blur} onReset={() => resetPost('blur')} min={0} max={40} step={0.5} onChange={(v) => setP({ blur: v })} marks={[{ value: 0 }]} />
               <Text size="10px" c="dimmed">0 turns it off. Runs before Pixelize, so it smooths what gets averaged.</Text>
-              {resetLink(() => setP({ blur: 0 }))}
+              {resetLink(() => resetPost('blur'), postChanged('blur'))}
             </Stack>
           )
         },
@@ -1203,7 +1379,7 @@ export function ImagePreview({
           content: (
             <Stack gap={8}>
               <Switch size="xs" label="Reduce colors" checked={post.quant} onChange={(e) => setP({ quant: e.currentTarget.checked })} />
-              <FxSlider label="Colors" display={`${post.quantN}`} value={post.quantN} min={2} max={256} step={1} onChange={(v) => setP({ quantN: v, quant: true })} marks={[{ value: 16 }]} />
+              <FxSlider label="Colors" display={`${post.quantN}`} value={post.quantN} def={DEFAULT_POST.quantN} onReset={() => resetPost('quantN')} min={2} max={256} step={1} onChange={(v) => setP({ quantN: v, quant: true })} marks={[{ value: 16 }]} />
               <PresetPills
                 items={[4, 8, 16, 32, 64, 128].map((n) => ({ id: String(n), name: String(n) }))}
                 selected={String(post.quantN)}
@@ -1224,7 +1400,7 @@ export function ImagePreview({
               <Text size="10px" c="dimmed" style={{ lineHeight: 1.4 }}>
                 Picks the best N colors for this picture. Works without Pixelize.
               </Text>
-              {resetLink(() => setP({ quant: false, quantN: 16, quantDither: 'none' }))}
+              {resetLink(() => resetPost('quant', 'quantN', 'quantDither'), postChanged('quant', 'quantN', 'quantDither'))}
             </Stack>
           )
         },
@@ -1248,14 +1424,14 @@ export function ImagePreview({
                   ]}
                 />
               )}
-              <FxSlider label="Tolerance" display={`${post.bgTol}%`} value={post.bgTol} min={0} max={100} step={1} onChange={(v) => setP({ bgTol: v, removeBg: true })} marks={[{ value: 12 }]} />
-              <FxSlider label="Edge softness" display={`${post.bgFeather}%`} value={post.bgFeather} min={0} max={40} step={1} onChange={(v) => setP({ bgFeather: v, removeBg: true })} marks={[{ value: 6 }]} />
+              <FxSlider label="Tolerance" display={`${post.bgTol}%`} value={post.bgTol} def={DEFAULT_POST.bgTol} onReset={() => resetPost('bgTol')} min={0} max={100} step={1} onChange={(v) => setP({ bgTol: v, removeBg: true })} marks={[{ value: 12 }]} />
+              <FxSlider label="Edge softness" display={`${post.bgFeather}%`} value={post.bgFeather} def={DEFAULT_POST.bgFeather} onReset={() => resetPost('bgFeather')} min={0} max={40} step={1} onChange={(v) => setP({ bgFeather: v, removeBg: true })} marks={[{ value: 6 }]} />
               <Switch size="xs" label="Only background touching the edges" checked={post.bgContig} onChange={(e) => setP({ bgContig: e.currentTarget.checked })} />
               <Text size="10px" c="dimmed" style={{ lineHeight: 1.4 }}>
                 Makes a solid-color background transparent. Keep the edge switch on so the same color inside the
                 subject stays. Saved as PNG.
               </Text>
-              {resetLink(() => setP({ removeBg: false, bgAuto: true, bgColor: '#ffffff', bgTol: 12, bgFeather: 6, bgContig: true }))}
+              {resetLink(() => resetPost('removeBg', 'bgAuto', 'bgColor', 'bgTol', 'bgFeather', 'bgContig'), postChanged('removeBg', 'bgAuto', 'bgColor', 'bgTol', 'bgFeather', 'bgContig'))}
             </Stack>
           )
         }

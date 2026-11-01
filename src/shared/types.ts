@@ -526,6 +526,16 @@ export interface IpcApi {
   rescanFolder(libraryId: string, folderPath: string): Promise<RescanFolderResult>;
   /** Disk-based properties of a folder: size, size on disk, file/folder counts, dates. */
   getFolderInfo(libraryId: string, folderPath: string): Promise<FolderInfoResult>;
+  /** Zip a folder (and everything inside it) to <Desktop>/<folder name>.zip. */
+  zipFolderToDesktop(
+    libraryId: string,
+    folderPath: string,
+    jobId?: string
+  ): Promise<
+    { ok: true; path: string; fileCount: number } | { ok: false; error: string; canceled?: boolean }
+  >;
+  /** Stop a running folder zip started with the same jobId. */
+  cancelZipFolder(jobId: string): Promise<void>;
 
   listFolders(req: ListFoldersRequest): Promise<FolderTreeNode | null>;
   listFiles(req: ListFilesRequest): Promise<FileRecord[]>;

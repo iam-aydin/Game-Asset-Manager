@@ -140,7 +140,7 @@ export function ContextMenuWindow() {
     content: (
       <Switch
         size="xs"
-        label="Hide interface (O)"
+        label="Hide interface (H)"
         checked={!!s.chromeHidden}
         onChange={() => {
           patch((p) => ({ ...p, chromeHidden: !p.chromeHidden }));

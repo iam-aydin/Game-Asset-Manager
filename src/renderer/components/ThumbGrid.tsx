@@ -147,6 +147,16 @@ export function ThumbGrid({
 
   return (
     <Stack gap={0} h="100%">
+      <style>{`
+        :root[data-gam-glass='off'] .gam-ext-badge {
+          -webkit-backdrop-filter: none !important;
+          backdrop-filter: none !important;
+          background: var(--mantine-color-dark-7) !important;
+          border: 1px solid var(--mantine-color-dark-4) !important;
+          box-shadow: none !important;
+          text-shadow: none !important;
+        }
+      `}</style>
       <Group
         h={TOOLBAR_HEIGHT}
         px={PADDING_X}
@@ -426,6 +436,7 @@ function Tile({
             the category's pastel color (same recipe as the Filter dropdown /
             player glass: tint + blur + translucent border + top highlight). */}
         <div
+          className="gam-ext-badge"
           style={{
             position: 'absolute',
             top: 4,

@@ -26,11 +26,23 @@ const SLOW_RENDER_MS = 5_000;
 const RECONCILE_BATCH = 100_000;
 const STALE_CLAIM_MS = 5 * 60_000;
 const MAX_ATTEMPTS = 3;
+// How many files at the top of the list count as "on screen" (render first).
+const VISIBLE_COUNT = 100;
 
 export interface QueueStats {
   libraryId: string;
   pending: number;
   inFlight: number;
+}
+
+/**
+ * Which files of a library may get thumbnails right now. Set by the renderer
+ * every time its file list changes (folder, filter, show-all). Files outside
+ * the scope are never rendered until they come into view.
+ */
+interface ThumbScope {
+  all: Set<number>;
+  visible: Set<number>;
 }
 
 export class ThumbQueueRunner extends EventEmitter {
@@ -39,6 +51,8 @@ export class ThumbQueueRunner extends EventEmitter {
   private readonly processId = `pid-${process.pid}-${Date.now().toString(36)}`;
   private draining = false;
   private shuttingDown = false;
+  /** libraryId -> files allowed to get thumbnails. No entry = nothing renders yet. */
+  private scopes = new Map<string, ThumbScope>();
   /**
    * Latest user-selected lighting style for new renders. Pushed from the
    * renderer via IPC whenever the SegmentedControl changes. The visible
@@ -64,46 +78,33 @@ export class ThumbQueueRunner extends EventEmitter {
   }
 
   /**
-   * Find files in the library without an up-to-date thumb and enqueue jobs
-   * for them at background priority. Cheap to call repeatedly — duplicate
+   * Housekeeping after a scan / file change, then queue thumbnails for the
+   * files in the current scope only. Cheap to call repeatedly â€” duplicate
    * jobs for the same file get coalesced by enqueueMany.
    */
   reconcile(library: OpenLibrary): void {
     library.thumbJobs.reapStale(this.processId, STALE_CLAIM_MS);
-    // Scrub spurious failures from a prior shutdown — they aren't real model
+    // Scrub spurious failures from a prior shutdown â€” they aren't real model
     // failures, just jobs that were in flight when the app exited.
     library.thumbErrors.clearWithMessages([...TRANSIENT_RENDER_ERROR_MESSAGES]);
     // ffmpeg could read these videos (e.g. AV1) but not decode a frame. Videos
     // now fall back to Chromium, so retry the ones that were marked as failed
     // before the fallback existed.
     library.thumbErrors.clearWithMessages(['ffmpeg produced no frame']);
-    const needing = library.thumbnails.findFilesNeedingThumbs(RECONCILE_BATCH);
-    if (needing.length === 0) return;
-    // Videos go first: ffmpeg renders them in a few hundred ms each, so they
-    // should never wait behind thousands of models/images/docs that share the
-    // slower 3D render pool.
-    const videoIds = new Set<number>();
-    for (const n of needing) {
-      const f = library.files.getById(n.fileId);
-      if (f && isVideoExtension(f.ext)) videoIds.add(n.fileId);
-    }
-    library.thumbJobs.enqueueMany(
-      needing.map((n) => ({
-        fileId: n.fileId,
-        priority: videoIds.has(n.fileId) ? PRIORITY_VISIBLE : PRIORITY_BACKGROUND
-      }))
-    );
-    // enqueueMany coalesces duplicates, so also bump jobs that already existed.
-    for (const id of videoIds) library.thumbJobs.bumpPriority(id, PRIORITY_VISIBLE);
-    this.drain();
+    this.enqueueScoped(library);
   }
 
-  /** Bump priority for files that are currently visible in the grid. */
+  /**
+   * The renderer sends the ids of every file in its current list (grid order).
+   * That list becomes the scope: only these files get thumbnails, the first
+   * VISIBLE_COUNT first. (Name kept so the IPC layer needs no change.)
+   */
   bumpVisible(library: OpenLibrary, fileIds: number[]): void {
-    for (const fileId of fileIds) {
-      library.thumbJobs.bumpPriority(fileId, PRIORITY_VISIBLE);
-    }
-    this.drain();
+    this.scopes.set(library.entry.id, {
+      all: new Set(fileIds),
+      visible: new Set(fileIds.slice(0, VISIBLE_COUNT))
+    });
+    this.enqueueScoped(library);
   }
 
   /**
@@ -112,6 +113,14 @@ export class ThumbQueueRunner extends EventEmitter {
    * a clean slate at high priority.
    */
   forceRerender(library: OpenLibrary, fileId: number): void {
+    const id = library.entry.id;
+    const scope = this.scopes.get(id);
+    if (scope) {
+      scope.all.add(fileId);
+      scope.visible.add(fileId);
+    } else {
+      this.scopes.set(id, { all: new Set([fileId]), visible: new Set([fileId]) });
+    }
     library.thumbnails.deleteByFileId(fileId);
     library.thumbErrors.clear(fileId);
     library.thumbJobs.enqueue(fileId, PRIORITY_USER);
@@ -171,10 +180,46 @@ export class ThumbQueueRunner extends EventEmitter {
     // The in-flight jobs hold onto the pool; pool.shutdown() rejects them.
   }
 
-  // ─── internals ─────────────────────────────────────────────────────────
+  // â”€â”€â”€ internals â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+  /** Queue thumbnails for files that need one AND are inside the current scope. */
+  private enqueueScoped(library: OpenLibrary): void {
+    const scope = this.scopes.get(library.entry.id);
+    if (!scope) return;
+    const needing = library.thumbnails
+      .findFilesNeedingThumbs(RECONCILE_BATCH)
+      .filter((n) => scope.all.has(n.fileId));
+    if (needing.length > 0) {
+      // Videos go first: ffmpeg renders them in a few hundred ms each, so they
+      // should never wait behind models/images/docs that share the slower
+      // 3D render pool.
+      const videoIds = new Set<number>();
+      for (const n of needing) {
+        const f = library.files.getById(n.fileId);
+        if (f && isVideoExtension(f.ext)) videoIds.add(n.fileId);
+      }
+      library.thumbJobs.enqueueMany(
+        needing.map((n) => ({
+          fileId: n.fileId,
+          priority:
+            videoIds.has(n.fileId) || scope.visible.has(n.fileId)
+              ? PRIORITY_VISIBLE
+              : PRIORITY_BACKGROUND
+        }))
+      );
+      // enqueueMany coalesces duplicates, so also bump jobs that already existed.
+      for (const id of videoIds) library.thumbJobs.bumpPriority(id, PRIORITY_VISIBLE);
+      for (const n of needing) {
+        if (scope.visible.has(n.fileId)) library.thumbJobs.bumpPriority(n.fileId, PRIORITY_VISIBLE);
+      }
+    }
+    this.drain();
+  }
 
   private claimAcrossLibraries(): { lib: OpenLibrary; jobId: number; fileId: number } | null {
     for (const lib of listOpenLibraries()) {
+      // No scope yet = the UI hasn't said what it is looking at; render nothing.
+      if (!this.scopes.has(lib.entry.id)) continue;
       const job = lib.thumbJobs.claimNext(this.processId);
       if (job) return { lib, jobId: job.id, fileId: job.fileId };
     }
@@ -188,6 +233,14 @@ export class ThumbQueueRunner extends EventEmitter {
   }): Promise<void> {
     const { lib, jobId, fileId } = claim;
     if (!isLibraryDbOpen(lib)) return;
+
+    // Left over from an earlier folder / filter: drop the job. Reconcile
+    // queues it again when the file comes back into the list.
+    const scope = this.scopes.get(lib.entry.id);
+    if (!scope || !scope.all.has(fileId)) {
+      safeDb(lib, () => lib.thumbJobs.finish(jobId));
+      return;
+    }
 
     const file = lib.files.getById(fileId);
     if (!file) {
@@ -255,7 +308,7 @@ export class ThumbQueueRunner extends EventEmitter {
     }
 
     // Library may have detached (or the app may be shutting down) during the
-    // render. Don't touch the DB after that point — the writes would throw
+    // render. Don't touch the DB after that point â€” the writes would throw
     // unhandled rejections.
     if (!isLibraryDbOpen(lib)) return;
 
@@ -290,7 +343,7 @@ export class ThumbQueueRunner extends EventEmitter {
 
     if (finalErr !== null) {
       const message = finalErr;
-      // Transient shutdown errors are not the file's fault — release the
+      // Transient shutdown errors are not the file's fault â€” release the
       // claim and roll the attempt counter back so the job is picked up
       // cleanly on the next session.
       if (isTransientRenderError(message)) {

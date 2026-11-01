@@ -80,13 +80,58 @@ export function useHdriAdjust(hdri: HdriId): [HdriAdjust, (next: HdriAdjust) => 
 }
 
 // ---------------------------------------------------------------------------
+// Camera field of view (same idea: one shared value, remembered in localStorage)
+// ---------------------------------------------------------------------------
+
+const FOV_KEY = 'gam.fov.v1';
+export const DEFAULT_FOV = 38;
+
+function loadFov(): number {
+  try {
+    const n = Number(window.localStorage.getItem(FOV_KEY));
+    return Number.isFinite(n) && n >= 20 && n <= 100 ? n : DEFAULT_FOV;
+  } catch {
+    return DEFAULT_FOV;
+  }
+}
+
+let fovValue = loadFov();
+const fovListeners = new Set<() => void>();
+
+function subscribeFov(cb: () => void): () => void {
+  fovListeners.add(cb);
+  return () => {
+    fovListeners.delete(cb);
+  };
+}
+
+function getFov(): number {
+  return fovValue;
+}
+
+export function useViewerFov(): [number, (v: number) => void] {
+  const fov = useSyncExternalStore(subscribeFov, getFov);
+  const setFov = useCallback((v: number) => {
+    fovValue = v;
+    try {
+      window.localStorage.setItem(FOV_KEY, String(v));
+    } catch {
+      /* storage unavailable: still applies for this session */
+    }
+    for (const l of fovListeners) l();
+  }, []);
+  return [fov, setFov];
+}
+
+// ---------------------------------------------------------------------------
 // The glass menu
 // ---------------------------------------------------------------------------
 
-/** Small icon button that opens the sliders for the given HDRI. Disabled for "none". */
+/** Small icon button that opens the camera + environment sliders. */
 export function HdriAdjustButton({ hdri }: { hdri: HdriId }) {
   const [value, setValue] = useHdriAdjust(hdri);
-  const disabled = hdri === 'none';
+  const [fov, setFov] = useViewerFov();
+  const noHdri = hdri === 'none';
 
   const row = (
     label: string,
@@ -119,34 +164,42 @@ export function HdriAdjustButton({ hdri }: { hdri: HdriId }) {
       withArrow={false}
       withinPortal
       width={260}
-      disabled={disabled}
       classNames={{ dropdown: GLASS_POPOVER_CLASS }}
     >
       <Popover.Target>
-        <Tooltip
-          {...TOOLTIP_PROPS}
-          label={disabled ? 'Pick an environment to adjust it' : 'Adjust environment'}
-        >
-          <ActionIcon
-            variant="subtle"
-            color="gray"
-            size="md"
-            disabled={disabled}
-            aria-label="Adjust environment"
-          >
+        <Tooltip {...TOOLTIP_PROPS} label="Adjust camera and environment">
+          <ActionIcon variant="subtle" color="gray" size="md" aria-label="Adjust camera and environment">
             <IconAdjustmentsHorizontal size={16} />
           </ActionIcon>
         </Tooltip>
       </Popover.Target>
       <Popover.Dropdown>
         <Stack gap="xs">
-          {row('Backdrop brightness', 'brightness', 0, 2, 0.05, (v) => `${Math.round(v * 100)}%`)}
-          {row('HDRI light on model', 'light', 0, 3, 0.05, (v) => `${Math.round(v * 100)}%`)}
-          {row('Rotation', 'rotation', 0, 360, 1, (v) => `${v}\u00B0`)}
+          <div>
+            <Group justify="space-between">
+              <Text size="xs">Field of view</Text>
+              <Text size="xs" c="dimmed">{`${fov}\u00B0`}</Text>
+            </Group>
+            <Slider
+              size="sm"
+              min={20}
+              max={100}
+              step={1}
+              value={fov}
+              label={null}
+              onChange={setFov}
+            />
+          </div>
+          {!noHdri && row('Backdrop brightness', 'brightness', 0, 2, 0.05, (v) => `${Math.round(v * 100)}%`)}
+          {!noHdri && row('HDRI light on model', 'light', 0, 3, 0.05, (v) => `${Math.round(v * 100)}%`)}
+          {!noHdri && row('Rotation', 'rotation', 0, 360, 1, (v) => `${v}\u00B0`)}
           <UnstyledButton
             className={GLASS_ACTION_CLASS}
             data-tone="soft"
-            onClick={() => setValue(DEFAULT_HDRI_ADJUST)}
+            onClick={() => {
+              setValue(DEFAULT_HDRI_ADJUST);
+              setFov(DEFAULT_FOV);
+            }}
           >
             Reset
           </UnstyledButton>

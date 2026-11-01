@@ -34,6 +34,8 @@ import { applyOutput, outputStore, useAudioOutput } from './audioOutput';
 import type { CtxSnapshot } from './ContextMenuWindow';
 import { VIDEO_COMPACT_BAR, videoCompactBarCss } from '@shared/transition';
 import { useAutoHideBar } from '../util/autohide';
+import { useSmoothFullscreen as useTrueFullscreen } from '../util/useSmoothFullscreen';
+import { matchesAction } from '../keybinds';
 import { PlaybackIndicators, VolumeIcon, usePlaybackIndicators } from './PlaybackIndicators';
 import {
   Dim,
@@ -498,6 +500,9 @@ export function AudioPlayer({
   onToggleChrome
 }: AudioPlayerProps) {
   const [isPlaying, setIsPlaying] = useState(false);
+  const toggleTrueFs = useTrueFullscreen(isFullscreen, onFullscreen);
+  const toggleTrueFsRef = useRef(toggleTrueFs);
+  toggleTrueFsRef.current = toggleTrueFs;
   // Published by the audio graph once a file has decoded; drives the stage canvas.
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -1499,6 +1504,14 @@ export function AudioPlayer({
         if (!mine) return;
       }
 
+      if (matchesAction(e, 'audio.fullscreenReal')) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (menusOpenRef.current) closeMenusNow();
+        toggleTrueFsRef.current();
+        return;
+      }
+
       const key = e.key.toLowerCase();
 
       // I (mini / compact) and F (fullscreen): close any open menu first.
@@ -2177,7 +2190,7 @@ export function AudioPlayer({
               content: (
                 <Switch
                   size="xs"
-                  label="Hide interface (O)"
+                  label="Hide interface (H)"
                   checked={!!chromeHidden}
                   onChange={() => {
                     onToggleChrome?.();

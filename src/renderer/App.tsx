@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { installResizeBlur } from '@shared/transition';
+import { installResizeBlur, installFullscreenChrome, fullscreenChromeCss } from '@shared/transition';
 import { Menu, useMantineColorScheme } from '@mantine/core';
 import { IconCheck } from '@tabler/icons-react';
 import { THEMES, DEFAULT_THEME_ID, getTheme } from './themes';
@@ -350,6 +350,20 @@ function findFolderNode(root: FolderTreeNode | null, path: string): FolderTreeNo
 }
 export function App() {
   useEffect(() => installResizeBlur(), []);
+  useEffect(() => installFullscreenChrome(), []);
+  // gam-alt-block: Alt on its own does nothing (no menu bar toggle).
+  // Alt + another key (Alt+Arrows, a future Alt+F) still works.
+  useEffect(() => {
+    const stopAlone = (e: KeyboardEvent) => {
+      if (e.key === 'Alt') e.preventDefault();
+    };
+    window.addEventListener('keydown', stopAlone, true);
+    window.addEventListener('keyup', stopAlone, true);
+    return () => {
+      window.removeEventListener('keydown', stopAlone, true);
+      window.removeEventListener('keyup', stopAlone, true);
+    };
+  }, []);
   // Glass effect switch (Preferences > Theme). Saved in localStorage, default on.
   useEffect(() => {
     try {
@@ -430,7 +444,7 @@ export function App() {
   const [searchInput, setSearchInput] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedExtensions, setSelectedExtensions] = useState<Set<SupportedExtension>>(
-    () => readStoredExtensions()
+    () => new Set<SupportedExtension>()
   );
   useEffect(() => {
     try {
@@ -537,9 +551,44 @@ export function App() {
     // Let non-CSS consumers (Three.js's WebGL clear color, which can't
     // read CSS custom properties directly) know the theme changed live.
     window.dispatchEvent(new Event('wh3d:themechange'));
+
   }, [themeId, setColorScheme, windowOpacity]);
   // --------------------------------------------------------------------------
 
+  // gam-titlebar-theme: window buttons take the top bar's color, and get darker
+  // while any dialog is open (Windows draws them above the page's dim layer).
+  const anyModalOpen =
+    preferencesOpen ||
+    librariesOpen ||
+    batchRenameOpen ||
+    fullscreenOpen ||
+    compareOpen ||
+    deleteConfirm.open ||
+    moveConfirm.open ||
+    folderRenameModal.open ||
+    folderInfo.open;
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      try {
+        const el = (document.querySelector('.mantine-AppShell-header') ?? document.body) as HTMLElement;
+        const m = getComputedStyle(el).backgroundColor.match(/[\d.]+/g);
+        if (!m || m.length < 3) return;
+        const [r, g, b] = [Number(m[0]), Number(m[1]), Number(m[2])];
+        const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+        const k = anyModalOpen ? 0.6 : 1;
+        const hex = (v: number) => Math.round(v * k).toString(16).padStart(2, '0');
+        const symbol = lum > 0.55 ? [22, 23, 26] : [236, 236, 238];
+        void (window as any).gam?.setTitleBarTheme?.({
+          color: '#' + hex(r) + hex(g) + hex(b),
+          symbolColor: '#' + hex(symbol[0]) + hex(symbol[1]) + hex(symbol[2])
+        });
+      } catch {
+        // cosmetic only
+      }
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [themeId, anyModalOpen]);
   const outerPanelGroupRef = useRef<ImperativePanelGroupHandle>(null);
   const innerPanelGroupRef = useRef<ImperativePanelGroupHandle>(null);
 
@@ -873,28 +922,27 @@ export function App() {
   const lastRecountRef = useRef(0);
   const hadThumbLoadRef = useRef(false);
 
+  // The counter only counts files in the current list (the scope the queue works on).
+  const filesRef = useRef<FileRecord[]>([]);
+  filesRef.current = files;
+  // "libraryId:fileId" of files rendered/failed this session (the list itself is not reloaded per thumb).
+  const doneThumbsRef = useRef<Set<string>>(new Set());
+
   const recountThumbs = useCallback(async (libraryId: string) => {
     lastRecountRef.current = Date.now();
-    try {
-      const all = await ipc.queryFiles({
-        libraryId,
-        parentDir: '',
-        recursive: true,
-        limit: 100000
-      });
-      if (selectedLibraryIdRef.current !== libraryId) return;
-      let pending = 0;
-      for (const f of all) {
-        if (!f.hasThumb && !f.thumbError) pending++;
-      }
-      setThumbLoad((prev) => {
-        if (pending === 0) return null;
-        const done = prev ? Math.min(prev.done, prev.total) : 0;
-        return { total: done + pending, done };
-      });
-    } catch {
-      // Progress is cosmetic; never surface errors from it.
+    if (selectedLibraryIdRef.current !== libraryId) return;
+    let pending = 0;
+    for (const f of filesRef.current) {
+      if (f.libraryId !== libraryId) continue;
+      if (f.hasThumb || f.thumbError) continue;
+      if (doneThumbsRef.current.has(`${f.libraryId}:${f.id % LIB_ID_SPAN}`)) continue;
+      pending++;
     }
+    setThumbLoad((prev) => {
+      if (pending === 0) return null;
+      const done = prev ? Math.min(prev.done, prev.total) : 0;
+      return { total: done + pending, done };
+    });
   }, []);
 
   const scheduleThumbRecount = useCallback(() => {
@@ -1004,6 +1052,9 @@ export function App() {
     );
     clearSelection();
     autoSelectFirstRef.current = true;
+    // Stop thumbnail work right away; the new list sets the scope again when it arrives.
+    void ipc.bumpVisibleThumbs(selectedLibraryId, []);
+    setThumbLoad(null);
   }, [
     selectedLibraryId,
     selectedFolderPath,
@@ -1040,13 +1091,15 @@ export function App() {
     }
   }, [files]);
 
+  // The current list is the thumbnail scope: only these files get thumbnails, top 100 first.
   useEffect(() => {
-    if (!selectedLibraryId || files.length === 0) return;
+    if (!selectedLibraryId) return;
     void ipc.bumpVisibleThumbs(
       selectedLibraryId,
-      files.filter((f) => f.libraryId === selectedLibraryId).slice(0, 100).map((f) => f.id)
+      files.filter((f) => f.libraryId === selectedLibraryId).map((f) => f.id % LIB_ID_SPAN)
     );
-  }, [selectedLibraryId, files]);
+    void recountThumbs(selectedLibraryId);
+  }, [selectedLibraryId, files, recountThumbs]);
 
   // Latest state visible to the IPC listener without re-binding on each keystroke.
   const stateRef = useRef({
@@ -1216,11 +1269,13 @@ export function App() {
           next.set(event.fileId, (next.get(event.fileId) ?? 0) + 1);
           return next;
         });
+        doneThumbsRef.current.add(`${event.libraryId}:${event.fileId}`);
         bumpThumbDone();
         if (event.fileId === s.primaryFileId) reloadFiles();
         return;
       }
       if (event.kind === 'thumb-failed') {
+        doneThumbsRef.current.add(`${event.libraryId}:${event.fileId}`);
         bumpThumbDone();
         return;
       }
@@ -1834,6 +1889,81 @@ export function App() {
     [selectedLibraryId]
   );
 
+  const handleZipFolder = useCallback(
+    (folderPath: string) => {
+      if (!selectedLibraryId) return;
+      const jobId = `zip-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const name = folderPath.split('/').pop() ?? folderPath;
+      notifications.show({
+        id: jobId,
+        loading: true,
+        title: 'Zipping folder...',
+        message: (
+          <Group justify="space-between" wrap="nowrap" gap="md">
+            <Text size="sm" c="dimmed" truncate style={{ minWidth: 0 }}>
+              {name}
+            </Text>
+            <UnstyledButton onClick={() => void ipc.cancelZipFolder(jobId)} aria-label="Cancel zip">
+              <Text size="sm" fw={600} c="red.4">
+                Cancel
+              </Text>
+            </UnstyledButton>
+          </Group>
+        ),
+        autoClose: false,
+        withCloseButton: false
+      });
+      void ipc
+        .zipFolderToDesktop(selectedLibraryId, folderPath, jobId)
+        .then((r) => {
+          if (!r.ok) {
+            if (r.canceled) {
+              notifications.update({
+                id: jobId,
+                loading: false,
+                color: 'gray',
+                title: 'Zip canceled',
+                message: name,
+                autoClose: 2500,
+                withCloseButton: true
+              });
+              return;
+            }
+            notifications.update({
+              id: jobId,
+              loading: false,
+              color: 'red',
+              title: 'Zip failed',
+              message: r.error,
+              autoClose: 6000,
+              withCloseButton: true
+            });
+            return;
+          }
+          notifications.update({
+            id: jobId,
+            loading: false,
+            color: 'green',
+            title: 'Folder zipped',
+            message: `${r.fileCount} file${r.fileCount === 1 ? '' : 's'} -> ${r.path}`,
+            autoClose: 5000,
+            withCloseButton: true
+          });
+        })
+        .catch((err: unknown) => {
+          notifications.update({
+            id: jobId,
+            loading: false,
+            color: 'red',
+            title: 'Zip failed',
+            message: (err as Error).message,
+            autoClose: 6000,
+            withCloseButton: true
+          });
+        });
+    },
+    [selectedLibraryId]
+  );
   const openFolderInfo = useCallback((path: string, name: string) => {
     setFolderInfo({ open: true, path, name });
   }, []);
@@ -2365,7 +2495,8 @@ export function App() {
             onRename={handleRenameFolder}
             onReveal={handleRevealFolder}
             onRescan={handleRescanFolder}
-            onInfo={openFolderInfo}
+            onZip={handleZipFolder}
+        onInfo={openFolderInfo}
           />
         ) : (
           <Text size="sm" c="dimmed" p="md">
@@ -2560,6 +2691,7 @@ export function App() {
         onRename={handleRenameFolder}
         onReveal={handleRevealFolder}
         onRescan={handleRescanFolder}
+        onZip={handleZipFolder}
         onInfo={openFolderInfo}
       />
     </Stack>
@@ -2630,6 +2762,18 @@ export function App() {
     `}</style>
     <FolderGlyphStyles />
     <style>{`
+      /* Custom title bar: the top row drags the window, controls stay clickable,
+         and the right side leaves room for the Windows window buttons. */
+      .gam-titlebar { -webkit-app-region: drag; padding-right: 146px !important; transition: padding-right 360ms cubic-bezier(0.22, 1, 0.36, 1); }
+      html[data-gam-fs='true'] .gam-titlebar { padding-right: 16px !important; transition-delay: 280ms; }
+      .gam-fake-caption { position: absolute; top: 0; right: 0; width: 138px; height: 43px; display: none; pointer-events: none; z-index: 50; }
+      html[data-gam-fs-anim='leave'] .gam-fake-caption { display: flex; }
+      .gam-fake-caption .gam-caption-btn { width: 46px; height: 43px; display: flex; align-items: center; justify-content: center; color: var(--mantine-color-text); }
+      .gam-titlebar button,
+      .gam-titlebar a,
+      .gam-titlebar input,
+      .gam-titlebar [role="combobox"],
+      .gam-titlebar .mantine-Select-root { -webkit-app-region: no-drag; }
       /* wh3d-round: capsule shapes in the top bar (colors and sizes untouched) */
       .mantine-AppShell-header .mantine-Input-input,
       .mantine-AppShell-header .mantine-TextInput-input,
@@ -2671,8 +2815,22 @@ export function App() {
     {/* GLASS TOGGLE: {glassUi ? <GlassStyles /> : <NormalStyles />} */}
     <AppShell header={{ height: 88 }} padding={0}>
       <AppShell.Header>
+        <style>{fullscreenChromeCss()}</style>
+        {/* Fake copy of the window buttons: only visible while the real ones
+            disappear on entering fullscreen, so they can shake, blur and slide away. */}
+        <div className="gam-fake-caption" aria-hidden>
+          <div className="gam-caption-btn" style={{ '--i': 0 } as React.CSSProperties}>
+            <svg width="10" height="10" viewBox="0 0 10 10"><path d="M0 5h10" stroke="currentColor" strokeWidth="1" fill="none" /></svg>
+          </div>
+          <div className="gam-caption-btn" style={{ '--i': 1 } as React.CSSProperties}>
+            <svg width="10" height="10" viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9" stroke="currentColor" strokeWidth="1" fill="none" /></svg>
+          </div>
+          <div className="gam-caption-btn" style={{ '--i': 2 } as React.CSSProperties}>
+            <svg width="10" height="10" viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10" stroke="currentColor" strokeWidth="1" fill="none" /></svg>
+          </div>
+        </div>
         <Stack gap={0} h="100%">
-          <Group h={44} px="md" gap="md" wrap="nowrap">
+          <Group className="gam-titlebar" h={44} px="md" gap="md" wrap="nowrap">
             <Tooltip label="Switch or add libraries">
               <UnstyledButton
                 onClick={() => setLibrariesOpen(true)}

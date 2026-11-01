@@ -29,6 +29,7 @@ import {
   IconRepeat
 } from '@tabler/icons-react';
 import { PlayerGlassStyles, PLAYER_GLASS_CLASS, PLAYER_GLASS_POPOVER_CLASS } from './PlayerGlass';
+import { MiniIcon } from './PlayerIcons';
 import { useVerticalDragGesture } from '../util/gestures';
 import { MediaMenuSections, OutputDeviceList } from './PlayerMediaMenu';
 import { PlayerContextMenu, OptionList } from './PlayerContextMenu';
@@ -37,6 +38,7 @@ import { applyOutput, outputStore, useAudioOutput } from './audioOutput';
 import { parseVtt, cueAt, type SubCue } from './subtitleCues';
 import type { CtxSnapshot } from './ContextMenuWindow';
 import { VIDEO_COMPACT_BAR, videoCompactBarCss } from '@shared/transition';
+import { useSmoothFullscreen } from '../util/useSmoothFullscreen';
 import {
   BOOST_COLOR,
   PlaybackIndicators,
@@ -1134,7 +1136,7 @@ export function VideoPlayer({
     if (!el) return;
 
     if (e.button === 0 && !e.shiftKey) {
-      gesture.onMouseDown(e);
+      if (e.ctrlKey) gesture.onMouseDown(e);
       return;
     }
 
@@ -1334,7 +1336,12 @@ export function VideoPlayer({
     }
   };
 
-  // F key.
+  // F key: animated app fullscreen (PreviewPane owns the layout).
+  // Alt+F: the same, plus the window itself grows smoothly to real fullscreen
+  // (see util/useSmoothFullscreen.ts). Esc / F / the button leave it again.
+  const smoothFs = useSmoothFullscreen(isFullscreen, onFullscreen);
+  const trueFsFnRef = useRef(smoothFs);
+  trueFsFnRef.current = smoothFs;
   const toggleFullscreen = () => onFullscreen?.();
 
   // Mini toggle (the double-click on the picture now does what the F key does instead).
@@ -1381,6 +1388,14 @@ export function VideoPlayer({
         e.stopPropagation();
         setFxOpen(false);
         setVolumeOpen((o) => !o);
+        return;
+      }
+      if (matchesAction(e, 'video.fullscreenReal')) {
+        if (resetOpenRef.current) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (menusOpenRef.current) closeMenusNow();
+        trueFsFnRef.current();
         return;
       }
       if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -2025,6 +2040,22 @@ export function VideoPlayer({
               </Popover.Dropdown>
             </Popover>
 
+            <Tooltip
+              label={isMini ? 'Back to full window (I)' : 'Mini player (I)'}
+              withinPortal
+              portalProps={portalProps}
+            >
+              <ActionIcon
+                variant="subtle"
+                color="gray"
+                size="md"
+                onClick={toggleMini}
+                aria-label="Mini player"
+              >
+                <MiniIcon size={16} />
+              </ActionIcon>
+            </Tooltip>
+
             {/* Hidden in the mini player (the F key still goes fullscreen from mini). */}
             {!isMini && (
               <Tooltip
@@ -2280,7 +2311,7 @@ export function VideoPlayer({
               content: (
                 <Switch
                   size="xs"
-                  label="Hide interface (O)"
+                  label="Hide interface (H)"
                   checked={!!chromeHidden}
                   onChange={() => {
                     onToggleChrome?.();

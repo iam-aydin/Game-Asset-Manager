@@ -7,6 +7,7 @@ import {
   Group,
   Modal,
   SegmentedControl,
+  Select,
   Stack,
   Tabs,
   Text,
@@ -29,7 +30,7 @@ import {
   IconFolderOpen,
   IconMoon,
   IconPalette,
-  IconSparkles,
+  IconCube,
   IconSun,
   IconTrash
 } from '@tabler/icons-react';
@@ -141,7 +142,26 @@ const MODAL_CSS = `
 .gam-root .mantine-Modal-title { font-size: 15px; font-weight: 600; color: var(--gam-text); }
 .gam-root .mantine-Modal-close { border-radius: 50%; color: var(--gam-dim); }
 .gam-root .mantine-Modal-close:hover { background: var(--gam-hover); color: var(--gam-text); }
-.gam-root .mantine-Modal-body { padding: 0; }
+.gam-root {
+  display: flex !important;
+  flex-direction: column !important;
+  overflow: hidden !important;
+}
+.gam-root .mantine-Modal-header { flex: 0 0 auto; }
+.gam-root .mantine-Modal-body {
+  padding: 0;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--gam-dim) 45%, transparent) transparent;
+}
+.gam-root .mantine-Modal-body::-webkit-scrollbar { width: 8px; }
+.gam-root .mantine-Modal-body::-webkit-scrollbar-track { background: transparent; margin: 6px 0; }
+.gam-root .mantine-Modal-body::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--gam-dim) 45%, transparent);
+  border-radius: 999px;
+}
 
 /* Pill tabs */
 .gam-root .mantine-Tabs-list {
@@ -259,6 +279,14 @@ const MODAL_CSS = `
 .gam-root .gam-seg .mantine-SegmentedControl-label:hover { color: var(--gam-text); }
 .gam-root .gam-seg .mantine-SegmentedControl-label[data-active] { color: var(--gam-on-accent) !important; }
 
+/* Readable labels on the pills */
+.gam-root .gam-seg .mantine-SegmentedControl-label {
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7), 0 0 2px rgba(0, 0, 0, 0.5);
+}
+:root[data-mantine-color-scheme='light'] .gam-root .gam-seg .mantine-SegmentedControl-label {
+  text-shadow: 0 1px 2px rgba(255, 255, 255, 0.85);
+}
+
 /* Slider */
 .gam-root .mantine-Slider-track::before { background: var(--gam-field); }
 .gam-root .mantine-Slider-bar { background: var(--gam-accent); }
@@ -289,6 +317,17 @@ const MODAL_CSS = `
 .gam-root .mantine-TextInput-input:focus { border-color: var(--gam-accent); }
 .gam-root .mantine-TextInput-label { color: var(--gam-text); font-size: 12px; font-weight: 500; margin-bottom: 4px; }
 .gam-root .mantine-TextInput-description { color: var(--gam-dim); font-size: 11px; margin-bottom: 6px; }
+
+/* Pill select field */
+.gam-root .mantine-Select-input {
+  background: var(--gam-field);
+  border: 1px solid var(--gam-field-bd);
+  border-radius: 999px;
+  padding-inline: 16px;
+  color: var(--gam-text);
+  font-size: 12px;
+}
+.gam-root .mantine-Select-input:focus { border-color: var(--gam-accent); }
 
 /* Tags */
 .gam-root .mantine-Badge-root {
@@ -497,7 +536,7 @@ export function PreferencesModal({
 
       <Tabs defaultValue="quality" keepMounted={false} variant="unstyled">
         <Tabs.List>
-          <Tabs.Tab value="quality" leftSection={<IconSparkles size={16} />}>
+          <Tabs.Tab value="quality" leftSection={<IconCube size={16} />}>
             3D Quality
           </Tabs.Tab>
           <Tabs.Tab value="theme" leftSection={<IconPalette size={16} />}>
@@ -549,7 +588,7 @@ export function PreferencesModal({
           target="_blank"
           rel="noreferrer"
         >
-          Support Game Asset Manager: Check Out My Socials
+          Support Game Asset Manager
         </Button>
       </div>
     </Modal>
@@ -607,6 +646,8 @@ function RenderQualitySection({ prefs }: { prefs: PreferencesFile }) {
         </Property>
       </Category>
 
+      <UnitsCategory prefs={prefs} />
+
       <Note>Changing quality reloads the active preview.</Note>
     </Stack>
   );
@@ -622,6 +663,7 @@ function ThemeSection({
   onThemeChange?: (id: ThemeId) => void;
 }) {
   const { setColorScheme } = useMantineColorScheme();
+  void prefs;
   const active = themeId ?? DEFAULT_THEME_ID;
   const darkThemes = THEMES.filter((t) => t.colorScheme !== 'light');
   const lightThemes = THEMES.filter((t) => t.colorScheme === 'light');
@@ -740,7 +782,7 @@ function ThemeSection({
 
       <GlassCategory />
 
-      <UnitsCategory prefs={prefs} />
+      <LanguageCategory />
     </Stack>
   );
 }
@@ -758,11 +800,59 @@ function GlassCategory() {
   };
   return (
     <Category title="Effects">
+      <div
+        role="switch"
+        aria-checked={on}
+        tabIndex={0}
+        style={{ cursor: 'pointer' }}
+        onClick={() => apply(!on)}
+        onKeyDown={(e) => {
+          if (e.key === ' ' || e.key === 'Enter') {
+            e.preventDefault();
+            apply(!on);
+          }
+        }}
+      >
       <Property
         label="Glass effect"
         hint="Frosted blur behind panels and menus. Turn off for solid backgrounds."
       >
-        <Switch checked={on} onChange={(e) => apply(e.currentTarget.checked)} />
+        <Switch checked={on} onChange={() => undefined} tabIndex={-1} style={{ pointerEvents: 'none' }} />
+      </Property>
+      </div>
+    </Category>
+  );
+}
+
+/** Language picker, shown inside the Theme tab. English only for now. */
+function LanguageCategory() {
+  const [lang, setLang] = useState(() => {
+    try {
+      return localStorage.getItem('gam:language') ?? 'en';
+    } catch {
+      return 'en';
+    }
+  });
+  const apply = (next: string | null) => {
+    if (!next) return;
+    setLang(next);
+    try {
+      localStorage.setItem('gam:language', next);
+    } catch {
+      // ignore
+    }
+  };
+  return (
+    <Category title="Language">
+      <Property label="Language" hint="More languages are coming.">
+        <Select
+          size="xs"
+          w={160}
+          value={lang}
+          onChange={apply}
+          allowDeselect={false}
+          data={[{ value: 'en', label: 'English' }]}
+        />
       </Property>
     </Category>
   );
@@ -811,8 +901,8 @@ function CacheSection({ libraryId }: { libraryId: string | null }) {
       await ipc.rebuildThumbCache(libraryId);
       notifications.show({
         color: 'green',
-        title: 'Cache rebuild queued',
-        message: 'Thumbnails will re-render in the background.'
+        title: 'Thumbnail cache cleared',
+        message: 'Thumbnails for the current folder or filter render again as you browse.'
       });
     } finally {
       setBusy(null);
@@ -826,8 +916,8 @@ function CacheSection({ libraryId }: { libraryId: string | null }) {
       const result = await ipc.purgeOrphanThumbs(libraryId);
       notifications.show({
         color: 'green',
-        title: 'Orphan sidecars purged',
-        message: `Removed ${result.removed} file${result.removed === 1 ? '' : 's'}.`
+        title: 'Leftover thumbnails removed',
+        message: `Removed ${result.removed} unused thumbnail${result.removed === 1 ? '' : 's'}.`
       });
     } finally {
       setBusy(null);
@@ -842,8 +932,8 @@ function CacheSection({ libraryId }: { libraryId: string | null }) {
       </Note>
       <Category title="Thumbnail cache">
         <Property
-          label="Rebuild thumbnail cache"
-          hint="Wipes the thumbnails table and re-queues every file."
+          label="Clear thumbnail cache"
+          hint="Deletes this library's cached thumbnails. Your files are not touched. Thumbnails render again only for what you open."
         >
           <Button
             className="gam-btn-flat"
@@ -852,12 +942,12 @@ function CacheSection({ libraryId }: { libraryId: string | null }) {
             disabled={!libraryId}
             onClick={() => void rebuild()}
           >
-            Rebuild
+            Clear cache
           </Button>
         </Property>
         <Property
-          label="Purge orphan sidecars"
-          hint="Removes sidecar PNG/WebP files whose file_id no longer exists."
+          label="Clean up leftover thumbnails"
+          hint="Deletes thumbnail pictures of files you already deleted. Frees disk space. Your own files are never touched."
         >
           <Button
             className="gam-btn-flat"
@@ -866,7 +956,7 @@ function CacheSection({ libraryId }: { libraryId: string | null }) {
             disabled={!libraryId}
             onClick={() => void purge()}
           >
-            Purge
+            Clean up
           </Button>
         </Property>
       </Category>

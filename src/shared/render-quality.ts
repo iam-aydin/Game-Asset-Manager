@@ -14,6 +14,7 @@ export const RENDER_QUALITY_IDS = ['low', 'medium', 'high', 'ultra'] as const;
 export type RenderQuality = (typeof RENDER_QUALITY_IDS)[number];
 
 export const DEFAULT_RENDER_QUALITY: RenderQuality = 'low';
+export const DEFAULT_PREVIEW_QUALITY: RenderQuality = 'medium';
 
 export type ShadowFilter = 'basic' | 'pcf' | 'pcfsoft';
 

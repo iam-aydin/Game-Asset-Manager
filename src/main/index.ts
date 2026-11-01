@@ -78,19 +78,139 @@ const savedWindowState = new WeakMap<BrowserWindow, SavedWindowState>();
 
 const animating = new WeakSet<BrowserWindow>();
 
+// â”€â”€â”€ Smooth fullscreen (Alt+F) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// The window itself grows to the display size, and real fullscreen is switched
+// on at the very end (the window already covers the screen, so nothing visibly
+// changes). Leaving plays it in reverse.
+interface SmoothFsState {
+  bounds: Rectangle;
+  wasMaximized: boolean;
+}
+const smoothFullscreenState = new WeakMap<BrowserWindow, SmoothFsState>();
+const SMOOTH_FS_MS = 320; // keep equal to WINDOW_MS in useSmoothFullscreen.ts
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Waits (max 2 s) until no other window animation (or the mini player) is active. */
+async function waitUntilIdle(win: BrowserWindow, alsoMini: boolean): Promise<void> {
+  const t0 = Date.now();
+  while (
+    !win.isDestroyed() &&
+    (animating.has(win) || (alsoMini && savedWindowState.has(win))) &&
+    Date.now() - t0 < 2000
+  ) {
+    await sleep(30);
+  }
+}
+
+async function enterSmoothFullscreen(win: BrowserWindow): Promise<void> {
+  await waitUntilIdle(win, true);
+  if (win.isDestroyed() || savedWindowState.has(win) || win.isFullScreen()) return;
+  smoothFullscreenState.delete(win); // stale state from a fullscreen left with F11
+  animating.add(win);
+  try {
+    smoothFullscreenState.set(win, {
+      bounds: win.getNormalBounds(),
+      wasMaximized: win.isMaximized()
+    });
+    const startBounds = win.getBounds();
+    if (win.isMaximized()) {
+      win.unmaximize();
+      win.setBounds(startBounds); // start the animation from the maximized size
+    }
+    const target = screen.getDisplayMatching(startBounds).bounds;
+    await animateBounds(win, target, SMOOTH_FS_MS);
+    if (win.isDestroyed()) return;
+    win.setFullScreen(true);
+  } finally {
+    animating.delete(win);
+  }
+}
+
+async function exitSmoothFullscreen(win: BrowserWindow): Promise<void> {
+  if (!smoothFullscreenState.has(win)) {
+    // Fullscreen came from somewhere else (F11): just leave it.
+    if (!win.isDestroyed() && win.isFullScreen() && !savedWindowState.has(win)) {
+      win.setFullScreen(false);
+    }
+    return;
+  }
+  await waitUntilIdle(win, false);
+  const state = smoothFullscreenState.get(win);
+  if (win.isDestroyed() || !state) return;
+  smoothFullscreenState.delete(win);
+  if (!win.isFullScreen()) return; // already left (F11 or the mini player)
+  animating.add(win);
+  try {
+    win.setFullScreen(false);
+    const target = state.wasMaximized
+      ? screen.getDisplayMatching(win.getBounds()).workArea
+      : state.bounds;
+    await animateBounds(win, target, SMOOTH_FS_MS);
+    if (win.isDestroyed()) return;
+    win.setBounds(state.bounds);
+    if (state.wasMaximized) {
+      win.maximize();
+    } else {
+      // Windows can apply the first setBounds at the wrong DPI scale; repeat once.
+      setImmediate(() => {
+        if (!win.isDestroyed() && !win.isMaximized()) win.setBounds(state.bounds);
+      });
+    }
+  } finally {
+    animating.delete(win);
+  }
+}
+
+// Ctrl + drag in the mini player: the window follows the cursor. Done in the main
+// process (polling the cursor) so it stays smooth, keeps the exact size on
+// high-DPI screens and keeps working if the cursor outruns the window.
+const miniDragTimers = new WeakMap<BrowserWindow, ReturnType<typeof setInterval>>();
+
+function stopMiniDrag(win: BrowserWindow): void {
+  const t = miniDragTimers.get(win);
+  if (t) clearInterval(t);
+  miniDragTimers.delete(win);
+}
+
+function startMiniDrag(win: BrowserWindow): void {
+  if (win.isDestroyed() || !savedWindowState.has(win) || animating.has(win)) return;
+  stopMiniDrag(win);
+  const start = screen.getCursorScreenPoint();
+  const b = win.getBounds();
+  let lastX = b.x;
+  let lastY = b.y;
+  miniDragTimers.set(
+    win,
+    setInterval(() => {
+      if (win.isDestroyed()) return stopMiniDrag(win);
+      const p = screen.getCursorScreenPoint();
+      const x = b.x + p.x - start.x;
+      const y = b.y + p.y - start.y;
+      if (x === lastX && y === lastY) return;
+      lastX = x;
+      lastY = y;
+      win.setBounds({ x, y, width: b.width, height: b.height });
+    }, 8)
+  );
+}
+
 async function enterMiniMode(win: BrowserWindow): Promise<void> {
   if (savedWindowState.has(win) || animating.has(win)) return;
   animating.add(win);
   try {
+    // Coming from Alt+F fullscreen: the mini player returns to the normal window afterwards.
+    const sf = smoothFullscreenState.get(win);
+    smoothFullscreenState.delete(win);
     const state: SavedWindowState = {
-      bounds: win.getNormalBounds(),
-      wasMaximized: win.isMaximized(),
-      wasFullScreen: win.isFullScreen(),
+      bounds: sf ? sf.bounds : win.getNormalBounds(),
+      wasMaximized: sf ? sf.wasMaximized : win.isMaximized(),
+      wasFullScreen: sf ? false : win.isFullScreen(),
       minSize: win.getMinimumSize() as [number, number]
     };
     savedWindowState.set(win, state);
 
-    if (state.wasFullScreen) win.setFullScreen(false);
+    if (win.isFullScreen()) win.setFullScreen(false);
     const startBounds = win.getBounds();
     if (win.isMaximized()) {
       win.unmaximize();
@@ -123,6 +243,7 @@ async function enterMiniMode(win: BrowserWindow): Promise<void> {
 async function exitMiniMode(win: BrowserWindow): Promise<void> {
   const state = savedWindowState.get(win);
   if (!state || animating.has(win)) return;
+  stopMiniDrag(win);
   animating.add(win);
   try {
     win.setAlwaysOnTop(false);
@@ -160,6 +281,22 @@ async function exitMiniMode(win: BrowserWindow): Promise<void> {
 }
 
 function registerWindowIpc(): void {
+  // Ctrl + drag in the mini player (see startMiniDrag).
+  ipcMain.on('window:miniDragStart', (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (win) startMiniDrag(win);
+  });
+  ipcMain.on('window:miniDragStop', (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (win) stopMiniDrag(win);
+  });
+  // Alt+F: window grows to / shrinks from real fullscreen. Resolves when done.
+  ipcMain.handle('window:setSmoothFullscreen', async (e, on: boolean) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (!win || win.isDestroyed()) return;
+    if (on) await enterSmoothFullscreen(win);
+    else await exitSmoothFullscreen(win);
+  });
   // Resolves when the animation has finished, so the renderer can sequence its layout swap.
   ipcMain.handle('window:setMiniMode', async (e, on: boolean) => {
     const win = BrowserWindow.fromWebContents(e.sender);
@@ -167,6 +304,20 @@ function registerWindowIpc(): void {
     if (on) await enterMiniMode(win);
     else await exitMiniMode(win);
   });
+
+  // Window buttons follow the app theme (called from the renderer on theme change).
+  ipcMain.handle(
+    'window:setTitleBarTheme',
+    (e, theme: { color: string; symbolColor: string }) => {
+      const win = BrowserWindow.fromWebContents(e.sender);
+      if (!win || win.isDestroyed() || process.platform === 'darwin') return;
+      try {
+        win.setTitleBarOverlay({ color: theme.color, symbolColor: theme.symbolColor, height: 43 });
+      } catch {
+        // window has no overlay (e.g. mini mode); ignore
+      }
+    }
+  );
 
   ipcMain.handle('window:setMiniAlwaysOnTop', (e, on: boolean) => {
     const win = BrowserWindow.fromWebContents(e.sender);
@@ -189,6 +340,14 @@ function createMainWindow(): BrowserWindow {
       ? { backgroundColor: '#00000000', backgroundMaterial: GLASS_MATERIAL }
       : { backgroundColor: SOLID_BACKGROUND }),
     title: 'Game Asset Manager',
+    // Hidden title bar: Windows draws only its minimize/maximize/close buttons,
+    // on top of our own top bar. Colors follow the theme (see window:setTitleBarTheme).
+    ...(process.platform !== 'darwin'
+      ? {
+          titleBarStyle: 'hidden' as const,
+          titleBarOverlay: { color: SOLID_BACKGROUND, symbolColor: '#ececee', height: 43 }
+        }
+      : {}),
     // No native File/Edit/View/Window/Help bar on Windows/Linux. macOS keeps
     // its menu because the system menu bar is part of the OS there.
     autoHideMenuBar: process.platform !== 'darwin',

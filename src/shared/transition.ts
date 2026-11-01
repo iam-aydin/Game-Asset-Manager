@@ -236,6 +236,13 @@ export const RESIZE_BLUR = {
 } as const;
 
 let blurBump: (() => void) | null = null;
+let blurQuietUntil = 0;
+
+/** Ignore window resizes for the next `ms` milliseconds (no frosted layer).
+ *  Used while the window itself animates to fullscreen. */
+export function holdResizeBlur(ms: number): void {
+  blurQuietUntil = Math.max(blurQuietUntil, Date.now() + ms);
+}
 
 /** Shows the blur now and (re)starts the hold timer. No-op until installed. */
 export function pulseResizeBlur(): void {
@@ -297,10 +304,35 @@ export function installResizeBlur(): () => void {
   };
 
   blurBump = bump;
-  window.addEventListener('resize', bump);
+
+  // Alt+Tab / focus changes make Windows fire 'resize' without a real size
+  // change, which used to flash the whole window. Only react to real size
+  // changes, and ignore resizes right around focus / blur / visibility changes.
+  let lastW = window.innerWidth;
+  let lastH = window.innerHeight;
+  const quiet = () => {
+    blurQuietUntil = Math.max(blurQuietUntil, Date.now() + 600);
+  };
+  const onResize = () => {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const changed = w !== lastW || h !== lastH;
+    lastW = w;
+    lastH = h;
+    if (!changed) return;
+    if (Date.now() < blurQuietUntil) return;
+    bump();
+  };
+  window.addEventListener('resize', onResize);
+  window.addEventListener('focus', quiet);
+  window.addEventListener('blur', quiet);
+  document.addEventListener('visibilitychange', quiet);
 
   return () => {
-    window.removeEventListener('resize', bump);
+    window.removeEventListener('resize', onResize);
+    window.removeEventListener('focus', quiet);
+    window.removeEventListener('blur', quiet);
+    document.removeEventListener('visibilitychange', quiet);
     if (holdTimer) clearTimeout(holdTimer);
     if (hideTimer) clearTimeout(hideTimer);
     if (blurBump === bump) blurBump = null;
@@ -683,4 +715,127 @@ export function videoCompactBarCss(): string {
       [data-compact='true'] .${revealClassName} { animation: none; }
     }
   `;
+}
+
+// --- 7. Window buttons: slide away in fullscreen, return on exit (renderer) ---
+// When the window goes fullscreen (F11 / Alt+F) the minimize / maximize / close
+// buttons shake, blur and slide off to the right, then the empty strip they
+// leave closes up so the header icons glide into the freed space. Leaving
+// fullscreen plays it in reverse.
+// Setup:
+//   1. App.tsx: useEffect(() => installFullscreenChrome(), []);
+//   2. Render <style>{fullscreenChromeCss()}</style> once.
+//   3. Header spacer that reserves the button area: className="gam-caption-space".
+//   4. Custom buttons: className="gam-caption-btn" and style={{ '--i': 0 | 1 | 2 }}.
+
+export const FULLSCREEN_CHROME = {
+  /** Width of the reserved button area (Windows overlay is ~138px). */
+  captionWidthPx: 138,
+  durationMs: 700,
+  cssEasing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+  /** Buttons first rise this many px... */
+  risePx: 3,
+  /** ...then slide this many px to the right while fading. */
+  slidePx: 44,
+  /** Side-to-side shake in px (vertical wobble while sliding). */
+  shakePx: 1.5,
+  blurPx: 6,
+  /** Delay between the three buttons. */
+  staggerMs: 60,
+  /** The empty strip closes after the buttons are mostly gone. */
+  collapseDelayMs: 280,
+  collapseMs: 360
+} as const;
+
+export function fullscreenChromeCss(): string {
+  const {
+    durationMs, cssEasing, risePx, slidePx, shakePx, blurPx,
+    staggerMs, collapseDelayMs, collapseMs
+  } = FULLSCREEN_CHROME;
+  const n = (x: number) => Math.round(x * 100) / 100;
+  return `
+    .gam-caption-space {
+      flex-shrink: 0;
+      overflow: hidden;
+      width: var(--gam-caption-w, 138px);
+      transition: width ${collapseMs}ms ${cssEasing} 0ms;
+    }
+    html[data-gam-fs='true'] .gam-caption-space {
+      width: 0;
+      transition: width ${collapseMs}ms ${cssEasing} ${collapseDelayMs}ms;
+    }
+
+    .gam-caption-btn {
+      opacity: 1;
+      transform: none;
+      filter: blur(0px);
+    }
+    html[data-gam-fs='true'] .gam-caption-btn {
+      opacity: 0;
+      transform: translateX(${slidePx}px);
+      filter: blur(${blurPx}px);
+      pointer-events: none;
+    }
+    html[data-gam-fs-anim='leave'] .gam-caption-btn {
+      animation: gam-cap-leave ${durationMs}ms ease-in-out calc(var(--i, 0) * ${staggerMs}ms) both;
+    }
+    html[data-gam-fs-anim='enter'] .gam-caption-btn {
+      animation: gam-cap-enter ${durationMs}ms ${cssEasing} calc((2 - var(--i, 0)) * ${staggerMs}ms) both;
+    }
+    @keyframes gam-cap-leave {
+      0%   { opacity: 1;    transform: translate(0, 0);                                   filter: blur(0px); }
+      14%  { opacity: 1;    transform: translate(0, -${risePx}px);                        filter: blur(${n(blurPx * 0.1)}px); }
+      30%  { opacity: 0.85; transform: translate(${n(slidePx * 0.12)}px, ${n(shakePx)}px);  filter: blur(${n(blurPx * 0.3)}px); }
+      46%  { opacity: 0.65; transform: translate(${n(slidePx * 0.3)}px, -${n(shakePx)}px);  filter: blur(${n(blurPx * 0.5)}px); }
+      62%  { opacity: 0.45; transform: translate(${n(slidePx * 0.52)}px, ${n(shakePx * 0.7)}px);  filter: blur(${n(blurPx * 0.7)}px); }
+      80%  { opacity: 0.2;  transform: translate(${n(slidePx * 0.78)}px, -${n(shakePx * 0.4)}px); filter: blur(${n(blurPx * 0.9)}px); }
+      100% { opacity: 0;    transform: translate(${slidePx}px, 0);                        filter: blur(${blurPx}px); }
+    }
+    @keyframes gam-cap-enter {
+      0%   { opacity: 0;    transform: translate(${slidePx}px, 0);                        filter: blur(${blurPx}px); }
+      45%  { opacity: 0.8;  transform: translate(-${n(shakePx * 2)}px, ${n(shakePx)}px);   filter: blur(${n(blurPx * 0.3)}px); }
+      70%  { opacity: 1;    transform: translate(${n(shakePx)}px, -${n(shakePx * 0.6)}px); filter: blur(${n(blurPx * 0.1)}px); }
+      100% { opacity: 1;    transform: none;                                              filter: blur(0px); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .gam-caption-space { transition: none; }
+      html[data-gam-fs-anim] .gam-caption-btn { animation: none; }
+    }
+  `;
+}
+
+/** Sets html[data-gam-fs] (true while the window is fullscreen) and a short-lived
+ *  html[data-gam-fs-anim] = 'leave' | 'enter' that drives the animations above.
+ *  Call once at app start. Returns a cleanup function. */
+export function installFullscreenChrome(): () => void {
+  if (typeof document === 'undefined') return () => undefined;
+  const { captionWidthPx, durationMs, staggerMs } = FULLSCREEN_CHROME;
+  const root = document.documentElement;
+  root.style.setProperty('--gam-caption-w', `${captionWidthPx}px`);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const apply = (animate: boolean) => {
+    const fs =
+      !!document.fullscreenElement ||
+      (window.innerHeight >= screen.height - 1 && window.innerWidth >= screen.width - 1);
+    if (animate && root.getAttribute('data-gam-fs') === String(fs)) return;
+    root.setAttribute('data-gam-fs', fs ? 'true' : 'false');
+    if (!animate) return;
+    root.setAttribute('data-gam-fs-anim', fs ? 'leave' : 'enter');
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => root.removeAttribute('data-gam-fs-anim'), durationMs + staggerMs * 3 + 80);
+  };
+
+  apply(false);
+  const onChange = () => apply(true);
+  document.addEventListener('fullscreenchange', onChange);
+  window.addEventListener('resize', onChange);
+  return () => {
+    document.removeEventListener('fullscreenchange', onChange);
+    window.removeEventListener('resize', onChange);
+    if (timer) clearTimeout(timer);
+    root.removeAttribute('data-gam-fs');
+    root.removeAttribute('data-gam-fs-anim');
+  };
 }

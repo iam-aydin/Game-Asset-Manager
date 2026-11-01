@@ -20,6 +20,7 @@ import {
   Button,
   Center,
   Group,
+  Popover,
   SegmentedControl,
   Stack,
   Text,
@@ -46,13 +47,15 @@ import { isAudioExtension, isImageExtension, isVideoExtension } from '@shared/fo
 import { LIGHTING_PRESETS } from '../three/lighting-presets';
 import { HDRI_PRESETS, getHdriPreset } from '../three/hdri-presets';
 import { useHdriAdjust } from '../three/hdri-adjust';
-import { HdriAdjustButton } from '../three/AdjustHdri';
+import { HdriAdjustButton, useViewerFov } from '../three/AdjustHdri';
 import { ModelViewer, type ModelViewerHandle } from '../three/ModelViewer';
 import { CropOverlay } from './CropOverlay';
+import { AspectCropOverlay, AspectMenu, isAspectId, type AspectId, type CropRect } from './AspectCropOverlay';
 import { MiniIcon } from './PlayerIcons';
 import { PreviewFullscreenButton } from './PreviewFullscreenButton';
 import {
   GLASS_BUTTON_CLASS,
+  GLASS_POPOVER_CLASS,
   GLASS_RING_BUTTON_CLASS,
   GLASS_RING_CLASS
 } from './Glasseffect';
@@ -75,7 +78,8 @@ const animateLayout = (fn: () => void) => runPreviewTransition(() => flushSync(f
 import { ipc } from '../ipc-client';
 import { usePreferences, savePreferences } from '../util/use-preferences';
 import { useVerticalDragGesture } from '../util/gestures';
-import { DEFAULT_RENDER_QUALITY } from '@shared/render-quality';
+import { matchesAction } from '../keybinds';
+import { DEFAULT_PREVIEW_QUALITY } from '@shared/render-quality';
 
 // Must match AppShell header height in App.tsx. The expanded video preview
 // starts below the header so the search bar / top bar stay visible.
@@ -171,13 +175,52 @@ export function PreviewPane({
   themeButton
 }: Props) {
   const viewerRef = useRef<ModelViewerHandle>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const { prefs } = usePreferences();
   const colorScheme = useComputedColorScheme('dark');
   const miniBg = colorScheme === 'light' ? MINI_BG_LIGHT : MINI_BG_DARK;
-  const renderQuality = prefs?.renderQuality ?? DEFAULT_RENDER_QUALITY;
+  const renderQuality = prefs?.renderQuality ?? DEFAULT_PREVIEW_QUALITY;
   const hdri: HdriId = prefs?.hdri ?? DEFAULT_HDRI;
   const [hdriAdjust] = useHdriAdjust(hdri);
   const showGrid = prefs?.showGrid ?? false;
+  const [fov] = useViewerFov();
+  const [aspect, setAspectState] = useState<AspectId>(() => {
+    try {
+      const v = window.localStorage.getItem('gam.shotAspect');
+      return isAspectId(v) ? v : 'off';
+    } catch {
+      return 'off';
+    }
+  });
+  const setAspect = (a: AspectId) => {
+    setAspectState(a);
+    try {
+      window.localStorage.setItem('gam.shotAspect', a);
+    } catch {
+      /* ignore */
+    }
+  };
+  const [crop, setCrop] = useState<CropRect>({ x: 0.05, y: 0.05, w: 0.9, h: 0.9 });
+  const [cropNonce, setCropNonce] = useState(0);
+  const [boxPx, setBoxPx] = useState({ w: 0, h: 0 });
+  const [shotRes, setShotRes] = useState<number>(() => {
+    try {
+      const v = Math.round(Number(window.localStorage.getItem('gam.shotRes')));
+      return v >= 1 && v <= 4 ? v : 2;
+    } catch {
+      return 2;
+    }
+  });
+  const cycleShotRes = () => {
+    const next = shotRes >= 4 ? 1 : shotRes + 1;
+    setShotRes(next);
+    try {
+      window.localStorage.setItem('gam.shotRes', String(next));
+    } catch {
+      /* ignore */
+    }
+  };
+  const shotRef = useRef<(() => void) | null>(null);
   const [cropSize, setCropSize] = useState(0);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   // Thumbnail frame (aspect-ratio overlay). Toggled by clicking the ring around
@@ -385,8 +428,8 @@ export function PreviewPane({
       if (!hasFile) return;
 
       const key = e.key.toLowerCase();
-      // O: hide / show the options (mini player only).
-      if (key === 'o') {
+      // H: hide / show the options (mini player only).
+      if (matchesAction(e, 'preview.hideInterface')) {
         e.preventDefault();
         if (!isVideoFile && !isAudioFile) pulseResizeBlur();
         setMiniChromeHidden((v) => !v);
@@ -424,6 +467,104 @@ export function PreviewPane({
     togglePinned
   ]);
 
+  // Keep the old frame bits referenced (the ring now drives the aspect crop instead).
+  void [showFrame, setShowFrame, setFrameSticky, cropSize, CropOverlay];
+
+  // P: take a screenshot (3D models only).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() !== 'p') return;
+      if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.repeat) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+      if (!isModelFile) return;
+      e.preventDefault();
+      shotRef.current?.();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isModelFile]);
+
+  // MINIDRAG-BEGIN
+  // Mouse handling on the preview container (mini player):
+  //  - Plain left-drag moves the window. (3D models: plain drag orbits the model,
+  //    so there Ctrl + drag moves the window instead.)
+  //  - Ctrl + left-drag is the gesture (up = fullscreen, down = mini): the press is
+  //    left alone here so the video / audio gesture handlers get it.
+  //  - Any drag (more than a few px) never counts as a click afterwards, so it can't
+  //    toggle play / pause. A plain click without movement still does.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return undefined;
+    const gam = (window as any).gam;
+    const DRAG_PX = 4;
+    let down: { x: number; y: number } | null = null;
+    let winDrag = false;
+    let swallow = false;
+
+    const endWinDrag = () => {
+      if (!winDrag) return;
+      winDrag = false;
+      gam?.stopMiniDrag?.();
+    };
+
+    const onDown = (e: MouseEvent) => {
+      if (e.button !== 0) return;
+      swallow = false;
+      down = { x: e.screenX, y: e.screenY };
+      if (!miniRef.current || e.shiftKey || e.altKey) return;
+      // Who moves the window: plain drag (3D models: Ctrl + drag). The other
+      // combination is not touched, so the gesture handlers still get it.
+      if (isModelFile ? !e.ctrlKey : e.ctrlKey) return;
+      const t = e.target as HTMLElement | null;
+      // Real controls keep working (buttons, sliders, inputs are not a window drag).
+      if (t?.closest('button, input, select, textarea, a, [role="slider"], .mantine-Slider-root')) {
+        return;
+      }
+      e.preventDefault();
+      // 3D: keep the orbit controls out of a Ctrl + drag. Everything else lets the press
+      // through (menus close, the player sees a normal click); the gesture is Ctrl-only anyway.
+      if (isModelFile) e.stopPropagation();
+      winDrag = true;
+      gam?.startMiniDrag?.();
+    };
+
+    const onUp = (e: MouseEvent) => {
+      if (e.button !== 0) return;
+      const moved =
+        !!down && Math.hypot(e.screenX - down.x, e.screenY - down.y) > DRAG_PX;
+      // Only a real drag eats the click. A plain click without movement must still play / pause.
+      if (moved) {
+        swallow = true;
+        window.setTimeout(() => {
+          swallow = false;
+        }, 30);
+      }
+      endWinDrag();
+      down = null;
+    };
+
+    // The click that follows a drag is dropped before React's onClick (play / pause) sees it.
+    const onClick = (e: MouseEvent) => {
+      if (!swallow) return;
+      e.preventDefault();
+      e.stopPropagation();
+    };
+
+    el.addEventListener('mousedown', onDown, true);
+    el.addEventListener('click', onClick, true);
+    window.addEventListener('mouseup', onUp, true);
+    window.addEventListener('blur', endWinDrag);
+    return () => {
+      el.removeEventListener('mousedown', onDown, true);
+      el.removeEventListener('click', onClick, true);
+      window.removeEventListener('mouseup', onUp, true);
+      window.removeEventListener('blur', endWinDrag);
+      endWinDrag();
+    };
+  }, [hasFile, isModelFile]);
+  // MINIDRAG-END
+
   const attachWrapperRef = useCallback((el: HTMLDivElement | null) => {
     resizeObserverRef.current?.disconnect();
     resizeObserverRef.current = null;
@@ -434,6 +575,7 @@ export function PreviewPane({
     const compute = () => {
       const rect = el.getBoundingClientRect();
       setCropSize(Math.floor(Math.min(rect.width, rect.height)));
+      setBoxPx({ w: rect.width, h: rect.height });
     };
     compute();
     const ro = new ResizeObserver(compute);
@@ -497,7 +639,7 @@ export function PreviewPane({
     void savePreferences({ ...prefs, showGrid: on });
   };
 
-  const handleCapture = async () => {
+  const handleThumbnailCapture = async () => {
     try {
       const png = viewerRef.current?.hasModel()
         ? await viewerRef.current.captureCurrentFrame()
@@ -515,6 +657,60 @@ export function PreviewPane({
       });
     }
     onRerenderThumb(file.id);
+  };
+
+  // Camera button: click = screenshot (saved + copied), Shift+click = set thumbnail.
+  const handleCameraClick = async (thumbnail: boolean) => {
+    if (thumbnail) {
+      await handleThumbnailCapture();
+      return;
+    }
+    try {
+      const blob = viewerRef.current?.hasModel()
+        ? await viewerRef.current.captureScreenshot({ crop: aspect === 'off' ? null : crop, longEdge: shotRes * 1024 })
+        : null;
+      if (!blob) throw new Error('Nothing to capture');
+      let copied = false;
+      try {
+        await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+        copied = true;
+      } catch {
+        // clipboard unavailable: the file save still happens
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
+      a.href = url;
+      a.download = file.filename.replace(/\.[^.]+$/, '') + '-' + stamp + '.png';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 10000);
+      notifications.show({
+        color: 'green',
+        title: 'Screenshot taken',
+        message: copied ? 'Saved and copied to clipboard.' : 'Saved.',
+        autoClose: 2500
+      });
+    } catch (err) {
+      notifications.show({
+        color: 'red',
+        title: 'Screenshot failed',
+        message: (err as Error).message
+      });
+    }
+  };
+
+  // Output size of a screenshot with the current ratio/resolution (for labels).
+  const outDims = (() => {
+    const cw = (aspect === 'off' ? 1 : crop.w) * boxPx.w;
+    const ch = (aspect === 'off' ? 1 : crop.h) * boxPx.h;
+    if (cw <= 0 || ch <= 0) return null;
+    const k = (shotRes * 1024) / Math.max(cw, ch);
+    return { w: Math.round(cw * k), h: Math.round(ch * k) };
+  })();
+  shotRef.current = () => {
+    void handleCameraClick(false);
   };
 
   // Hide / show the interface (right-click menu item and the O key).
@@ -675,63 +871,67 @@ export function PreviewPane({
                 )}
                 {/* Ring around the camera: clicking the ring shows/hides the
                     thumbnail frame, clicking the camera inside captures. */}
-                <Tooltip
-                  label={
-                    showFrame
-                      ? frameSticky
-                        ? 'Ring: click to turn the frame off · Camera: capture thumbnail'
-                        : 'Ring: click to hide, double-click to keep it on for every file · Camera: capture'
-                      : 'Ring: click to show the frame (this file only), double-click to keep it on for every file · Camera: capture'
-                  }
-                  withinPortal
-                >
-                  <div
-                    className={GLASS_RING_CLASS}
-                    data-active={showFrame ? 'true' : 'false'}
-                    data-sticky={frameSticky ? 'true' : 'false'}
-                    role="button"
-                    aria-pressed={showFrame}
-                    aria-label="Toggle thumbnail frame"
-                    onClick={() => {
-                      // Turning it off by click also clears "sticky".
-                      if (showFrame) setFrameSticky(false);
-                      setShowFrame((v) => !v);
-                    }}
-                    onDoubleClick={() => {
-                      // Two clicks in a row: keep the frame on across files.
-                      setShowFrame(true);
-                      setFrameSticky(true);
-                    }}
-                    style={{
-                      position: 'relative',
-                      padding: 4,
-                      borderRadius: 10,
-                      cursor: 'pointer',
-                      display: 'flex'
-                    }}
-                  >
-                    <ActionIcon
-                      className={GLASS_RING_BUTTON_CLASS}
-                      variant="light"
-                      color="indigo"
-                      size={mini ? 'md' : 'lg'}
-                      onClick={(e) => {
-                        // Don't let the capture click also toggle the frame.
-                        e.stopPropagation();
-                        void handleCapture();
+                <Popover position="top" withinPortal width={270} classNames={{ dropdown: GLASS_POPOVER_CLASS }}>
+                  <Popover.Target>
+                    <div
+                      className={GLASS_RING_CLASS}
+                      data-active={aspect !== 'off' ? 'true' : 'false'}
+                      data-sticky="false"
+                      role="button"
+                      aria-label="Screenshot aspect ratio"
+                      style={{
+                        position: 'relative',
+                        padding: 4,
+                        borderRadius: 10,
+                        cursor: 'pointer',
+                        display: 'flex'
                       }}
-                      onDoubleClick={(e) => e.stopPropagation()}
-                      aria-label="Capture current view as thumbnail"
                     >
-                      <IconCamera size={mini ? 16 : 18} />
-                    </ActionIcon>
-                  </div>
-                </Tooltip>
+                      <Tooltip
+                        label="Camera: screenshot (P) - Shift+click: set thumbnail - Ring: aspect ratio"
+                        withinPortal
+                      >
+                        <ActionIcon
+                          className={GLASS_RING_BUTTON_CLASS}
+                          variant="light"
+                          color="indigo"
+                          size={mini ? 'md' : 'lg'}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleCameraClick(e.shiftKey);
+                          }}
+                          aria-label="Take screenshot"
+                        >
+                          <IconCamera size={mini ? 16 : 18} />
+                        </ActionIcon>
+                      </Tooltip>
+                    </div>
+                  </Popover.Target>
+                  <Popover.Dropdown>
+                    <AspectMenu
+                      aspect={aspect}
+                      onAspect={setAspect}
+                      outLabel={outDims ? outDims.w + ' x ' + outDims.h : ''}
+                      onReset={() => setCropNonce((n) => n + 1)}
+                    />
+                  </Popover.Dropdown>
+                </Popover>
 
                 {!mini && (
-                  <Badge variant="light" size="sm">
-                    .{file.ext}
-                  </Badge>
+                  <Tooltip
+                    label={'Screenshot resolution' + (outDims ? ' (' + outDims.w + ' x ' + outDims.h + ')' : '') + ' - click to change'}
+                    withinPortal
+                  >
+                    <Button
+                      variant="light"
+                      size="compact-xs"
+                      radius="xl"
+                      onClick={cycleShotRes}
+                      aria-label="Screenshot resolution"
+                    >
+                      {shotRes}K
+                    </Button>
+                  </Tooltip>
                 )}
               </Group>
             </Group>
@@ -773,9 +973,11 @@ export function PreviewPane({
     <Stack gap={0} h="100%">
       <style>{previewTransitionCss()}</style>
       <style>{miniChromeCss()}</style>
+      {mini && <style>{`.gam-titlebar { -webkit-app-region: no-drag !important; }`}</style>}
       {/* Main Preview Container (same element in every mode, so players and the
           3D viewer never remount when switching between normal/expanded/full/mini) */}
       <div
+        ref={containerRef}
         style={animatedContainerStyle}
         data-mini-chrome={hideChrome ? 'hidden' : 'shown'}
         onMouseMove={handleMiniPointerMove}
@@ -1005,16 +1207,25 @@ export function PreviewPane({
               hdri={hdri}
               hdriAdjust={hdriAdjust}
               showGrid={showGrid}
+              fov={fov}
               renderQuality={renderQuality}
             />
           )}
 
           {/* Thumbnail frame, only for 3D models and only when toggled on */}
-          {!is2DOrDoc && showFrame && <CropOverlay size={cropSize} />}
+          {!is2DOrDoc && aspect !== 'off' && (
+            <AspectCropOverlay
+              aspect={aspect}
+              crop={crop}
+              onCrop={setCrop}
+              nonce={cropNonce}
+              outLabel={outDims ? outDims.w + ' x ' + outDims.h : ''}
+            />
+          )}
 
           {/* Mini player button, just under the expand button (every type except
               audio, which has its own mini button inside its player) */}
-          {!isAudio && !isText && !mini && (
+          {!isAudio && !isText && !isVideo && !mini && (
             <Tooltip label="Mini player (I)" position="left" withinPortal>
               <ActionIcon
                 className={GLASS_BUTTON_CLASS}
@@ -1031,7 +1242,7 @@ export function PreviewPane({
                 style={
                   isModel
                     ? // 3D: top right (the XYZ gizmo lives in the bottom right)
-                      { position: 'absolute', top: 12, right: 12, zIndex: 6 }
+                      { position: 'absolute', top: isFull ? 56 : 12, right: 12, zIndex: 6 }
                     : roundBtns
                       ? { position: 'absolute', bottom: 62, right: 12, zIndex: 6 }
                       : { position: 'absolute', top: 8, right: 8, zIndex: 5 }
@@ -1048,6 +1259,7 @@ export function PreviewPane({
               onClick={toggleFullscreen}
               isFullscreen={isFull}
               placement={isModel ? 'top' : 'bottom'}
+              offset={isFull ? 44 : 0}
             />
           )}
 
@@ -1164,7 +1376,7 @@ function AudioPreview({
   // bottom of it, so this only supplies the gesture wrapper.
   return (
     <Box
-      onMouseDown={gesture.onMouseDown}
+      onMouseDown={(e) => { if (e.ctrlKey) gesture.onMouseDown(e); }}
       style={{
         position: 'relative',
         height: '100%',

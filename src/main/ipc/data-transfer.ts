@@ -297,6 +297,106 @@ export async function zipContainerTo(
   return { ok: true, path: dest, fileCount: entries.length, skipped };
 }
 // â”€â”€ Export â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+const zipJobs = new Map<string, { cancel: () => void }>();
+
+/** Stops a running folder zip (called from the toast's Cancel text). */
+export function cancelZipFolder(jobId: string): void {
+  zipJobs.get(jobId)?.cancel();
+}
+
+/** Deletes a file, retrying briefly (Windows keeps the handle for a moment after a stream is destroyed). */
+async function removeFileSoon(p: string): Promise<void> {
+  for (let i = 0; i < 15; i++) {
+    try {
+      unlinkSync(p);
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+}
+
+/** Zips a whole folder (subfolders included, everything on disk) to <Desktop>/<name>.zip. */
+export async function zipFolderToDesktop(
+  libraryId: string,
+  folderPath: string,
+  jobId?: string
+): Promise<
+  { ok: true; path: string; fileCount: number } | { ok: false; error: string; canceled?: boolean }
+> {
+  const lib = manager.getOpenLibrary(libraryId);
+  if (!lib) return { ok: false, error: 'Library is not open' };
+  if (!folderPath) return { ok: false, error: 'Pick a folder inside the library' };
+  const rootDir = resolve(lib.entry.mountPath);
+  const abs = resolve(lib.resolver.toAbsolute(folderPath));
+  if (!insideRoot(rootDir, abs)) return { ok: false, error: 'That folder is outside the library' };
+  try {
+    if (!existsSync(abs) || !statSync(abs).isDirectory()) {
+      return { ok: false, error: 'Folder not found on disk' };
+    }
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+  const folderName = safeName(parse(abs).base);
+  const dest = uniquePath(join(app.getPath('desktop'), `${folderName}.zip`));
+  if (insideRoot(abs, dest)) {
+    return { ok: false, error: 'The Desktop is inside this folder, so it cannot be zipped there' };
+  }
+
+  let fileCount = 0;
+  const state = { canceled: false };
+  try {
+    await new Promise<void>((resolveP, rejectP) => {
+      const output = createWriteStream(dest);
+      const archive = archiver('zip', { zlib: { level: 6 } });
+      if (jobId) {
+        zipJobs.set(jobId, {
+          cancel: () => {
+            state.canceled = true;
+            try {
+              archive.abort();
+            } catch {
+              // ignore
+            }
+            try {
+              output.destroy();
+            } catch {
+              // ignore
+            }
+            rejectP(new Error('Canceled'));
+          }
+        });
+      }
+      output.on('close', () => resolveP());
+      output.on('error', rejectP);
+      archive.on('error', rejectP);
+      archive.on('warning', (w) => zlog.warn('zip folder warning', { message: String(w) }));
+      archive.on('entry', (entry) => {
+        const st = (entry as unknown as { stats?: import('node:fs').Stats }).stats;
+        if (!st || !st.isDirectory()) fileCount++;
+      });
+      archive.pipe(output);
+      archive.directory(abs, folderName);
+      void archive.finalize();
+    });
+    if (fileCount === 0) throw new Error('The folder is empty');
+    zlog.info('folder zip written', { dest, files: fileCount });
+  } catch (err) {
+    const wasCanceled = state.canceled;
+    zlog.info(wasCanceled ? 'folder zip canceled' : 'folder zip failed', {
+      message: (err as Error).message
+    });
+    await removeFileSoon(dest);
+    return wasCanceled
+      ? { ok: false, error: 'Canceled', canceled: true }
+      : { ok: false, error: (err as Error).message };
+  } finally {
+    if (jobId) zipJobs.delete(jobId);
+  }
+  shell.showItemInFolder(dest);
+  return { ok: true, path: dest, fileCount };
+}
 function collectLibrary(libraryId: string, name: string, mountPath: string): ExportedLibrary {
   const out: ExportedLibrary = { id: libraryId, name, mountPath, tags: [], files: [] };
   const lib = manager.getOpenLibrary(libraryId);
@@ -409,6 +509,15 @@ export function registerDataTransferIpc(): void {
   });
 
   ipcMain.handle(IPC.zipContainerToDesktop, async (_e, id: number) => zipContainerTo(id));
+
+  ipcMain.handle(
+    'folders:zipToDesktop',
+    async (_e, libraryId: string, folderPath: string, jobId?: string) =>
+      zipFolderToDesktop(libraryId, folderPath, jobId)
+  );
+  ipcMain.handle('folders:cancelZip', (_e, jobId: string) => {
+    cancelZipFolder(jobId);
+  });
 
   ipcMain.handle(IPC.getAppVersion, () => app.getVersion());
 

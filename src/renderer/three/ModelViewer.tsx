@@ -29,6 +29,52 @@ const IMAGE_WHEEL_SENSITIVITY = 0.0015;
 const IMAGE_KEY_ZOOM_STEP = 1.15;
 const IMAGE_KEY_PAN_STEP = 40;
 
+// Per-quality limits for the interactive preview. Low really is low.
+const QUALITY_CAPS: Record<string, { pixelRatio: number; antialias: boolean; maxTex: number }> = {
+  low: { pixelRatio: 1, antialias: false, maxTex: 1024 },
+  medium: { pixelRatio: 1.5, antialias: true, maxTex: 2048 },
+  high: { pixelRatio: 2, antialias: true, maxTex: 4096 },
+  ultra: { pixelRatio: 2, antialias: true, maxTex: 0 }
+};
+
+// Shrinks model textures bigger than maxTex before they reach the GPU (0 = off).
+function capTextures(root: THREE.Object3D, maxTex: number): void {
+  if (maxTex <= 0) return;
+  const done = new Map<unknown, HTMLCanvasElement>();
+  root.traverse((node) => {
+    const mesh = node as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const m of mats) {
+      if (!m) continue;
+      for (const v of Object.values(m)) {
+        const tex = v as THREE.Texture;
+        if (!tex || !tex.isTexture) continue;
+        const img = tex.image as { width?: number; height?: number } | undefined;
+        if (!img || !img.width || !img.height) continue;
+        if (
+          !(img instanceof ImageBitmap) &&
+          !(img instanceof HTMLImageElement) &&
+          !(img instanceof HTMLCanvasElement)
+        ) continue;
+        const scale = maxTex / Math.max(img.width, img.height);
+        if (scale >= 1) continue;
+        let small = done.get(img);
+        if (!small) {
+          small = document.createElement('canvas');
+          small.width = Math.max(1, Math.round(img.width * scale));
+          small.height = Math.max(1, Math.round(img.height * scale));
+          const c = small.getContext('2d');
+          if (!c) continue;
+          c.drawImage(img as CanvasImageSource, 0, 0, small.width, small.height);
+          done.set(img, small);
+        }
+        tex.image = small;
+        tex.needsUpdate = true;
+      }
+    }
+  });
+}
 function readViewportBgColor(): THREE.Color {
   const raw = getComputedStyle(document.documentElement)
     .getPropertyValue('--wh3d-viewport-bg')
@@ -93,6 +139,7 @@ interface Props {
   showGrid?: boolean;
   renderQuality?: RenderQuality;
   hdriAdjust?: HdriAdjust;
+  fov?: number;
 }
 
 function shadowFilterToThree(filter: 'basic' | 'pcf' | 'pcfsoft'): THREE.ShadowMapType {
@@ -149,6 +196,10 @@ interface ViewerCtx {
 export interface ModelViewerHandle {
   hasModel(): boolean;
   captureCurrentFrame(): Promise<Uint8Array | null>;
+  captureScreenshot(opts?: {
+    crop?: { x: number; y: number; w: number; h: number } | null;
+    longEdge?: number;
+  }): Promise<Blob | null>;
   getCameraState(): CameraState | null;
   setCameraState(state: CameraState): void;
   onCameraChange(cb: () => void): () => void;
@@ -162,7 +213,8 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     hdri = DEFAULT_HDRI,
     showGrid = false,
     renderQuality = DEFAULT_RENDER_QUALITY,
-    hdriAdjust = DEFAULT_HDRI_ADJUST
+    hdriAdjust = DEFAULT_HDRI_ADJUST,
+    fov = 38
   },
   ref
 ) {
@@ -209,6 +261,8 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
   // that finishes loading after the user switched modes still gets the right one.
   const viewModeRef = useRef<LightingStyle>(lightingStyle);
   viewModeRef.current = lightingStyle;
+  const fovRef = useRef(fov);
+  fovRef.current = fov;
 
   // HDRI ADJUST: always-current values for async code.
   const hdriRef = useRef(hdri);
@@ -363,6 +417,40 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
         if (!blob) return null;
         return new Uint8Array(await blob.arrayBuffer());
       },
+      async captureScreenshot(opts) {
+        const ctx = ctxRef.current;
+        if (!ctx || !ctx.currentObject) return null;
+        const { renderer, scene, camera } = ctx;
+        const size = renderer.getSize(new THREE.Vector2());
+        const prevPR = renderer.getPixelRatio();
+        const crop = opts?.crop ?? { x: 0, y: 0, w: 1, h: 1 };
+        const cropW = Math.max(1, crop.w * size.x);
+        const cropH = Math.max(1, crop.h * size.y);
+        const k = (opts?.longEdge ?? 2048) / Math.max(cropW, cropH);
+        const outW = Math.max(1, Math.round(cropW * k));
+        const outH = Math.max(1, Math.round(cropH * k));
+        const grid = gridRef.current;
+        if (grid) grid.group.visible = false;
+        let blob: Blob | null = null;
+        try {
+          // Re-render only the crop region at the target size (no grid, no axis gizmo).
+          renderer.setPixelRatio(1);
+          renderer.setSize(outW, outH, false);
+          const fw = outW / crop.w;
+          const fh = outH / crop.h;
+          camera.setViewOffset(fw, fh, crop.x * fw, crop.y * fh, outW, outH);
+          renderer.render(scene, camera);
+          blob = await new Promise<Blob | null>((resolve) =>
+            renderer.domElement.toBlob(resolve, 'image/png')
+          );
+        } finally {
+          camera.clearViewOffset();
+          renderer.setPixelRatio(prevPR);
+          renderer.setSize(size.x, size.y, false);
+          if (grid) grid.group.visible = true;
+        }
+        return blob;
+      },
       getCameraState() {
         const ctx = ctxRef.current;
         if (!ctx) return null;
@@ -404,11 +492,11 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     const h = Math.max(height, 1);
 
     const renderer = new THREE.WebGLRenderer({
-      antialias: true,
+      antialias: QUALITY_CAPS[renderQuality].antialias,
       alpha: true,
       preserveDrawingBuffer: true
     });
-    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, QUALITY_CAPS[renderQuality].pixelRatio));
     renderer.setSize(w, h);
     renderer.setClearColor(readViewportBgColor(), 1);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -420,7 +508,7 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     const lighting = new LightingRig(scene, renderer);
     lighting.apply(lightingStyle, qualityPreset);
 
-    const camera = new THREE.PerspectiveCamera(38, w / h, 0.1, 1000);
+    const camera = new THREE.PerspectiveCamera(fovRef.current, w / h, 0.1, 1000);
     camera.position.set(0, 0, 5);
 
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -593,6 +681,7 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
         renderer.domElement.parentNode.removeChild(renderer.domElement);
       }
       renderer.dispose();
+      renderer.forceContextLoss(); // really free the GPU context
       ctxRef.current = null;
     };
   }, [renderQuality]);
@@ -700,6 +789,14 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     };
   }, [hdri, renderQuality]);
 
+  // FOV slider (also re-applied when the renderer is rebuilt).
+  useEffect(() => {
+    const ctx = ctxRef.current;
+    if (!ctx) return;
+    ctx.camera.fov = fov;
+    ctx.camera.updateProjectionMatrix();
+  }, [fov, renderQuality]);
+
   // HDRI ADJUST: re-apply the popover values (after lighting.apply on view-mode changes).
   useEffect(() => {
     applyHdriAdjust();
@@ -797,6 +894,7 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
         syncGrid(); // GRID: build it for this model
 
         applyShadowFlags(obj, qualityPreset.shadows.enabled);
+        capTextures(obj, QUALITY_CAPS[renderQuality].maxTex);
         applyAnisotropy(
           obj,
           qualityPreset.anisotropy,

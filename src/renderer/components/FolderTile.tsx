@@ -3,6 +3,7 @@ import type React from 'react';
 import { Menu } from '@mantine/core';
 import {
   IconEdit,
+  IconFileZip,
   IconFolderOpen,
   IconInfoCircle,
   IconRefresh,
@@ -146,6 +147,7 @@ export function FolderContextMenu({
   onRename,
   onReveal,
   onRescan,
+  onZip,
   onInfo
 }: {
   state: FolderMenuState;
@@ -155,6 +157,8 @@ export function FolderContextMenu({
   onRename: (path: string) => void;
   onReveal: (path: string) => void;
   onRescan: (path: string) => void;
+  /** When provided, a "Zip to Desktop" item is shown. */
+  onZip?: (path: string) => void;
   /** When provided, a "Folder info" item is shown. Receives the folder path and name. */
   onInfo?: (path: string, name: string) => void;
 }) {
@@ -199,6 +203,15 @@ export function FolderContextMenu({
         <Menu.Item leftSection={<IconFolderOpen size={14} />} onClick={run(onReveal)}>
           Show in folder
         </Menu.Item>
+        {onZip && (
+          <Menu.Item leftSection={<IconFileZip size={14} />} onClick={run(onZip)}>
+            Zip to Desktop
+          </Menu.Item>
+        )}
+        <Menu.Divider />
+        <Menu.Item leftSection={<IconRefresh size={14} />} onClick={run(onRescan)}>
+          Rescan folder
+        </Menu.Item>
         {onInfo && (
           <Menu.Item
             leftSection={<IconInfoCircle size={14} />}
@@ -211,12 +224,7 @@ export function FolderContextMenu({
           >
             Folder info
           </Menu.Item>
-        )}
-        <Menu.Divider />
-        <Menu.Item leftSection={<IconRefresh size={14} />} onClick={run(onRescan)}>
-          Rescan folder
-        </Menu.Item>
-      </Menu.Dropdown>
+        )}      </Menu.Dropdown>
     </Menu>
   );
 }

@@ -3,6 +3,7 @@ import { app } from 'electron';
 import { spawn } from 'node:child_process';
 import { basename, extname, join } from 'node:path';
 import { existsSync } from 'node:fs';
+import { mkdir, rm } from 'node:fs/promises';
 import { homedir, platform } from 'node:os';
 import { IPC } from '@shared/ipc-channels';
 import type { ExternalAppRegistration, PreferencesFile } from '@shared/preferences';
@@ -10,7 +11,7 @@ import * as store from '@main/preferences/store';
 import { getOpenLibrary } from '@main/libraries/manager';
 import { thumbFilePath } from '@main/thumb-pool/storage';
 import { libraryThumbsDir } from '@main/appdata';
-import { rebuildThumbnailCache, purgeOrphanThumbs, cacheRebuilds } from '@main/cache/management';
+import { purgeOrphanThumbs, cacheRebuilds } from '@main/cache/management';
 import { DEFAULT_LOG_LEVEL, openLogsFolder, setLogLevel, scopedLogger } from '@main/logger';
 import { runUndo } from '@main/undo/runner';
 import { broadcastLibraryEvent } from '@main/events';
@@ -156,10 +157,24 @@ export function registerPreferencesIpc(): void {
 
   ipcMain.handle(IPC.undo, async () => runUndo());
 
+  // "Rebuild" now means "clear": stop any running rebuild, forget every thumbnail
+  // of this library and delete the cached images. Nothing is re-queued. The
+  // current folder / filter list renders its own thumbnails again on demand.
   ipcMain.handle(IPC.rebuildThumbCache, async (_e, libraryId: string) => {
     const lib = getOpenLibrary(libraryId);
     if (!lib) return;
-    rebuildThumbnailCache(lib);
+    cacheRebuilds.cancel(lib);
+    lib.db.prepare('DELETE FROM thumb_jobs').run();
+    lib.db.prepare('DELETE FROM thumb_errors').run();
+    lib.thumbnails.deleteAll();
+    const dir = libraryThumbsDir(lib.entry.id);
+    try {
+      await rm(dir, { recursive: true, force: true });
+      await mkdir(dir, { recursive: true });
+    } catch (err) {
+      log.warn('clear thumbnail cache: could not delete images', { err: (err as Error).message });
+    }
+    broadcastLibraryEvent({ kind: 'files-changed', libraryId });
   });
 
   ipcMain.handle(IPC.getCacheStatus, async (_e, libraryId: string): Promise<CacheProgress | null> => {

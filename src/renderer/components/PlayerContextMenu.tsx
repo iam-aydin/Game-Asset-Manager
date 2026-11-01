@@ -80,20 +80,29 @@ function swallowNextClick(): void {
   if (swallowing) return;
   swallowing = true;
   const types = ['pointerup', 'mouseup', 'click', 'dblclick'] as const;
-  let timer = 0;
+  let safety = 0;
+  let tail = 0;
   const done = () => {
     swallowing = false;
-    window.clearTimeout(timer);
+    window.clearTimeout(safety);
+    window.clearTimeout(tail);
     types.forEach((t) => window.removeEventListener(t, stop, true));
   };
   function stop(e: Event) {
     e.stopPropagation();
-    if (e.type === 'click' || e.type === 'dblclick') done();
+    if (e.type === 'click' || e.type === 'dblclick') {
+      done();
+    } else if (e.type === 'mouseup') {
+      // The press is over. Its click (if there is one) follows right after the release.
+      // If the click never comes (the element that was pressed was removed together with
+      // the menu), stop listening anyway, or the NEXT real click would be swallowed too.
+      window.clearTimeout(tail);
+      tail = window.setTimeout(done, 40);
+    }
   }
   types.forEach((t) => window.addEventListener(t, stop, true));
-  timer = window.setTimeout(done, 1500); // safety net if the click never completes
+  safety = window.setTimeout(done, 1500); // safety net if the button is never released
 }
-
 /** PotPlayer-style right-click menu: a list of entries, each opens a flyout on hover.
  *  Entries can have `children`, which open further flyouts to the side (any depth). */
 export function PlayerContextMenu({

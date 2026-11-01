@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
+import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
 import type { LightingStyle } from '@shared/lighting-types';
 import {
   DEFAULT_RENDER_QUALITY,
@@ -11,6 +12,16 @@ import { getLightingPreset, type LightingPresetDefinition } from './lighting-pre
 
 export { DEFAULT_LIGHTING_STYLE, type LightingStyle } from '@shared/lighting-types';
 export { LIGHTING_PRESETS, type LightingPresetDefinition } from './lighting-presets';
+
+/**
+ * Widest HDRI kept on the GPU. three.js sizes its background cube and its
+ * lighting map from the HDRI's height, so VRAM grows with the SQUARE of the
+ * resolution. The full-size file stays in the loader cache (CPU) so switching
+ * stays fast. 2048 is plenty for lighting and a blurred sky; raise to 4096 if
+ * you want a sharper sky (about 4x more VRAM).
+ */
+const HDRI_MAX_WIDTH = 4096;
+const ENV_MAX_WIDTH = 512; // lighting map: blurry anyway, tiny is fine
 
 /**
  * An HDRI the rig should use. The texture is owned by the caller (see
@@ -45,13 +56,13 @@ export interface HdriSetup {
  * Quality-tier-aware: when the active `RenderQualityPreset` enables shadows,
  * the FIRST directional in the lighting preset becomes the shadow caster.
  * `fitToModel(box)` must be called after loading a model so the shadow
- * camera + light distance match the model's actual scale — without that
- * step, shadows would be wildly miscalibrated for non-unit-sized geometry.
- * The last box is remembered and re-applied whenever the lights are rebuilt.
+ * camera + light distance match the model's actual scale. The last box is
+ * remembered and re-applied whenever the lights are rebuilt.
  */
 export class LightingRig {
   private group = new THREE.Group();
   private envMap: THREE.Texture | null = null;
+  private envRT: THREE.WebGLRenderTarget | null = null;
   private currentStyle: LightingStyle | null = null;
   private currentQualityId: RenderQuality | null = null;
   private readonly pmrem: THREE.PMREMGenerator;
@@ -60,6 +71,10 @@ export class LightingRig {
   private quality: RenderQualityPreset = getRenderQualityPreset(DEFAULT_RENDER_QUALITY);
   private hdri: HdriSetup | null = null;
   private lastBox: THREE.Box3 | null = null;
+  /** GPU-sized copies of big HDRIs, keyed by the full-size source texture. */
+  private small = new Map<string, THREE.WebGLRenderTarget>();
+  private envTex: THREE.Texture | null = null;
+  private srcTex: THREE.Texture | null = null;
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -69,7 +84,7 @@ export class LightingRig {
     scene.add(this.group);
     this.pmrem = new THREE.PMREMGenerator(renderer);
     this.pmrem.compileEquirectangularShader();
-    // ACES Filmic globally — preset intensities below are tuned against it.
+    // ACES Filmic globally; preset intensities below are tuned against it.
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.0;
   }
@@ -86,10 +101,84 @@ export class LightingRig {
   /**
    * Set (or clear with null) the HDRI. Takes effect immediately if a style has
    * already been applied; otherwise it is picked up by the first `apply`.
+   * Big HDRIs are shrunk on the GPU first; the previous HDRI's GPU memory is freed.
    */
   setHdri(hdri: HdriSetup | null): void {
-    this.hdri = hdri;
+    const prevSrc = this.srcTex;
+    this.srcTex = hdri ? hdri.texture : null;
+    this.envTex = hdri ? this.shrink(hdri.texture, ENV_MAX_WIDTH) : null;
+    this.hdri = hdri ? { ...hdri, texture: this.shrink(hdri.texture, HDRI_MAX_WIDTH) } : null;
     if (this.currentStyle) this.applyDefinition(getLightingPreset(this.currentStyle));
+    this.releaseUnusedSmall();
+    // free the previous HDRI's GPU copies (decoded pixels stay cached in RAM)
+    if (prevSrc && prevSrc !== this.srcTex) prevSrc.dispose();
+  }
+
+  /**
+   * Copies a big equirect HDRI into a HDRI_MAX_WIDTH render target on the GPU
+   * (mip-filtered so a small bright sun doesn't vanish), then frees the
+   * full-size GPU upload. The CPU data stays in the loader cache.
+   */
+  private shrink(src: THREE.Texture, maxW: number): THREE.Texture {
+    const img = src.image as { width?: number; height?: number } | undefined;
+    const sw = img?.width ?? 0;
+    const sh = img?.height ?? 0;
+    if (sw <= maxW || sh <= 0) return src;
+    const key = src.uuid + ':' + maxW;
+    const cached = this.small.get(key);
+    if (cached) return cached.texture;
+
+    const w = maxW;
+    const h = Math.max(1, Math.round((w * sh) / sw));
+    const rt = new THREE.WebGLRenderTarget(w, h, {
+      type: THREE.HalfFloatType,
+      format: THREE.RGBAFormat,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      generateMipmaps: false,
+      depthBuffer: false
+    });
+    rt.texture.mapping = THREE.EquirectangularReflectionMapping;
+    rt.texture.colorSpace = THREE.LinearSRGBColorSpace;
+
+    const prevGen = src.generateMipmaps;
+    const prevMin = src.minFilter;
+    if (this.renderer.extensions.has('EXT_color_buffer_float')) {
+      src.generateMipmaps = true;
+      src.minFilter = THREE.LinearMipmapLinearFilter;
+    }
+    src.needsUpdate = true;
+
+    const mat = new THREE.MeshBasicMaterial({
+      map: src,
+      toneMapped: false,
+      depthTest: false,
+      depthWrite: false
+    });
+    const quad = new FullScreenQuad(mat);
+    const prevTarget = this.renderer.getRenderTarget();
+    this.renderer.setRenderTarget(rt);
+    quad.render(this.renderer);
+    this.renderer.setRenderTarget(prevTarget);
+    quad.dispose();
+    mat.dispose();
+
+    src.generateMipmaps = prevGen;
+    src.minFilter = prevMin;
+    src.dispose(); // frees the full-size GPU copy; CPU pixels stay for the next use
+
+    this.small.set(key, rt);
+    return rt.texture;
+  }
+
+  private releaseUnusedSmall(): void {
+    const keepA = this.hdri?.texture;
+    for (const [key, rt] of this.small) {
+      if (rt.texture === keepA || rt.texture === this.envTex) continue;
+      rt.texture.dispose(); // also drops three's cached cube / PMREM copies of it
+      rt.dispose();
+      this.small.delete(key);
+    }
   }
 
   /**
@@ -116,13 +205,14 @@ export class LightingRig {
     }
 
     if (hdriLights) {
-      this.scene.environment = hdri.texture;
+      this.scene.environment = this.envTex ?? hdri.texture;
       this.scene.environmentIntensity = hdri.environmentIntensity;
     } else if (!hdri && def.environmentIntensity > 0) {
-      this.envMap = this.pmrem.fromScene(
-        new RoomEnvironment(),
-        this.quality.envMapRoughness
-      ).texture;
+      const room = new RoomEnvironment();
+      this.envRT = this.pmrem.fromScene(room, this.quality.envMapRoughness);
+      this.envMap = this.envRT.texture;
+      // The room's geometry/materials were uploaded to the GPU; free them.
+      (room as unknown as { dispose?: () => void }).dispose?.();
       this.scene.environment = this.envMap;
       this.scene.environmentIntensity = def.environmentIntensity;
     }
@@ -149,7 +239,7 @@ export class LightingRig {
         if (i === 0 && this.quality.shadows.enabled) {
           light.castShadow = true;
           light.shadow.mapSize.set(this.quality.shadows.mapSize, this.quality.shadows.mapSize);
-          // Defaults — overwritten in fitToModel once we know the model size.
+          // Defaults, overwritten in fitToModel once we know the model size.
           light.shadow.camera.near = 0.1;
           light.shadow.camera.far = 50;
           light.shadow.bias = -0.0005;
@@ -212,6 +302,12 @@ export class LightingRig {
   /** Free GPU resources owned by the rig. Idempotent. */
   dispose(): void {
     this.clear();
+    for (const rt of this.small.values()) {
+      rt.texture.dispose();
+      rt.dispose();
+    }
+    this.small.clear();
+    this.srcTex?.dispose();
     this.scene.remove(this.group);
     this.pmrem.dispose();
   }
@@ -220,10 +316,14 @@ export class LightingRig {
     while (this.group.children.length > 0) {
       this.group.remove(this.group.children[0]);
     }
-    // Only the RoomEnvironment map is ours; HDRI textures belong to the cache.
+    // Only the RoomEnvironment map is ours; HDRI textures belong to the cache / small map.
     if (this.envMap) {
       this.envMap.dispose();
       this.envMap = null;
+    }
+    if (this.envRT) {
+      this.envRT.dispose();
+      this.envRT = null;
     }
     if (this.shadowKey) {
       this.scene.remove(this.shadowKey.target);

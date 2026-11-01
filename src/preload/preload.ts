@@ -47,6 +47,10 @@ import type { SmartQuery } from '@shared/smart-query';
 
 const api: IpcApi & {
   listSubtitles: (libraryId: string, fileId: number) => Promise<{ label: string; vtt: string }[]>;
+  setTitleBarTheme: (theme: { color: string; symbolColor: string }) => Promise<void>;
+  setSmoothFullscreen: (on: boolean) => Promise<void>;
+  startMiniDrag: () => void;
+  stopMiniDrag: () => void;
   openContextMenu: (req: { x: number; y: number; state: unknown }) => Promise<void>;
   makePlayableVideo: (libraryId: string, fileId: number) => Promise<string | null>;
   getContextMenuInit: () => Promise<{ x: number; y: number; state: unknown } | null>;
@@ -75,6 +79,12 @@ const api: IpcApi & {
 
   getFolderInfo: (libraryId: string, folderPath: string) =>
     ipcRenderer.invoke('folders:getInfo', libraryId, folderPath) as Promise<FolderInfoResult>,
+  zipFolderToDesktop: (libraryId: string, folderPath: string, jobId?: string) =>
+    ipcRenderer.invoke('folders:zipToDesktop', libraryId, folderPath, jobId) as Promise<
+      { ok: true; path: string; fileCount: number } | { ok: false; error: string; canceled?: boolean }
+    >,
+  cancelZipFolder: (jobId: string) =>
+    ipcRenderer.invoke('folders:cancelZip', jobId) as Promise<void>,
 
   listFolders: (req: ListFoldersRequest) =>
     ipcRenderer.invoke(IPC.listFolders, req) as Promise<FolderTreeNode | null>,
@@ -239,10 +249,16 @@ batchRename: (libraryId: string, plan: BatchRenameItem[]) =>
     >,
   makePlayableVideo: (libraryId: string, fileId: number) =>
     ipcRenderer.invoke('video:makePlayable', libraryId, fileId) as Promise<string | null>,
+  setTitleBarTheme: (theme: { color: string; symbolColor: string }) =>
+    ipcRenderer.invoke('window:setTitleBarTheme', theme) as Promise<void>,
   setMiniMode: (on: boolean) =>
     ipcRenderer.invoke('window:setMiniMode', on) as Promise<void>,
+  startMiniDrag: () => ipcRenderer.send('window:miniDragStart'),
+  stopMiniDrag: () => ipcRenderer.send('window:miniDragStop'),
   setMiniAlwaysOnTop: (on: boolean) =>
     ipcRenderer.invoke('window:setMiniAlwaysOnTop', on) as Promise<void>,
+  setSmoothFullscreen: (on: boolean) =>
+    ipcRenderer.invoke('window:setSmoothFullscreen', on) as Promise<void>,
   listSubtitles: (libraryId: string, fileId: number) =>
     ipcRenderer.invoke('subtitles:list', libraryId, fileId) as Promise<
       { label: string; vtt: string }[]

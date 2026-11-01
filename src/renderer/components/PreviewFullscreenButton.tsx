@@ -11,12 +11,15 @@ import { formatAction } from '../keybinds';
 export function PreviewFullscreenButton({
   onClick,
   isFullscreen = false,
-  placement = 'bottom'
+  placement = 'bottom',
+  offset = 0
 }: {
   onClick: () => void;
   isFullscreen?: boolean;
   /** 'bottom' = bottom right corner; 'top' = top right, under the mini player button. */
   placement?: 'top' | 'bottom';
+  /** Extra px from the top (fullscreen: clears the Windows buttons). */
+  offset?: number;
 }) {
   return (
     <Tooltip
@@ -40,7 +43,7 @@ export function PreviewFullscreenButton({
           position: 'absolute',
           right: 12,
           zIndex: 6,
-          ...(placement === 'top' ? { top: 62 } : { bottom: 12 })
+          ...(placement === 'top' ? { top: 62 + offset } : { bottom: 12 })
         }}
       >
         {isFullscreen ? <IconArrowsMinimize size={18} /> : <IconArrowsMaximize size={18} />}

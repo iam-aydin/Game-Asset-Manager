@@ -23,6 +23,7 @@ interface Props {
   onRename: (path: string) => void;
   onReveal: (path: string) => void;
   onRescan: (path: string) => void;
+  onZip?: (path: string) => void;
   onInfo?: (path: string, name: string) => void;
 }
 
@@ -37,6 +38,7 @@ export function FolderTreePane({
   onRename,
   onReveal,
   onRescan,
+  onZip,
   onInfo
 }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(['']));
@@ -116,6 +118,7 @@ export function FolderTreePane({
         onRename={onRename}
         onReveal={onReveal}
         onRescan={onRescan}
+        onZip={onZip}
         onInfo={onInfo}
       />
     </div>
