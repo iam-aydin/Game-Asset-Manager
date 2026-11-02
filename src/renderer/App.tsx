@@ -1685,6 +1685,16 @@ export function App() {
     },
     []
   );
+  // Drag-a-box selection from the grid: replace the whole file selection at once.
+  const selectFileIds = useCallback((ids: number[]) => {
+    setSelectedFileIds(new Set(ids));
+    // Keep the current preview if that file is still selected, so the box does not open another file.
+    setPrimaryFileId((prev) =>
+      prev != null && ids.includes(prev) ? prev : ids.length > 0 ? ids[ids.length - 1] : null
+    );
+    selectionAnchorRef.current = ids.length > 0 ? ids[0] : null;
+  }, []);
+
   const closeContextMenu = useCallback(() => {
     setContextMenu((prev) => ({ ...prev, open: false }));
   }, []);
@@ -1830,6 +1840,59 @@ export function App() {
       notifications.show({ color: 'orange', title: 'Rescan', message: result.error ?? 'failed' });
     }
   }, []);
+
+  // Select a library again from scratch (reloads its tree, files and tags).
+  const reselectLibrary = useCallback((id: string) => {
+    setSelectedLibraryId(null);
+    window.setTimeout(() => setSelectedLibraryId(id), 0);
+  }, []);
+
+  const handleReloadLibrary = useCallback(
+    async (id: string) => {
+      const r = await (window as any).gam?.reloadLibrary?.(id);
+      if (!r || !r.ok) {
+        notifications.show({
+          color: 'orange',
+          title: 'Reload failed',
+          message: r?.error ?? 'Reload is not available (restart the app).'
+        });
+        return;
+      }
+      notifications.show({ color: 'green', title: 'Library reloaded', message: r.library?.name ?? '' });
+      await refreshLibraries();
+      setLibrariesOpen(false);
+      reselectLibrary(id);
+    },
+    [refreshLibraries, reselectLibrary]
+  );
+
+  const handleSetLibraryPath = useCallback(
+    async (id: string) => {
+      const r = await (window as any).gam?.setLibraryPath?.(id);
+      if (!r) {
+        notifications.show({
+          color: 'orange',
+          title: 'Set path failed',
+          message: 'Not available (restart the app).'
+        });
+        return;
+      }
+      if (r.canceled) return;
+      if (!r.ok) {
+        notifications.show({ color: 'red', title: 'Set path failed', message: r.error });
+        return;
+      }
+      notifications.show({
+        color: 'green',
+        title: 'Path updated',
+        message: `${r.library?.name ?? 'Library'} â€” scanningâ€¦`
+      });
+      await refreshLibraries();
+      setLibrariesOpen(false);
+      reselectLibrary(id);
+    },
+    [refreshLibraries, reselectLibrary]
+  );
 
   const handleRescan = useCallback(async () => {
     if (!selectedLibraryId) return;
@@ -2000,6 +2063,26 @@ export function App() {
   // Bulk handlers — wired into the metadata pane's bulk mode.
   const selectedIdsArray = useMemo(() => [...selectedFileIds], [selectedFileIds]);
 
+  // New folder (Ctrl+Shift+N or right-click on empty grid space): creates a real folder on
+  // disk inside the folder you are in, then opens the rename dialog right away (like Explorer).
+  const handleNewFolder = useCallback(async () => {
+    if (!selectedLibraryId) return;
+    if (selectedCollectionId != null || viewScope !== 'normal') {
+      notifications.show({
+        color: 'orange',
+        title: 'New folder',
+        message: 'Open a normal folder first. Containers and "Show all files" have no folder to create in.'
+      });
+      return;
+    }
+    const r = await ipc.createFolder(selectedLibraryId, selectedFolderPath);
+    if (!r.ok) {
+      notifications.show({ color: 'red', title: 'New folder failed', message: r.error });
+      return;
+    }
+    handleRenameFolder(r.newFolderPath);
+  }, [selectedLibraryId, selectedCollectionId, viewScope, selectedFolderPath, handleRenameFolder]);
+
   const handleBulkAddTag = useCallback(
     async (tagName: string) => {
       if (!selectedLibraryId || selectedIdsArray.length === 0) return;
@@ -2114,6 +2197,12 @@ export function App() {
 
       // Color labels — modifier + 1..5 = red..purple, modifier + 0 = clear.
       const mod = e.metaKey || e.ctrlKey;
+      // Ctrl+Shift+N = new folder in the folder you are in (like Explorer).
+      if (matchesAction(e, 'folder.new')) {
+        e.preventDefault();
+        void handleNewFolder();
+        return;
+      }
       if (matchesAction(e, 'label.clear')) {
         e.preventDefault();
         void handleBulkSetColorLabel(null);
@@ -2199,6 +2288,7 @@ export function App() {
     handleTileClick,
     requestDelete,
     performDuplicate,
+    handleNewFolder,
     goBack,
     goForward,
     goUp
@@ -2466,7 +2556,7 @@ export function App() {
     <Stack
       gap={0}
       h="100%"
-      style={{ borderRight: '1px solid var(--mantine-color-dark-4)' }}
+      style={{}}
     >
       {/* Top fixed: Libraries → "Show all" → Collections. These never get
           pushed by the folder tree expanding/collapsing because they sit
@@ -2664,6 +2754,10 @@ export function App() {
       emptyHint={hasSubfolders && showFolders ? 'Open a subfolder above.' : undefined}
       folders={gridFolders}
       headerNav={inlineNav}
+      onSelectFiles={selectFileIds}
+      onNewFolder={handleNewFolder}
+      onRenameFolder={handleRenameFolder}
+      onClearFileSelection={clearSelection}
       onOpenFolder={selectFolder}
       onFolderContextMenu={(node, x, y) =>
         setFolderMenu({ opened: true, x, y, path: node.path, name: node.name })
@@ -2714,7 +2808,7 @@ export function App() {
   );
 
   const metadataPane = (
-    <div style={{ height: '100%', borderLeft: '1px solid var(--mantine-color-dark-4)' }}>
+    <div style={{ height: '100%' }}>
       <MetadataPanel
         libraryId={primaryFile?.libraryId ?? selectedLibraryId}
         primaryFile={primaryFile}
@@ -3040,7 +3134,7 @@ export function App() {
           autoSaveId="wh3d:panes"
           style={{ height: '100%' }}
         >
-          <Panel defaultSize={22} minSize={12} order={1}>
+          <Panel className="gam-pane" defaultSize={22} minSize={12} order={1}>
             {leftSidebar}
           </Panel>
           <PanelResizeHandle className="wh3d-resize-handle wh3d-resize-handle--col" />
@@ -3051,17 +3145,17 @@ export function App() {
               autoSaveId="wh3d:middle-panes"
               style={{ height: '100%' }}
             >
-              <Panel defaultSize={55} minSize={20} order={1}>
+              <Panel className="gam-pane" defaultSize={55} minSize={20} order={1}>
                 {previewPane}
               </Panel>
               <PanelResizeHandle className="wh3d-resize-handle wh3d-resize-handle--row" />
-              <Panel defaultSize={45} minSize={20} order={2}>
+              <Panel className="gam-pane" defaultSize={45} minSize={20} order={2}>
                 <div
                   style={{
                     height: '100%',
                     display: 'flex',
                     flexDirection: 'column',
-                    borderTop: '1px solid var(--mantine-color-dark-4)'
+                    borderTop: 'none'
                   }}
                 >
                   {contentPane}
@@ -3070,7 +3164,7 @@ export function App() {
             </PanelGroup>
           </Panel>
           <PanelResizeHandle className="wh3d-resize-handle wh3d-resize-handle--col" />
-          <Panel defaultSize={25} minSize={15} order={3}>
+          <Panel className="gam-pane" defaultSize={25} minSize={15} order={3}>
             {metadataPane}
           </Panel>
         </PanelGroup>
@@ -3097,6 +3191,8 @@ export function App() {
           onRename={handleRename}
           onReveal={handleReveal}
           onRescan={handleRescanLibrary}
+          onReload={handleReloadLibrary}
+          onSetPath={handleSetLibraryPath}
           onRemove={handleRemove}
           onRemoveAndDeleteCache={handleRemoveAndDeleteCache}
         />

@@ -1,5 +1,6 @@
 import { BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import { existsSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { IPC } from '@shared/ipc-channels';
 import type {
   AddLibraryRequest,
@@ -44,6 +45,36 @@ export function registerLibraryIpc(): void {
 
   ipcMain.handle(IPC.renameLibrary, async (_e, req: RenameLibraryRequest): Promise<RenameLibraryResult> => {
     return manager.renameLibrary(req);
+  });
+
+  ipcMain.handle(IPC.reloadLibrary, async (_e, id: string) => manager.reloadLibrary(id));
+
+  // Asks for the new folder, then points the library at it.
+  ipcMain.handle(IPC.setLibraryPath, async (event, id: string) => {
+    const entry = manager.listLibraries().find((l) => l.id === id);
+    if (!entry) return { ok: false as const, error: 'Library not found' };
+    const senderWindow = BrowserWindow.fromWebContents(event.sender);
+    // Start the picker at the closest folder of the old path that still exists.
+    let start = entry.mountPath;
+    while (start && !existsSync(start)) {
+      const up = dirname(start);
+      if (up === start) break;
+      start = up;
+    }
+    const opts: Electron.OpenDialogOptions = {
+      title: `Where is "${entry.name}" now?`,
+      defaultPath: start,
+      buttonLabel: 'Use this folder',
+      properties: ['openDirectory']
+    };
+    const result = senderWindow
+      ? await dialog.showOpenDialog(senderWindow, opts)
+      : await dialog.showOpenDialog(opts);
+    if (result.canceled || result.filePaths.length === 0) {
+      return { ok: true as const, canceled: true as const };
+    }
+    const r = manager.setLibraryPath({ id, mountPath: result.filePaths[0] });
+    return r.ok ? { ok: true as const, canceled: false as const, library: r.library } : r;
   });
 
   ipcMain.handle(IPC.revealLibrary, async (_e, id: string): Promise<RevealLibraryResult> => {

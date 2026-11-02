@@ -89,3 +89,58 @@ textarea,
   height: 4px;
   top: 1px;
 }
+
+/* gam-pane: every pane is its own rounded box, no straight divider lines */
+.gam-pane {
+  border-radius: 8px;
+  border: 1px solid var(--mantine-color-dark-4);
+  box-sizing: border-box;
+  overflow: hidden !important;
+}
+.mantine-AppShell-main {
+  padding-inline: 6px !important;
+  padding-bottom: 6px !important;
+}
+.wh3d-resize-handle--col::before,
+.wh3d-resize-handle--row::before {
+  background: transparent;
+  border-radius: 999px;
+}
+
+/* gam-pane-gap: tighter spacing between the rounded panes */
+.mantine-AppShell-main {
+  padding-inline: 4px !important;
+  padding-bottom: 4px !important;
+}
+.wh3d-resize-handle--col { width: 4px; }
+.wh3d-resize-handle--row { height: 4px; }
+/* keep the handles easy to grab: invisible, wider hit area */
+.wh3d-resize-handle--col::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  right: -4px;
+}
+.wh3d-resize-handle--row::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -4px;
+  bottom: -4px;
+}
+/* highlight bar fills the slim gap */
+.wh3d-resize-handle--col::before,
+.wh3d-resize-handle--col:hover::before,
+.wh3d-resize-handle--col[data-resize-handle-active]::before {
+  left: 0;
+  width: 100%;
+}
+.wh3d-resize-handle--row::before,
+.wh3d-resize-handle--row:hover::before,
+.wh3d-resize-handle--row[data-resize-handle-active]::before {
+  top: 0;
+  height: 100%;
+}

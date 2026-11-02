@@ -290,6 +290,81 @@ export function removeLibrary(args: {
   return { ok: true };
 }
 
+/**
+ * Re-check a registered library's folder and mount it again (or refresh it if it is already
+ * open). Nothing in the library's data is touched.
+ */
+export function reloadLibrary(
+  id: string
+): { ok: true; library: LibrarySummary } | { ok: false; error: string } {
+  const entry = registry.findById(id);
+  if (!entry) return { ok: false, error: 'Library not found' };
+  if (!existsSync(entry.mountPath)) {
+    return {
+      ok: false,
+      error: `Folder not found: ${entry.mountPath}. Use "Set path again" to point it at the new location.`
+    };
+  }
+  try {
+    if (!statSync(entry.mountPath).isDirectory()) {
+      return { ok: false, error: `Not a directory: ${entry.mountPath}` };
+    }
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+
+  if (open.has(id)) detachLibrary(id);
+  try {
+    ensureLibraryDataDir(id);
+    rotateBackup(libraryDbPath(id), libraryBackupsDir(id));
+    const db = openLibraryDatabase(libraryDbPath(id));
+    let row = readLibraryRow(db);
+    if (!row) {
+      insertLibraryRow(db, { id, name: entry.label });
+      row = { id, name: entry.label };
+    }
+    if (row.id !== id) {
+      db.close();
+      return { ok: false, error: 'The library data does not match this library id.' };
+    }
+    attachLibrary(entry, db);
+    registry.touchLastSeen(id);
+    log.info('library reloaded', { id, mountPath: entry.mountPath });
+    return { ok: true, library: toSummary({ ...entry, lastSeen: Date.now() }, true) };
+  } catch (e) {
+    log.error('library reload failed', { id, err: (e as Error).message });
+    return { ok: false, error: `Failed to open library: ${(e as Error).message}` };
+  }
+}
+
+/**
+ * Point an existing library at a new folder (after the folder was moved or renamed).
+ * The library keeps its id, so its database, thumbnails, tags, ratings and containers stay.
+ */
+export function setLibraryPath(args: {
+  id: string;
+  mountPath: string;
+}): { ok: true; library: LibrarySummary } | { ok: false; error: string } {
+  const entry = registry.findById(args.id);
+  if (!entry) return { ok: false, error: 'Library not found' };
+  const mountPath = args.mountPath;
+  if (!existsSync(mountPath)) return { ok: false, error: `Folder does not exist: ${mountPath}` };
+  try {
+    if (!statSync(mountPath).isDirectory()) return { ok: false, error: `Not a directory: ${mountPath}` };
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
+  const clash = registry
+    .listEntries()
+    .find((e) => e.id !== args.id && sameFolder(e.mountPath, mountPath));
+  if (clash) return { ok: false, error: `"${clash.label}" already uses that folder.` };
+
+  if (open.has(args.id)) detachLibrary(args.id);
+  registry.upsertEntry({ ...entry, mountPath, lastSeen: Date.now() });
+  log.info('library path changed', { id: args.id, from: entry.mountPath, to: mountPath });
+  return reloadLibrary(args.id);
+}
+
 export function shutdown(): void {
   scanner.detachAll();
   for (const { db } of open.values()) {

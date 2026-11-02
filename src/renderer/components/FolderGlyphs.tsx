@@ -118,7 +118,7 @@ function useUid() {
   return useId().replace(/[^a-zA-Z0-9]/g, '');
 }
 
-function Defs({ id, blur }: { id: string; blur: number }) {
+function Defs({ id }: { id: string; blur?: number }) {
   return (
     <defs>
       <linearGradient id={`${id}rb`} x1="0" y1="0" x2="1" y2="0">
@@ -134,12 +134,11 @@ function Defs({ id, blur }: { id: string; blur: number }) {
         <stop offset="0.5" style={{ stopColor: 'var(--fg-rim-b)' }} />
         <stop offset="1" style={{ stopColor: 'var(--fg-rim-c)' }} />
       </linearGradient>
-      <filter id={`${id}blur`} filterUnits="userSpaceOnUse" x="-6" y="-6" width="28" height="28">
-        <feGaussianBlur stdDeviation={blur} />
-      </filter>
-      <filter id={`${id}soft`} filterUnits="userSpaceOnUse" x="-6" y="-6" width="28" height="28">
-        <feGaussianBlur stdDeviation="0.45" />
-      </filter>
+      <radialGradient id={`${id}fade`}>
+        <stop offset="0" stopColor="#ffffff" stopOpacity="1" />
+        <stop offset="0.55" stopColor="#ffffff" stopOpacity="0.7" />
+        <stop offset="1" stopColor="#ffffff" stopOpacity="0" />
+      </radialGradient>
       <clipPath id={`${id}clip`}>
         <path d={CLOSED} />
       </clipPath>
@@ -154,24 +153,34 @@ export function GlassFolderBig({ hasFiles = true }: { hasFiles?: boolean }) {
     <svg
       viewBox="-3.5 -3.5 23 23"
       aria-hidden="true"
-      style={{ width: '100%', height: 'auto', display: 'block', opacity: hasFiles ? 1 : 0.6 }}
+      style={{
+        position: 'absolute',
+        inset: 0,
+        width: '100%',
+        height: '100%',
+        display: 'block',
+        opacity: hasFiles ? 1 : 0.6
+      }}
     >
       <Defs id={id} blur={1.2} />
       {/* blurred gradient glow behind the folder */}
-      <ellipse
-        cx="8"
-        cy="9"
-        rx="7.4"
-        ry="5.6"
+      <mask id={`${id}glowm`} maskUnits="userSpaceOnUse" x="-6" y="-6" width="28" height="28">
+        <ellipse cx="8" cy="9" rx="8.6" ry="6.6" fill={`url(#${id}fade)`} />
+      </mask>
+      <rect
+        x="-1"
+        y="2"
+        width="18"
+        height="14"
         fill={`url(#${id}rb)`}
+        mask={`url(#${id}glowm)`}
         style={{ opacity: 'var(--fg-blob-op)' }}
-        filter={`url(#${id}blur)`}
-      />
-      {/* dark glass underlay (cyberpunk) and gradient tint inside the glass */}
+      />
+{/* dark glass underlay (cyberpunk) and gradient tint inside the glass */}
       <path d={CLOSED} fill="#000000" style={{ fillOpacity: 'var(--fg-under-op)' }} />
       <path d={CLOSED} fill={`url(#${id}rb)`} style={{ fillOpacity: 'var(--fg-body-op)' }} />
       {/* frosted glass */}
-      <path d={CLOSED} fill="#ffffff" fillOpacity="0.12" filter={`url(#${id}soft)`} />
+      <path d={CLOSED} fill="#ffffff" fillOpacity="0.12" />
       <path d={CLOSED} fill={`url(#${id}glass)`} />
       <g clipPath={`url(#${id}clip)`}>
         <path d={CLOSED} fill="none" strokeWidth="1.6" style={{ stroke: 'var(--fg-edge)' }} />
@@ -210,16 +219,19 @@ export function GlassFolderMini({
       style={{ flexShrink: 0, opacity: hasFiles ? 1 : 0.6 }}
     >
       <Defs id={id} blur={1} />
-      <ellipse
-        cx="8"
-        cy="9"
-        rx="7"
-        ry="5.2"
+      <mask id={`${id}glowm`} maskUnits="userSpaceOnUse" x="-6" y="-6" width="28" height="28">
+        <ellipse cx="8" cy="9" rx="8" ry="6.2" fill={`url(#${id}fade)`} />
+      </mask>
+      <rect
+        x="-1"
+        y="2"
+        width="18"
+        height="14"
         fill={`url(#${id}rb)`}
+        mask={`url(#${id}glowm)`}
         style={{ opacity: 'var(--fg-blob-op)' }}
-        filter={`url(#${id}blur)`}
-      />
-      {open ? (
+      />
+{open ? (
         <>
           <path d={CLOSED} fill={`url(#${id}rb)`} style={{ fillOpacity: 'var(--fg-body-op)' }} />
           <path d={CLOSED} fill={`url(#${id}glass)`} fillOpacity="0.6" />

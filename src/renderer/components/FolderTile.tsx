@@ -58,6 +58,9 @@ export function FolderTile({
         cursor: 'pointer',
         display: 'flex',
         flexDirection: 'column',
+        width: '100%',
+        minWidth: 0,
+        maxWidth: '100%',
         height: tileHeight,
         padding: TILE_PADDING,
         borderRadius: 6,
@@ -77,10 +80,14 @@ export function FolderTile({
         style={{
           position: 'relative',
           width: '100%',
+          minWidth: 0,
           aspectRatio: '1 / 1',
           display: 'flex',
           alignItems: 'center',
-          justifyContent: 'center'
+          justifyContent: 'center',
+          flexShrink: 0,
+          overflow: 'hidden',
+          contain: 'paint'
         }}
       >
         <GlassFolderBig hasFiles={count > 0} />
@@ -110,7 +117,16 @@ export function FolderTile({
           </div>
         )}
       </div>
-      <div style={{ height: LABEL_HEIGHT, marginTop: 4, minWidth: 0, overflow: 'hidden' }}>
+      <div
+        style={{
+          height: LABEL_HEIGHT,
+          marginTop: 4,
+          minWidth: 0,
+          width: '100%',
+          flexShrink: 0,
+          overflow: 'hidden'
+        }}
+      >
         <div
           style={{
             fontSize: 12,
@@ -123,7 +139,15 @@ export function FolderTile({
         >
           {node.name}
         </div>
-        <div style={{ fontSize: 11, color: 'var(--mantine-color-dimmed)' }}>
+        <div
+          style={{
+            fontSize: 11,
+            color: 'var(--mantine-color-dimmed)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap'
+          }}
+        >
           {count} {count === 1 ? 'file' : 'files'}
         </div>
       </div>
@@ -224,7 +248,8 @@ export function FolderContextMenu({
           >
             Folder info
           </Menu.Item>
-        )}      </Menu.Dropdown>
+        )}
+      </Menu.Dropdown>
     </Menu>
   );
 }

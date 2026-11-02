@@ -1,5 +1,5 @@
 import { ipcMain } from 'electron';
-import { lstat, readdir, stat } from 'node:fs/promises';
+import { lstat, mkdir, readdir, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { IPC } from '@shared/ipc-channels';
 import type { FolderInfoResult, FolderTreeNode } from '@shared/types';
@@ -145,6 +145,44 @@ export function registerFoldersIpc(): void {
       };
       total(root);
       return root;
+    }
+  );
+
+  // New folder (Explorer style): "New folder", "New folder (2)", ... inside parentPath.
+  ipcMain.removeHandler(IPC.createFolder);
+  ipcMain.handle(
+    IPC.createFolder,
+    async (
+      _e,
+      libraryId: string,
+      parentPath: string
+    ): Promise<{ ok: true; newFolderPath: string } | { ok: false; error: string }> => {
+      const lib = getOpenLibrary(String(libraryId));
+      if (!lib) return { ok: false, error: 'Library is not open' };
+      try {
+        const parent = String(parentPath ?? '');
+        if (parent.split('/').some((seg) => seg === '..')) {
+          return { ok: false, error: 'Invalid folder path' };
+        }
+        const parentAbs = parent === '' ? lib.resolver.getMountPath() : lib.resolver.toAbsolute(parent);
+        const ps = await stat(parentAbs);
+        if (!ps.isDirectory()) return { ok: false, error: 'Not a folder' };
+        for (let n = 1; n < 1000; n++) {
+          const name = n === 1 ? 'New folder' : `New folder (${n})`;
+          try {
+            await mkdir(join(parentAbs, name));
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code === 'EEXIST') continue;
+            throw err;
+          }
+          markCountsStale(String(libraryId));
+          scanner.emit('files-changed', String(libraryId));
+          return { ok: true, newFolderPath: parent ? `${parent}/${name}` : name };
+        }
+        return { ok: false, error: 'Could not find a free folder name' };
+      } catch (err) {
+        return { ok: false, error: (err as Error).message };
+      }
     }
   );
 

@@ -12,6 +12,7 @@ import { registerFoldersIpc } from '@main/ipc/folders';
 import { registerSubtitlesIpc } from '@main/ipc/subtitles';
 import { registerVideoFallbackIpc } from '@main/ipc/video-fallback';
 import { registerContextMenuIpc } from '@main/ipc/context-menu';
+import { registerToolsIpc } from '@main/ipc/tools';
 import { registerDataTransferIpc } from '@main/ipc/data-transfer';
 import * as manager from '@main/libraries/manager';
 import {
@@ -78,7 +79,10 @@ const savedWindowState = new WeakMap<BrowserWindow, SavedWindowState>();
 
 const animating = new WeakSet<BrowserWindow>();
 
-// â”€â”€â”€ Smooth fullscreen (Alt+F) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// The one real app window (hidden thumbnail-worker windows are not this).
+let mainWindow: BrowserWindow | null = null;
+
+// --- Smooth fullscreen (Alt+F) ---------------------------------------------
 // The window itself grows to the display size, and real fullscreen is switched
 // on at the very end (the window already covers the screen, so nothing visibly
 // changes). Leaving plays it in reverse.
@@ -326,9 +330,37 @@ function registerWindowIpc(): void {
   });
 }
 
+/** If the window is completely off every screen (unplugged monitor, bad saved position), center it. */
+function ensureOnScreen(win: BrowserWindow): void {
+  try {
+    const b = win.getBounds();
+    const visible = screen.getAllDisplays().some((d) => {
+      const a = d.workArea;
+      return b.x < a.x + a.width && b.x + b.width > a.x && b.y < a.y + a.height && b.y + b.height > a.y;
+    });
+    if (!visible) win.center();
+  } catch {
+    // cosmetic only
+  }
+}
+
+/** Makes the main window visible and focused, whatever state it is in. */
+function revealWindow(win: BrowserWindow, reason: string): void {
+  if (win.isDestroyed()) return;
+  try {
+    ensureOnScreen(win);
+    if (win.isMinimized()) win.restore();
+    if (!win.isVisible()) win.show();
+    win.focus();
+    log.info('main window shown', { reason, ms: Math.round(process.uptime() * 1000) });
+  } catch (err) {
+    log.warn('main window show failed', { reason, error: String(err) });
+  }
+}
+
 function createMainWindow(): BrowserWindow {
+  log.info('creating main window', { ms: Math.round(process.uptime() * 1000) });
   const win = new BrowserWindow({
-    
     width: 1280,
     height: 820,
     minWidth: 900,
@@ -359,6 +391,7 @@ function createMainWindow(): BrowserWindow {
       sandbox: false
     }
   });
+  mainWindow = win;
   log.info('window backdrop', { glass: glassEnabled, material: glassEnabled ? GLASS_MATERIAL : 'none' });
   win.webContents.on('did-start-navigation', (_e, _url, isInPlace, isMainFrame) => {
     if (isMainFrame && !isInPlace) void exitMiniMode(win);
@@ -368,7 +401,35 @@ function createMainWindow(): BrowserWindow {
   // keep working. Only the visible bar is hidden.
   if (process.platform !== 'darwin') win.setMenuBarVisibility(false);
 
-  win.once('ready-to-show', () => win.show());
+  // The window MUST become visible. 'ready-to-show' is the normal trigger, but
+  // it can fail to fire on a cold start, which left a hidden window forever.
+  // So three triggers race and the first one wins:
+  //   1. ready-to-show      (normal)
+  //   2. did-finish-load    (+0.5 s, gives ready-to-show a chance first)
+  //   3. a 4 s timer        (last resort, always fires)
+  let revealed = false;
+  let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
+  const revealOnce = (reason: string): void => {
+    if (revealed || win.isDestroyed()) return;
+    revealed = true;
+    if (fallbackTimer) clearTimeout(fallbackTimer);
+    revealWindow(win, reason);
+  };
+  win.once('ready-to-show', () => revealOnce('ready-to-show'));
+  win.webContents.once('did-finish-load', () => {
+    setTimeout(() => revealOnce('did-finish-load'), 500);
+  });
+  win.webContents.on('did-fail-load', (_e, code, description, url, isMainFrame) => {
+    if (!isMainFrame) return;
+    log.warn('main window failed to load', { code, description, url });
+    revealOnce('did-fail-load');
+  });
+  win.webContents.on('render-process-gone', (_e, details) => {
+    log.warn('main window renderer gone', { reason: details.reason, exitCode: details.exitCode });
+    revealOnce('render-process-gone');
+  });
+  fallbackTimer = setTimeout(() => revealOnce('fallback-timer'), 4000);
+
   // Flush any library events that fired before the first window existed
   // (e.g. integrity-check failures during openAllFromRegistry).
   deliverPendingOnReady(win);
@@ -378,6 +439,7 @@ function createMainWindow(): BrowserWindow {
   // lingered in the background after the main window closed. Quit explicitly
   // when the main window goes away (macOS keeps its usual stay-alive behavior).
   win.on('closed', () => {
+    if (mainWindow === win) mainWindow = null;
     if (process.platform !== 'darwin') app.quit();
   });
 
@@ -395,17 +457,25 @@ function createMainWindow(): BrowserWindow {
   return win;
 }
 
-// Only one copy of the app may run. A second launch focuses the open window.
+// Only one copy of the app may run. A second launch brings the open window to
+// the front, even if that window is hidden (the old code skipped hidden ones).
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.exit(0);
 }
 app.on('second-instance', () => {
-  const win = BrowserWindow.getAllWindows().find((w) => !w.isDestroyed() && (w.isVisible() || w.isMinimized()));
-  if (!win) return;
-  if (win.isMinimized()) win.restore();
-  win.focus();
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  revealWindow(mainWindow, 'second-instance');
 });
+
+/** Runs one startup step; a failure is logged but never stops the window from opening. */
+function safeStep(label: string, fn: () => void): void {
+  try {
+    fn();
+  } catch (err) {
+    log.warn('startup step failed', { step: label, error: String(err) });
+  }
+}
 
 void app.whenReady().then(() => {
   if (!gotLock) return;
@@ -413,40 +483,47 @@ void app.whenReady().then(() => {
   // Reading prefs may itself want to log (corrupt file recovery), so the
   // logger must be ready to receive those entries with the right file path.
   initLogger(DEFAULT_LOG_LEVEL);
-  const prefs = prefsStore.getAll();
-  setLogLevel(prefs.logLevel ?? DEFAULT_LOG_LEVEL);
+  safeStep('log level', () => {
+    const prefs = prefsStore.getAll();
+    setLogLevel(prefs.logLevel ?? DEFAULT_LOG_LEVEL);
+  });
   log.info('app ready', { version: app.getVersion(), platform: process.platform, dev: isDev });
 
-  Menu.setApplicationMenu(buildMenu());
-  subscribeMenuToUndoQueue();
-  registerAssetProtocols();
-  registerLibraryIpc();
-  registerFilesIpc();
-  registerTagsIpc();
-  registerCollectionsIpc();
-  registerPreferencesIpc();
-  registerExportIpc();
-  registerDataTransferIpc();
-  registerWindowIpc();
-  registerFoldersIpc();
-  registerSubtitlesIpc();
-  registerVideoFallbackIpc();
-  registerContextMenuIpc();
+  safeStep('menu', () => {
+    Menu.setApplicationMenu(buildMenu());
+    subscribeMenuToUndoQueue();
+  });
+  safeStep('asset protocols', registerAssetProtocols);
+  safeStep('ipc libraries', registerLibraryIpc);
+  safeStep('ipc files', registerFilesIpc);
+  safeStep('ipc tags', registerTagsIpc);
+  safeStep('ipc collections', registerCollectionsIpc);
+  safeStep('ipc preferences', registerPreferencesIpc);
+  safeStep('ipc export', registerExportIpc);
+  safeStep('ipc data-transfer', registerDataTransferIpc);
+  safeStep('ipc window', registerWindowIpc);
+  safeStep('ipc folders', registerFoldersIpc);
+  safeStep('ipc subtitles', registerSubtitlesIpc);
+  safeStep('ipc video-fallback', registerVideoFallbackIpc);
+  safeStep('ipc context-menu', registerContextMenuIpc);
+  safeStep('ipc tools', registerToolsIpc);
   // Best-effort restore of registered libraries; failures show as offline.
   // After each library opens its scanner kicks off a scan, and on completion
   // the queue runner reconciles thumbnails.
-  const summaries = manager.openAllFromRegistry();
-  log.info('opened libraries from registry', {
-    total: summaries.length,
-    online: summaries.filter((s) => s.online).length
+  safeStep('open libraries', () => {
+    const summaries = manager.openAllFromRegistry();
+    log.info('opened libraries from registry', {
+      total: summaries.length,
+      online: summaries.filter((s) => s.online).length
+    });
+    // Also reconcile right away in case a library has no new scan to wait for
+    // (already-indexed files just need their thumbnails re-checked).
+    for (const s of summaries) {
+      if (!s.online) continue;
+      const lib = manager.getOpenLibrary(s.id);
+      if (lib) queueRunner.reconcile(lib);
+    }
   });
-  // Also reconcile right away in case a library has no new scan to wait for
-  // (already-indexed files just need their thumbnails re-checked).
-  for (const s of summaries) {
-    if (!s.online) continue;
-    const lib = manager.getOpenLibrary(s.id);
-    if (lib) queueRunner.reconcile(lib);
-  }
   const win = createMainWindow();
 
   // Startup time: from process launch to the first window being ready to show.
@@ -466,7 +543,7 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-// ─── Shutdown ──────────────────────────────────────────────────────────────
+// --- Shutdown --------------------------------------------------------------
 
 let shutdownStarted = false;
 

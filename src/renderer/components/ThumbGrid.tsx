@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActionIcon, Center, Group, Stack, Text, Tooltip } from '@mantine/core';
-import { IconMinus, IconPlus, IconStarFilled } from '@tabler/icons-react';
+import { ActionIcon, Center, Group, Menu, Stack, Text, Tooltip } from '@mantine/core';
+import { IconFolderPlus, IconMinus, IconPlus, IconStarFilled } from '@tabler/icons-react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { ExtractedMetadata, FileRecord } from '@shared/types';
 import type { PrintBed } from '@shared/preferences';
@@ -11,6 +11,8 @@ import { formatBytes } from '../util/format';
 import { extColor } from '@shared/ext-colors';
 import { ipc } from '../ipc-client';
 import { FolderTile } from './FolderTile';
+import { createPortal } from 'react-dom';
+import { GLASS_POPOVER_CLASS } from './Glasseffect';
 import type { FolderTreeNode } from '@shared/types';
 
 export interface TileClickModifiers {
@@ -36,6 +38,14 @@ interface Props {
   folders?: FolderTreeNode[];
   onOpenFolder?: (path: string) => void;
   onFolderContextMenu?: (node: FolderTreeNode, x: number, y: number) => void;
+  /** Opens the rename dialog for a folder (slow second click, F2). */
+  onRenameFolder?: (path: string) => void;
+  /** Called when a folder gets selected, so no file stays selected next to it. */
+  onClearFileSelection?: () => void;
+  /** Replaces the whole file selection (used by the drag-a-box selection). */
+  onSelectFiles?: (ids: number[]) => void;
+  /** Creates a new folder in the folder you are in (right-click on empty space). */
+  onNewFolder?: () => void;
   /** Navigation (back / forward / up / path) shown in the bar above the files. */
   headerNav?: React.ReactNode;
 }
@@ -47,11 +57,70 @@ const TILE_PADDING = 6;
 const LABEL_HEIGHT = 34;
 const TOOLBAR_HEIGHT = 32;
 
+// A second click on an already selected folder renames it, but only after this
+// many ms (so a real double click still opens the folder instead).
+const DOUBLE_CLICK_MS = 500;
+
 const THUMB_SIZE_MIN = 80;
 const THUMB_SIZE_MAX = 256;
 const THUMB_SIZE_STEP = 24;
 const DEFAULT_THUMB_SIZE = 128;
 const THUMB_SIZE_STORAGE_KEY = 'wh3d:thumbSize';
+
+const noop = (): void => {};
+
+interface GridGeometry {
+  columns: number;
+  tileWidth: number;
+  columnGap: number;
+  tileHeight: number;
+  total: number;
+}
+
+/** Index of the tile under a point (content coordinates), or -1 for empty space. */
+function gridItemAt(g: GridGeometry, x: number, y: number): number {
+  if (y < 0) return -1;
+  const rowH = g.tileHeight + TILE_GAP;
+  const row = Math.floor(y / rowH);
+  if (y - row * rowH > g.tileHeight) return -1;
+  for (let col = 0; col < g.columns; col++) {
+    const x0 = PADDING_X + col * (g.tileWidth + g.columnGap);
+    if (x >= x0 && x <= x0 + g.tileWidth) {
+      const idx = row * g.columns + col;
+      return idx < g.total ? idx : -1;
+    }
+  }
+  return -1;
+}
+
+/** Indexes of every tile a box touches (content coordinates). */
+function gridItemsInBox(
+  g: GridGeometry,
+  xa: number,
+  ya: number,
+  xb: number,
+  yb: number
+): number[] {
+  const minX = Math.min(xa, xb);
+  const maxX = Math.max(xa, xb);
+  const minY = Math.min(ya, yb);
+  const maxY = Math.max(ya, yb);
+  const rowH = g.tileHeight + TILE_GAP;
+  const out: number[] = [];
+  const rowFrom = Math.max(0, Math.floor(minY / rowH));
+  const rowTo = Math.floor(maxY / rowH);
+  for (let row = rowFrom; row <= rowTo; row++) {
+    const top = row * rowH;
+    if (top > maxY || top + g.tileHeight < minY) continue;
+    for (let col = 0; col < g.columns; col++) {
+      const x0 = PADDING_X + col * (g.tileWidth + g.columnGap);
+      if (x0 > maxX || x0 + g.tileWidth < minX) continue;
+      const idx = row * g.columns + col;
+      if (idx < g.total) out.push(idx);
+    }
+  }
+  return out;
+}
 
 function clampThumbSize(value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_THUMB_SIZE;
@@ -83,6 +152,10 @@ export function ThumbGrid({
   folders,
   onOpenFolder,
   onFolderContextMenu,
+  onRenameFolder,
+  onClearFileSelection,
+  onSelectFiles,
+  onNewFolder,
   headerNav
 }: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -142,12 +215,303 @@ export function ThumbGrid({
     virtualizer.measure();
   }, [tileHeight, columns, virtualizer]);
 
+  // --- Folder tile selection (Explorer style) -------------------------------
+  // Click = select, slow second click = rename, F2 = rename, Enter or double
+  // click = open. The selection is only valid while that folder is in the list.
+  // Selected folder tiles (a set, so a drag-box can select several). A single
+  // selected folder is the "active" one: F2 / Enter / slow click act on it.
+  const [selFolderSet, setSelFolderSet] = useState<ReadonlySet<string>>(() => new Set<string>());
+  const selFolderPath = selFolderSet.size === 1 ? ([...selFolderSet][0] as string) : null;
+  const setSelFolderPath = useCallback(
+    (p: string | null) => setSelFolderSet(p === null ? new Set<string>() : new Set<string>([p])),
+    []
+  );
+  // Set while a drag-box changes the file selection, so the effect below does
+  // not wipe the folders the same box just selected.
+  const suppressFolderClearRef = useRef(false);
+  const lastFolderClickRef = useRef(0);
+  const renameTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeFolderPath =
+    selFolderPath !== null && folderList.some((f) => f.path === selFolderPath)
+      ? selFolderPath
+      : null;
+
+  const cancelRenameTimer = useCallback(() => {
+    if (renameTimerRef.current) {
+      clearTimeout(renameTimerRef.current);
+      renameTimerRef.current = null;
+    }
+  }, []);
+
+  // A file got selected: the folder highlight goes away.
+  useEffect(() => {
+    if (suppressFolderClearRef.current) {
+      suppressFolderClearRef.current = false;
+      return;
+    }
+    if (selectedIds.size > 0) {
+      setSelFolderPath(null);
+      cancelRenameTimer();
+    }
+  }, [selectedIds, cancelRenameTimer]);
+
+  // Another folder / list: drop any pending rename.
+  useEffect(() => {
+    cancelRenameTimer();
+  }, [folders, cancelRenameTimer]);
+
+  useEffect(() => cancelRenameTimer, [cancelRenameTimer]);
+
+  const handleFolderClick = useCallback(
+    (path: string) => {
+      const now = Date.now();
+      const sinceLast = now - lastFolderClickRef.current;
+      lastFolderClickRef.current = now;
+      cancelRenameTimer();
+      if (activeFolderPath === path && sinceLast > DOUBLE_CLICK_MS) {
+        // Already selected and this is a slow second click: rename, unless a
+        // double click follows (that cancels this timer and opens instead).
+        renameTimerRef.current = setTimeout(() => {
+          renameTimerRef.current = null;
+          onRenameFolder?.(path);
+        }, DOUBLE_CLICK_MS);
+        return;
+      }
+      setSelFolderPath(path);
+      onClearFileSelection?.();
+    },
+    [activeFolderPath, cancelRenameTimer, onRenameFolder, onClearFileSelection]
+  );
+
+  const handleFolderDoubleClick = useCallback(
+    (path: string) => {
+      cancelRenameTimer();
+      lastFolderClickRef.current = 0;
+      onOpenFolder?.(path);
+    },
+    [cancelRenameTimer, onOpenFolder]
+  );
+
+  // F2 = rename the selected folder, Enter = open it.
+  useEffect(() => {
+    if (!activeFolderPath) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
+      const target = e.target as HTMLElement | null;
+      if (target) {
+        const tag = target.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable) {
+          return;
+        }
+        if (target.closest('[role="dialog"]')) return;
+      }
+      if (e.key === 'F2') {
+        e.preventDefault();
+        cancelRenameTimer();
+        onRenameFolder?.(activeFolderPath);
+      } else if (e.key === 'Enter') {
+        const tag = target?.tagName;
+        if (tag === 'BUTTON' || tag === 'A') return;
+        e.preventDefault();
+        cancelRenameTimer();
+        onOpenFolder?.(activeFolderPath);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [activeFolderPath, cancelRenameTimer, onRenameFolder, onOpenFolder]);
+  // --------------------------------------------------------------------------
+
+  // --- Marquee (drag a box) selection ----------------------------------------
+  // Hold the left button on empty space and drag: every folder / file tile the
+  // box touches gets selected. Ctrl or Shift keeps the current selection and
+  // adds to it. Tile positions come from the grid math (the list is virtualized).
+  // The box is moved by direct style updates (no React state), so dragging stays smooth.
+  const marqueeElRef = useRef<HTMLDivElement | null>(null);
+  // While dragging only this local highlight changes. The real selection (preview,
+  // metadata panel, ...) is applied once, when the mouse button is released.
+  const [dragFileIds, setDragFileIds] = useState<ReadonlySet<number> | null>(null);
+  const geomRef = useRef({
+    columns,
+    tileWidth,
+    columnGap,
+    tileHeight,
+    folderList,
+    files,
+    selectedIds,
+    selFolderSet
+  });
+  geomRef.current = {
+    columns,
+    tileWidth,
+    columnGap,
+    tileHeight,
+    folderList,
+    files,
+    selectedIds,
+    selFolderSet
+  };
+  const onSelectFilesRef = useRef(onSelectFiles);
+  onSelectFilesRef.current = onSelectFiles;
+
+
+  const handleGridMouseDown = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      if (e.button !== 0) return;
+      const el = scrollRef.current;
+      if (!el) return;
+      const r0 = el.getBoundingClientRect();
+      // Pressing on a scrollbar is not a selection.
+      if (e.clientX - r0.left >= el.clientWidth || e.clientY - r0.top >= el.clientHeight) return;
+      const geom = (): GridGeometry => {
+        const gm = geomRef.current;
+        return {
+          columns: gm.columns,
+          tileWidth: gm.tileWidth,
+          columnGap: gm.columnGap,
+          tileHeight: gm.tileHeight,
+          total: gm.folderList.length + gm.files.length
+        };
+      };
+      const startX = e.clientX - r0.left + el.scrollLeft;
+      const startY = e.clientY - r0.top + el.scrollTop;
+      // Pressing on a tile keeps its normal behavior (click, drag the file out).
+      if (gridItemAt(geom(), startX, startY) >= 0) return;
+
+      e.preventDefault(); // no text selection while dragging
+      const active = document.activeElement as HTMLElement | null;
+      if (active && active !== document.body) active.blur();
+
+      const additive = e.ctrlKey || e.metaKey || e.shiftKey;
+      const baseFiles: number[] = additive ? [...geomRef.current.selectedIds] : [];
+      const baseFolders: string[] = additive ? [...geomRef.current.selFolderSet] : [];
+      const pressX = e.clientX;
+      const pressY = e.clientY;
+      let lastX = pressX;
+      let lastY = pressY;
+      let dragging = false;
+      let lastSig = '';
+      let dragIds: number[] | null = null;
+
+      const update = () => {
+        if (!dragging) {
+          if (Math.abs(lastX - pressX) < 4 && Math.abs(lastY - pressY) < 4) return;
+          dragging = true;
+          cancelRenameTimer();
+        }
+        const r = el.getBoundingClientRect();
+        const x2 = Math.max(0, lastX - r.left + el.scrollLeft);
+        const y2 = Math.max(0, lastY - r.top + el.scrollTop);
+        const box = marqueeElRef.current;
+        if (box) {
+          box.style.display = 'block';
+          box.style.left = Math.min(startX, x2) + 'px';
+          box.style.top = Math.min(startY, y2) + 'px';
+          box.style.width = Math.abs(x2 - startX) + 'px';
+          box.style.height = Math.abs(y2 - startY) + 'px';
+        }
+        const gm = geomRef.current;
+        const folderCountNow = gm.folderList.length;
+        const folders = new Set<string>(baseFolders);
+        const fileIds = new Set<number>(baseFiles);
+        for (const i of gridItemsInBox(geom(), startX, startY, x2, y2)) {
+          if (i < folderCountNow) folders.add(gm.folderList[i].path);
+          else fileIds.add(gm.files[i - folderCountNow].id);
+        }
+        const sig = [...folders].join('|') + '#' + [...fileIds].join(',');
+        if (sig === lastSig) return;
+        lastSig = sig;
+        setSelFolderSet(folders);
+        setDragFileIds(fileIds);
+        dragIds = [...fileIds];
+      };
+
+      const onMove = (ev: MouseEvent) => {
+        lastX = ev.clientX;
+        lastY = ev.clientY;
+        update();
+      };
+      // Dragging near the top / bottom edge scrolls the list.
+      const timer = setInterval(() => {
+        if (!dragging) return;
+        const r = el.getBoundingClientRect();
+        const before = el.scrollTop;
+        if (lastY < r.top + 28) el.scrollTop -= 16;
+        else if (lastY > r.bottom - 28) el.scrollTop += 16;
+        if (el.scrollTop !== before) update();
+      }, 30);
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        clearInterval(timer);
+        if (marqueeElRef.current) marqueeElRef.current.style.display = 'none';
+        if (dragging && dragIds && onSelectFilesRef.current) {
+          // Apply the real selection once, now that the button is released.
+          suppressFolderClearRef.current = true;
+          onSelectFilesRef.current(dragIds);
+        }
+        setDragFileIds(null);
+        // Plain click on empty space: reset the whole selection (folders and files).
+        if (!dragging && !additive) {
+          setSelFolderPath(null);
+          onSelectFilesRef.current?.([]);
+        }
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    },
+    [cancelRenameTimer, setSelFolderPath]
+  );
+  // --------------------------------------------------------------------------
+
+  // --- Right-click on empty space: New folder ---------------------------------
+  const [emptyMenu, setEmptyMenu] = useState({ opened: false, x: 0, y: 0 });
+  const handleGridContextMenu = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      const el = scrollRef.current;
+      if (!el || !onNewFolder) return;
+      const r = el.getBoundingClientRect();
+      const gm = geomRef.current;
+      const hit = gridItemAt(
+        {
+          columns: gm.columns,
+          tileWidth: gm.tileWidth,
+          columnGap: gm.columnGap,
+          tileHeight: gm.tileHeight,
+          total: gm.folderList.length + gm.files.length
+        },
+        e.clientX - r.left + el.scrollLeft,
+        e.clientY - r.top + el.scrollTop
+      );
+      if (hit >= 0) return; // a tile handles its own menu
+      e.preventDefault();
+      setEmptyMenu({ opened: true, x: e.clientX, y: e.clientY });
+    },
+    [onNewFolder]
+  );
+  // --------------------------------------------------------------------------
+
   const canDecrease = thumbSize > THUMB_SIZE_MIN;
   const canIncrease = thumbSize < THUMB_SIZE_MAX;
 
   return (
     <Stack gap={0} h="100%">
       <style>{`
+        .gam-zoom-btn {
+          border: none !important;
+          background: transparent !important;
+          box-shadow: none !important;
+          color: var(--mantine-color-dimmed) !important;
+          transition: color 200ms ease;
+        }
+        .gam-zoom-btn:hover:not(:disabled):not([data-disabled]) {
+          color: var(--mantine-color-gray-0) !important;
+          background: transparent !important;
+        }
+        .gam-zoom-btn:disabled,
+        .gam-zoom-btn[data-disabled] {
+          opacity: 0.35;
+        }
         :root[data-gam-glass='off'] .gam-ext-badge {
           -webkit-backdrop-filter: none !important;
           backdrop-filter: none !important;
@@ -171,7 +535,8 @@ export function ThumbGrid({
         <Text size="xs" c="dimmed">
           {folderCount > 0 && `${folderCount} ${folderCount === 1 ? 'folder' : 'folders'}${'\u00b7'.length ? ' \u00b7 ' : ''}`}
           {files.length} {files.length === 1 ? 'item' : 'items'}
-          {selectedIds.size > 0 && ` · ${selectedIds.size} selected`}
+          {(dragFileIds ?? selectedIds).size + folderList.filter((f) => selFolderSet.has(f.path)).length > 0 &&
+            ` \u00b7 ${(dragFileIds ?? selectedIds).size + folderList.filter((f) => selFolderSet.has(f.path)).length} selected`}
         </Text>
         <div
           style={{
@@ -191,7 +556,7 @@ export function ThumbGrid({
             <Tooltip label="Smaller thumbnails">
               <ActionIcon
                 size="sm"
-                variant="default"
+                variant="transparent" className="gam-zoom-btn"
                 onClick={() => setThumbSize(thumbSize - THUMB_SIZE_STEP)}
                 disabled={!canDecrease}
                 aria-label="Decrease thumbnail size"
@@ -205,7 +570,7 @@ export function ThumbGrid({
             <Tooltip label="Larger thumbnails">
               <ActionIcon
                 size="sm"
-                variant="default"
+                variant="transparent" className="gam-zoom-btn"
                 onClick={() => setThumbSize(thumbSize + THUMB_SIZE_STEP)}
                 disabled={!canIncrease}
                 aria-label="Increase thumbnail size"
@@ -219,6 +584,8 @@ export function ThumbGrid({
 
       <div
         ref={setScrollRef}
+        onMouseDown={handleGridMouseDown}
+        onContextMenu={handleGridContextMenu}
         style={{ flex: 1, minHeight: 0, overflow: 'auto', position: 'relative' }}
       >
         {totalItems === 0 ? (
@@ -267,18 +634,46 @@ export function ThumbGrid({
                     boxSizing: 'border-box'
                   }}
                 >
-                  {rowFolders.map((f) => (
-                    <FolderTile
-                      key={'folder:' + f.path}
-                      node={f}
-                      tileHeight={tileHeight}
-                      onOpen={() => onOpenFolder?.(f.path)}
-                      onContextMenu={(e) => {
-                        e.preventDefault();
-                        onFolderContextMenu?.(f, e.clientX, e.clientY);
-                      }}
-                    />
-                  ))}
+                  {rowFolders.map((f) => {
+                    const folderSelected = selFolderSet.has(f.path);
+                    return (
+                      <div
+                        key={'folder:' + f.path}
+                        style={{ position: 'relative', height: tileHeight }}
+                        onClick={() => handleFolderClick(f.path)}
+                        onDoubleClick={() => handleFolderDoubleClick(f.path)}
+                      >
+                        <FolderTile
+                          node={f}
+                          tileHeight={tileHeight}
+                          onOpen={noop}
+                          onContextMenu={(e) => {
+                            e.preventDefault();
+                            cancelRenameTimer();
+                            setSelFolderPath(f.path);
+                            onClearFileSelection?.();
+                            onFolderContextMenu?.(f, e.clientX, e.clientY);
+                          }}
+                        />
+                        {folderSelected && (
+                          <div
+                            aria-hidden
+                            style={{
+                              position: 'absolute',
+                              inset: 0,
+                              borderRadius: 6,
+                              boxSizing: 'border-box',
+                              border: `${TILE_BORDER}px solid var(--mantine-color-indigo-3)`,
+                              background:
+                                'color-mix(in srgb, var(--mantine-color-indigo-4) 16%, transparent)',
+                              pointerEvents: 'none',
+                              zIndex: 1
+                            }}
+                          />
+                        )}
+                      </div>
+                    );
+                  })}
                   {rowItems.map((file) => {
                     const meta = parseFileMeta(file.metadataJson);
                     return (
@@ -286,7 +681,7 @@ export function ThumbGrid({
                         key={file.id}
                         file={file}
                         thumbVersion={thumbVersions.get(file.id) ?? 0}
-                        selected={selectedIds.has(file.id)}
+                        selected={(dragFileIds ?? selectedIds).has(file.id)}
                         isPrimary={file.id === primaryId}
                         tileHeight={tileHeight}
                         bedFitProblem={
@@ -325,7 +720,64 @@ export function ThumbGrid({
             })}
           </div>
         )}
+        <div
+          ref={marqueeElRef}
+          aria-hidden
+          style={{
+            display: 'none',
+            position: 'absolute',
+            border: '1px solid var(--mantine-color-indigo-3)',
+            background: 'color-mix(in srgb, var(--mantine-color-indigo-4) 18%, transparent)',
+            borderRadius: 2,
+            pointerEvents: 'none',
+            zIndex: 5
+          }}
+        />
       </div>
+      {createPortal(
+        <Menu
+          opened={emptyMenu.opened}
+          onChange={(open) => {
+            if (!open) setEmptyMenu((m) => ({ ...m, opened: false }));
+          }}
+          position="bottom-start"
+          floatingStrategy="fixed"
+          offset={0}
+          withinPortal
+          shadow="md"
+          width={230}
+        >
+          <Menu.Target>
+            <div
+              style={{
+                position: 'fixed',
+                top: emptyMenu.y,
+                left: emptyMenu.x,
+                width: 1,
+                height: 1,
+                pointerEvents: 'none'
+              }}
+            />
+          </Menu.Target>
+          <Menu.Dropdown className={GLASS_POPOVER_CLASS}>
+            <Menu.Item
+              leftSection={<IconFolderPlus size={14} />}
+              rightSection={
+                <Text size="xs" c="dimmed">
+                  Ctrl+Shift+N
+                </Text>
+              }
+              onClick={() => {
+                setEmptyMenu((m) => ({ ...m, opened: false }));
+                onNewFolder?.();
+              }}
+            >
+              New folder
+            </Menu.Item>
+          </Menu.Dropdown>
+        </Menu>,
+        document.body
+      )}
     </Stack>
   );
 }

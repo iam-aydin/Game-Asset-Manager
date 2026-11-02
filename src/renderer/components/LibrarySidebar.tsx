@@ -18,6 +18,7 @@ import {
   IconFolderPlus,
   IconPencil,
   IconRefresh,
+  IconFolderSearch,
   IconTrash,
   IconTrashX
 } from '@tabler/icons-react';
@@ -31,6 +32,8 @@ interface Props {
   onRename: (id: string, name: string) => void;
   onReveal: (id: string) => void;
   onRescan: (id: string) => void;
+  onReload?: (id: string) => void;
+  onSetPath?: (id: string) => void;
   onRemove: (id: string) => void;
   onRemoveAndDeleteCache: (id: string) => void;
 }
@@ -47,7 +50,8 @@ export function LibrarySidebar({
   onAdd,
   onRename,
   onReveal,
-  onRescan,
+  onReload,
+  onSetPath,
   onRemove,
   onRemoveAndDeleteCache
 }: Props) {
@@ -81,7 +85,8 @@ export function LibrarySidebar({
               onSelect={() => onSelect(lib.id)}
               onRename={() => setModal({ kind: 'rename', library: lib })}
               onReveal={() => onReveal(lib.id)}
-              onRescan={() => onRescan(lib.id)}
+              onReload={() => onReload?.(lib.id)}
+              onSetPath={() => onSetPath?.(lib.id)}
               onRemove={() => onRemove(lib.id)}
               onRemoveAndDeleteCache={() => setModal({ kind: 'delete-cache', library: lib })}
             />
@@ -118,7 +123,8 @@ function LibraryRow({
   onSelect,
   onRename,
   onReveal,
-  onRescan,
+  onReload,
+  onSetPath,
   onRemove,
   onRemoveAndDeleteCache
 }: {
@@ -127,7 +133,8 @@ function LibraryRow({
   onSelect: () => void;
   onRename: () => void;
   onReveal: () => void;
-  onRescan: () => void;
+  onReload: () => void;
+  onSetPath: () => void;
   onRemove: () => void;
   onRemoveAndDeleteCache: () => void;
 }) {
@@ -200,12 +207,11 @@ function LibraryRow({
           >
             Show in Folder
           </Menu.Item>
-          <Menu.Item
-            leftSection={<IconRefresh size={14} />}
-            onClick={onRescan}
-            disabled={!library.online}
-          >
-            Rescan
+          <Menu.Item leftSection={<IconRefresh size={14} />} onClick={onReload}>
+${1}Refresh
+          </Menu.Item>
+          <Menu.Item leftSection={<IconFolderSearch size={14} />} onClick={onSetPath}>
+            Change Directory
           </Menu.Item>
           <Menu.Divider />
           <Menu.Item leftSection={<IconTrash size={14} />} onClick={onRemove}>

@@ -58,6 +58,14 @@ const api: IpcApi & {
   ctxMenuAction: (action: unknown) => void;
   closeContextMenu: () => void;
   onContextMenuAction: (handler: (action: unknown) => void) => () => void;
+  toolsInfo: (libraryId: string, fileId: number) => Promise<any>;
+  toolsPlan: (libraryId: string, fileId: number, opts: unknown) => Promise<any>;
+  toolsRun: (jobId: string, libraryId: string, fileId: number, opts: unknown) => Promise<any>;
+  toolsCancel: (jobId: string) => Promise<void>;
+  toolsReveal: (path: string) => Promise<void>;
+  onToolsProgress: (handler: (p: any) => void) => () => void;
+  reloadLibrary: (id: string) => Promise<any>;
+  setLibraryPath: (id: string) => Promise<any>;
 } = {
   pickFolder: () => ipcRenderer.invoke(IPC.pickFolder) as Promise<PickFolderResult>,
   listLibraries: () => ipcRenderer.invoke(IPC.listLibraries) as Promise<LibrarySummary[]>,
@@ -69,7 +77,10 @@ const api: IpcApi & {
     ipcRenderer.invoke(IPC.renameLibrary, req) as Promise<RenameLibraryResult>,
   revealLibrary: (id: string) =>
     ipcRenderer.invoke(IPC.revealLibrary, id) as Promise<RevealLibraryResult>,
+  reloadLibrary: (id: string) => ipcRenderer.invoke(IPC.reloadLibrary, id) as Promise<any>,
+  setLibraryPath: (id: string) => ipcRenderer.invoke(IPC.setLibraryPath, id) as Promise<any>,
 
+  createFolder: (libraryId: string, parentPath: string) => ipcRenderer.invoke('folders:create', libraryId, parentPath),
   renameFolder: (req: RenameFolderRequest) =>
     ipcRenderer.invoke(IPC.renameFolder, req) as Promise<RenameFolderResult>,
   revealFolder: (libraryId: string, folderPath: string) =>
@@ -249,6 +260,21 @@ batchRename: (libraryId: string, plan: BatchRenameItem[]) =>
     >,
   makePlayableVideo: (libraryId: string, fileId: number) =>
     ipcRenderer.invoke('video:makePlayable', libraryId, fileId) as Promise<string | null>,
+  toolsInfo: (libraryId: string, fileId: number) =>
+    ipcRenderer.invoke('tools:info', libraryId, fileId) as Promise<any>,
+  toolsPlan: (libraryId: string, fileId: number, opts: unknown) =>
+    ipcRenderer.invoke('tools:plan', libraryId, fileId, opts) as Promise<any>,
+  toolsRun: (jobId: string, libraryId: string, fileId: number, opts: unknown) =>
+    ipcRenderer.invoke('tools:run', jobId, libraryId, fileId, opts) as Promise<any>,
+  toolsCancel: (jobId: string) => ipcRenderer.invoke('tools:cancel', jobId) as Promise<void>,
+  toolsReveal: (path: string) => ipcRenderer.invoke('tools:reveal', path) as Promise<void>,
+  onToolsProgress: (handler: (p: any) => void) => {
+    const listener = (_e: IpcRendererEvent, p: unknown) => handler(p);
+    ipcRenderer.on('tools:progress', listener);
+    return () => {
+      ipcRenderer.off('tools:progress', listener);
+    };
+  },
   setTitleBarTheme: (theme: { color: string; symbolColor: string }) =>
     ipcRenderer.invoke('window:setTitleBarTheme', theme) as Promise<void>,
   setMiniMode: (on: boolean) =>

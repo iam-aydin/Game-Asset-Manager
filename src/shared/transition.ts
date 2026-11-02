@@ -839,3 +839,70 @@ export function installFullscreenChrome(): () => void {
     root.removeAttribute('data-gam-fs-anim');
   };
 }
+
+// --- 8. Tools window: pop-in + glass buttons rising in (renderer) ---------
+// ToolsDialog opens with a soft pop (Mantine "pop" transition using the values
+// below), then its buttons rise in one after another (blur + fade + slide).
+// ToolsDialog renders <style>{toolsDialogCss()}</style> itself.
+
+export const TOOLS_DIALOG = {
+  /** Window pop in / out. */
+  durationMs: 220,
+  cssEasing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+  /** Buttons: delay before the first one, gap between them, and how they enter. */
+  buttonDelayMs: 140,
+  buttonStaggerMs: 70,
+  buttonRiseMs: 340,
+  buttonRisePx: 8,
+  buttonBlurPx: 4,
+  buttonStartScale: 0.9
+} as const;
+
+export function toolsDialogCss(): string {
+  const {
+    cssEasing, buttonDelayMs, buttonStaggerMs, buttonRiseMs,
+    buttonRisePx, buttonBlurPx, buttonStartScale
+  } = TOOLS_DIALOG;
+  const delays = [0, 1, 2, 3]
+    .map(
+      (i) =>
+        `.gam-tools-btn.gam-tools-btn[data-i='${i}'] { animation-delay: ${buttonDelayMs + i * buttonStaggerMs}ms; }`
+    )
+    .join('\n    ');
+  return `
+    @keyframes gam-tools-btn-in {
+      from { opacity: 0; transform: translateY(${buttonRisePx}px) scale(${buttonStartScale}); filter: blur(${buttonBlurPx}px); }
+      to   { opacity: 1; transform: none; filter: blur(0px); }
+    }
+    /* Doubled class so it beats the glass action class (width: 100%). */
+    .gam-tools-btn.gam-tools-btn {
+      width: auto;
+      min-width: 116px;
+      padding: 9px 24px;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      user-select: none;
+      animation: gam-tools-btn-in ${buttonRiseMs}ms ${cssEasing} backwards;
+      transition: transform 120ms ease, filter 120ms ease, opacity 120ms ease,
+        background 140ms ease, border-color 140ms ease;
+    }
+    ${delays}
+    .gam-tools-btn.gam-tools-btn:hover:not(:disabled) {
+      transform: translateY(-1px) scale(1.04);
+      filter: brightness(1.15);
+    }
+    .gam-tools-btn.gam-tools-btn:active:not(:disabled) {
+      transform: scale(0.96);
+      filter: brightness(0.95);
+    }
+    .gam-tools-btn.gam-tools-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+      filter: saturate(0.6);
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .gam-tools-btn.gam-tools-btn { animation: none; transition: none; }
+    }
+  `;
+}

@@ -29,10 +29,12 @@ import {
   IconRepeat
 } from '@tabler/icons-react';
 import { PlayerGlassStyles, PLAYER_GLASS_CLASS, PLAYER_GLASS_POPOVER_CLASS } from './PlayerGlass';
+import { GLASS_POPOVER_CLASS, GLASS_ACTION_CLASS } from './Glasseffect';
 import { MiniIcon } from './PlayerIcons';
 import { useVerticalDragGesture } from '../util/gestures';
 import { MediaMenuSections, OutputDeviceList } from './PlayerMediaMenu';
 import { PlayerContextMenu, OptionList } from './PlayerContextMenu';
+import { ToolsDialog, type ToolKind } from './ToolsDialog';
 import { FontList, resolveSubFont } from './SubtitleFonts';
 import { applyOutput, outputStore, useAudioOutput } from './audioOutput';
 import { parseVtt, cueAt, type SubCue } from './subtitleCues';
@@ -318,6 +320,24 @@ const videoPrefsStore = {
   }
 };
 
+// ---- Anime4K upscaler (WebGPU). Off by default, saved between launches. ----
+type UpMode = 'off' | 'A' | 'B' | 'C';
+interface UpCfg {
+  mode: UpMode;
+  hq: boolean; // true = the heavier AA / BB / CA presets
+}
+const UP_KEY = 'gam:anime4k';
+const loadUp = (): UpCfg => {
+  try {
+    const p = JSON.parse(localStorage.getItem(UP_KEY) ?? 'null');
+    if (p && ['off', 'A', 'B', 'C'].includes(p.mode)) return { mode: p.mode, hq: !!p.hq };
+  } catch {
+    // ignore
+  }
+  return { mode: 'off', hq: false };
+};
+const HAS_WEBGPU = typeof navigator !== 'undefined' && !!(navigator as any).gpu;
+
 // ---- Web Audio (only created once an audio effect is actually used) --------
 
 let sharedAudioCtx: AudioContext | null = null;
@@ -595,6 +615,7 @@ export function VideoPlayer({
   const [subIndex, setSubIndex] = useState(-1); // -1 = off; on by default when a file exists
   const [subsOpen, setSubsOpen] = useState(false); // (kept so older references still compile)
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
+  const [toolsDlg, setToolsDlg] = useState<ToolKind | null>(null);
   useEffect(() => {
     let dead = false;
     const api = (window as any).gam;
@@ -681,7 +702,7 @@ export function VideoPlayer({
   }, [audioOut.deviceId]);
 
   const [confirmResetOpen, setConfirmResetOpen] = useState(false);
-  resetOpenRef.current = confirmResetOpen;
+  resetOpenRef.current = confirmResetOpen || toolsDlg !== null;
 
   // ---- Play / pause circle + status pill (shared with AudioPlayer) ----
   // See PlaybackIndicators.tsx. <PlaybackIndicators api={pi} /> renders them.
@@ -815,6 +836,118 @@ export function VideoPlayer({
   // Room kept under the video for the bar. 0 when the bar floats over the video
   // (overlayControls, or compact), so the video grows smoothly into that space.
   const reservedBottom = overlayControls || compact ? 0 : barH;
+
+  // ---- Anime4K: a canvas draws the upscaled frames over the (hidden) <video> ----
+  // The <video> keeps doing playback, audio, speed and pitch. anime4k-webgpu's render()
+  // has no stop function, so its frame loop is cut by blocking the video's
+  // requestVideoFrameCallback while this effect is torn down.
+  const [up, setUp] = useState<UpCfg>(loadUp);
+  const [upActive, setUpActive] = useState(false);
+  const upCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const upOn = HAS_WEBGPU && up.mode !== 'off';
+  useEffect(() => {
+    try {
+      localStorage.setItem(UP_KEY, JSON.stringify(up));
+    } catch {
+      // ignore
+    }
+  }, [up]);
+  useEffect(() => {
+    setUpActive(false);
+    const v = videoRef.current;
+    const c = upCanvasRef.current;
+    if (!upOn || !v || !c) return undefined;
+    let alive = true;
+    let dev: GPUDevice | null = null;
+    const orig = v.requestVideoFrameCallback.bind(v);
+    (v as any).requestVideoFrameCallback = (cb: VideoFrameRequestCallback) =>
+      alive ? orig(cb) : 0;
+    const fail = (msg: string) => {
+      if (!alive) return;
+      alive = false;
+      console.error('[Anime4K] turned off:', msg);
+      setUpActive(false);
+      setUp((p) => ({ ...p, mode: 'off' }));
+      flashHud({ kind: 'reset', text: 'Upscaler failed (see console)' });
+    };
+    const RELEVANT = /anime4k|webgpu|copyExternalImageToTexture|origin|tainted/i;
+    const onErr = (ev: ErrorEvent) => {
+      if (RELEVANT.test(ev.message ?? '')) fail(ev.message);
+    };
+    const onRej = (ev: PromiseRejectionEvent) => {
+      const m = String((ev.reason && ev.reason.message) ?? ev.reason ?? '');
+      if (RELEVANT.test(m)) fail(m);
+    };
+    window.addEventListener('error', onErr);
+    window.addEventListener('unhandledrejection', onRej);
+    void (async () => {
+      try {
+        if (!v.videoWidth) {
+          await new Promise<void>((res) =>
+            v.addEventListener('loadedmetadata', () => res(), { once: true })
+          );
+        }
+        if (!alive) return;
+        const vw = v.videoWidth;
+        const vh = v.videoHeight;
+        if (!vw || !vh) throw new Error('video has no size');
+        // Output = 2x the video, never above 4K.
+        const k = Math.max(1, Math.min(2, 3840 / vw, 2160 / vh));
+        c.width = Math.round(vw * k);
+        c.height = Math.round(vh * k);
+        const lib: any = await import('anime4k-webgpu');
+        if (!alive) return;
+        const names = { A: 'ModeAA', B: 'ModeBB', C: 'ModeCA' } as const;
+        const letter = up.mode as 'A' | 'B' | 'C';
+        const Mode = lib[up.hq ? names[letter] : `Mode${letter}`];
+        const gpuProto = (window as any).GPUAdapter?.prototype;
+        const origReq = gpuProto?.requestDevice;
+        if (gpuProto && origReq) {
+          gpuProto.requestDevice = async function (this: any, ...args: any[]) {
+            gpuProto.requestDevice = origReq;
+            const d = await origReq.apply(this, args);
+            dev = d;
+            if (!alive) d.destroy();
+            return d;
+          };
+        }
+        await lib.render({
+          video: v,
+          canvas: c,
+          pipelineBuilder: (device: GPUDevice, inputTexture: GPUTexture) => [
+            new Mode({
+              device,
+              inputTexture,
+              nativeDimensions: { width: vw, height: vh },
+              targetDimensions: { width: c.width, height: c.height }
+            })
+          ]
+        });
+        if (!alive) return;
+        // Show the canvas only once its first frame has been drawn.
+        orig(() => {
+          if (alive) setUpActive(true);
+        });
+        if (v.paused) v.currentTime = v.currentTime; // nudge so a paused video draws one frame
+      } catch (err) {
+        fail(String((err as Error)?.message ?? err));
+      }
+    })();
+    return () => {
+      alive = false;
+      window.removeEventListener('error', onErr);
+      window.removeEventListener('unhandledrejection', onRej);
+      delete (v as any).requestVideoFrameCallback;
+      window.setTimeout(() => {
+        try {
+          dev?.destroy();
+        } catch {
+          // ignore
+        }
+      }, 150);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [upOn, up.mode, up.hq, fileId, fallbackSrc]);
 
   // Scale / zoom / pan / stretch. Session-only; each video opens at Fit.
   const [vz, setVz] = useState<VideoZoom>(DEFAULT_VZ);
@@ -1454,12 +1587,12 @@ export function VideoPlayer({
             setErrorDetail(null);
             setFallbackSrc(url);
           } else {
-            setError('This fileâ€™s codec isnâ€™t supported by the built-in player.');
+            setError('This file’s codec isn’t supported by the built-in player.');
             setIsBuffering(false);
           }
         })
         .catch(() => {
-          setError('This fileâ€™s codec isnâ€™t supported by the built-in player.');
+          setError('This file’s codec isn’t supported by the built-in player.');
           setIsBuffering(false);
         });
       return;
@@ -1534,6 +1667,9 @@ export function VideoPlayer({
       case 'afx':
         setA(a.partial);
         break;
+      case 'up':
+        setUp((p) => ({ ...p, ...a.partial }));
+        break;
       case 'afxReset':
         setAfx({ ...DEFAULT_AUDIO_FX });
         break;
@@ -1581,6 +1717,7 @@ export function VideoPlayer({
         },
         subPresets: SUB_PRESETS.map((p) => p.label),
         chromeHidden: !!chromeHidden,
+        up: HAS_WEBGPU ? { mode: up.mode, hq: up.hq } : undefined,
         pitchOn,
         defaults: {
           vfx: { ...DEFAULT_VIDEO_FX },
@@ -1717,7 +1854,7 @@ export function VideoPlayer({
               onSpeed={setSpeed}
               modular={modular}
               onModular={setModular}
-              extraActive={vfxActive || scaleActive || toneActive}
+              extraActive={vfxActive || scaleActive || toneActive || up.mode !== 'off'}
               opened={fxOpen}
               onOpenedChange={setFxOpen}
               watchRef={wrapperRef}
@@ -1897,6 +2034,42 @@ export function VideoPlayer({
 
                   <Divider my={4} />
 
+                  {HAS_WEBGPU && (
+                    <>
+                      <EffectSection
+                        title="Upscale (Anime4K)"
+                        open={acc.isOpen('up4k')}
+                        onToggle={() => acc.toggle('up4k')}
+                        active={up.mode !== 'off'}
+                        onReset={() => setUp({ mode: 'off', hq: false })}
+                      >
+                        <GlassSegmented
+                          value={up.mode}
+                          onChange={(m) => setUp((p) => ({ ...p, mode: m as UpMode }))}
+                          data={[
+                            { value: 'off', label: 'Off' },
+                            { value: 'C', label: up.hq ? 'Very High' : 'Low' },
+                            { value: 'B', label: up.hq ? 'Ultra' : 'Mid' },
+                            { value: 'A', label: up.hq ? 'Max' : 'High' }
+                          ]}
+                        />
+                        <Switch
+                          size="xs"
+                          label="Higher quality (slower)"
+                          checked={up.hq}
+                          onChange={(e) => {
+                            const v = e.currentTarget.checked;
+                            setUp((p) => ({ ...p, hq: v }));
+                          }}
+                        />
+                        <Text size="10px" c="dimmed">
+                          For anime and cartoons. Low = light touch, High = strongest cleanup (best for blurry sources). Heavy on the GPU.
+                        </Text>
+                      </EffectSection>
+                      <Divider my={4} />
+                    </>
+                  )}
+
                   {/* Pitch, reverb + EQ. */}
                   <EffectSection
                     title="Audio Effects"
@@ -1933,7 +2106,7 @@ export function VideoPlayer({
             {/* Volume — hover the icon (or the open panel) and scroll.
                 Turns orange above 100%. */}
             <Popover
-              width={280}
+              width={380}
               position="top"
               shadow="md"
               withArrow={false}
@@ -1942,7 +2115,7 @@ export function VideoPlayer({
               portalProps={portalProps}
               transitionProps={instantClose ? { duration: 0, exitDuration: 0 } : undefined}
               middlewares={menuMiddlewares}
-              classNames={{ dropdown: PLAYER_GLASS_POPOVER_CLASS }}
+              classNames={{ dropdown: GLASS_POPOVER_CLASS }}
             >
               <Popover.Target>
                 <Box
@@ -1975,7 +2148,7 @@ export function VideoPlayer({
                 </Box>
               </Popover.Target>
               <Popover.Dropdown
-                style={{ padding: '8px 12px' }}
+                style={{ padding: '10px 14px' }}
                 onWheel={onWheelAdjust((dir) => adjustVolumeRelative(dir * 5))}
               >
                 <GlassScroll maxHeight={volumeMaxH - 20}>
@@ -2025,14 +2198,15 @@ export function VideoPlayer({
                       {volumePct}%
                     </Text>
                     <UnstyledButton
+                      className={GLASS_ACTION_CLASS}
+                      data-tone="soft"
+                      style={{ width: 'auto', padding: '3px 12px', fontSize: 11 }}
                       onClick={() => {
                         setIsMuted(false);
                         setVolume(1);
                       }}
                     >
-                      <Text size="xs" c="dimmed">
-                        Reset
-                      </Text>
+                      Reset
                     </UnstyledButton>
                   </Group>
                   </Dim>
@@ -2222,12 +2396,34 @@ export function VideoPlayer({
             display: 'block',
             background: '#000',
             cursor: error ? 'default' : compact && !barShown ? 'none' : 'pointer',
+            opacity: upActive ? 0 : 1,
             filter: videoFilter,
             transform: videoTransform,
             transformOrigin: '50% 50%'
           }}
         >
         </video>
+
+        {upOn && (
+          <canvas
+            key={`${fileId}-${fallbackSrc ?? ''}-${up.mode}-${up.hq ? 'hq' : 'std'}`}
+            ref={upCanvasRef}
+            aria-hidden
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              width: '100%',
+              height: '100%',
+              objectFit: videoObjectFit,
+              pointerEvents: 'none',
+              opacity: upActive ? 1 : 0,
+              filter: videoFilter,
+              transform: videoTransform,
+              transformOrigin: '50% 50%'
+            }}
+          />
+        )}
 
         {isBuffering && !error && (
           <Center style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
@@ -2671,6 +2867,41 @@ export function VideoPlayer({
                 </Stack>
               )
             },
+            ...(HAS_WEBGPU
+              ? [
+                  {
+                    id: 'upscale',
+                    label: 'Upscale',
+                    width: 290,
+                    content: (
+                      <Stack gap={8}>
+                        <GlassSegmented
+                          value={up.mode}
+                          onChange={(m) => setUp((p) => ({ ...p, mode: m as UpMode }))}
+                          data={[
+                            { value: 'off', label: 'Off' },
+                            { value: 'C', label: up.hq ? 'Very High' : 'Low' },
+                            { value: 'B', label: up.hq ? 'Ultra' : 'Mid' },
+                            { value: 'A', label: up.hq ? 'Max' : 'High' }
+                          ]}
+                        />
+                        <Switch
+                          size="xs"
+                          label="Higher quality (slower)"
+                          checked={up.hq}
+                          onChange={(e) => {
+                            const v = e.currentTarget.checked;
+                            setUp((p) => ({ ...p, hq: v }));
+                          }}
+                        />
+                        <Text size="10px" c="dimmed">
+                          For anime and cartoons. Low = light touch, High = strongest cleanup. Heavy on the GPU.
+                        </Text>
+                      </Stack>
+                    )
+                  }
+                ]
+              : []),
             {
               id: 'afx',
               label: 'Audio Effects',
@@ -2704,11 +2935,71 @@ export function VideoPlayer({
                   </UnstyledButton>
                 </Stack>
               )
+            },
+            {
+              id: 'tools',
+              label: 'Tools',
+              separator: true,
+              children: [
+                {
+                  id: 'tool-audio',
+                  label: 'Extract audio...',
+                  onSelect: () => {
+                    setCtxMenu(null);
+                    setToolsDlg('audio');
+                  }
+                },
+                {
+                  id: 'tool-silent',
+                  label: 'Remove audio',
+                  onSelect: () => {
+                    setCtxMenu(null);
+                    setToolsDlg('silent');
+                  }
+                },
+                {
+                  id: 'tool-convert',
+                  label: 'Convert...',
+                  onSelect: () => {
+                    setCtxMenu(null);
+                    setToolsDlg('convert');
+                  }
+                },
+                {
+                  id: 'tool-compress',
+                  label: 'Compress to size...',
+                  onSelect: () => {
+                    setCtxMenu(null);
+                    setToolsDlg('compress');
+                  }
+                },
+                {
+                  id: 'tool-frame',
+                  label: 'Save frame',
+                  onSelect: () => {
+                    setCtxMenu(null);
+                    setToolsDlg('frame');
+                  }
+                }
+              ]
             }
           ]}
         />
       )}
 
+      {toolsDlg && (
+        <ToolsDialog
+          tool={toolsDlg}
+          libraryId={libraryId}
+          fileId={fileId}
+          filename={filename}
+          upscalerOn={upOn}
+          getTime={() => videoRef.current?.currentTime ?? 0}
+          onTool={setToolsDlg}
+          onClose={() => setToolsDlg(null)}
+        />
+      )}
+
       {/* Reset confirmation (R key or middle mouse button) */}
       <Modal
         opened={confirmResetOpen}

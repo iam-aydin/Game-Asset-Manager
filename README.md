@@ -98,6 +98,8 @@ Supported formats include:
 
 Video previews make it easier to browse game cinematics, animation references, trailers, and other video assets alongside the rest of your library.
 
+**Anime4K upscaler (optional):** on GPUs with WebGPU support, the video player can upscale anime and cartoon footage in real time (Settings menu > Upscale). It is off by default and can be heavy on the GPU.
+
 ### 🖼️ Image & Text Viewers
 
 - **Image Preview:** Inspect supported images and textures directly in the application.
@@ -286,6 +288,19 @@ src/
   preload/          Context bridge IPC API
   shared/           Shared utilities, paths, types, and queries
 ```
+
+---
+
+## Credits
+
+Game Asset Manager is built on the work of others. Thank you to:
+
+- **[mthorson](https://github.com/mthorson)** for the original [stl-sherpa](https://github.com/mthorson/stl-sherpa) project this app was forked from.
+- **[Anime4K](https://github.com/bloc97/Anime4K)** by bloc97 (MIT), the real-time upscaling algorithm.
+- **[Anime4K-WebGPU](https://github.com/Anime4KWebBoost/Anime4K-WebGPU)** by Ruijun (Daniel) Zhong, Tong Hu and Yuanqi Wang (MIT), the WebGPU port used for the video upscaler.
+- The open-source libraries listed in `package.json`, including Electron, React, Mantine and Three.js.
+
+Full license texts for bundled third-party code are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 ---
 

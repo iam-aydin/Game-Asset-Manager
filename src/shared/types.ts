@@ -180,6 +180,10 @@ export type RevealFolderResult =
   | { ok: true }
   | { ok: false; error: string };
 
+export type CreateFolderResult =
+  | { ok: true; newFolderPath: string }
+  | { ok: false; error: string };
+
 export interface FolderInfo {
   /** Absolute path of the folder on disk. */
   absolutePath: string;
@@ -517,6 +521,8 @@ export interface IpcApi {
   renameFolder(req: RenameFolderRequest): Promise<RenameFolderResult>;
   /** Show a folder in Finder/Explorer. */
   revealFolder(libraryId: string, folderPath: string): Promise<RevealFolderResult>;
+  /** Create a new empty folder ("New folder", "New folder (2)", ...) inside parentPath. */
+  createFolder(libraryId: string, parentPath: string): Promise<CreateFolderResult>;
   /**
    * Re-scan for changes under a folder. NOTE: currently re-runs a full
    * library scan under the hood (the scanner service doesn't yet support

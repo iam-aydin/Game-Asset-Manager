@@ -43,6 +43,7 @@ export interface CtxSnapshot {
     font?: string;
   };
   subPresets?: string[];
+  up?: { mode: string; hq: boolean };
   defaults: { vfx?: Vfx; afx: Afx };
 }
 
@@ -114,6 +115,31 @@ export function ContextMenuWindow() {
     />
   );
 
+  const upPanel = (u: { mode: string; hq: boolean }) => {
+    const setUp = (partial: Partial<{ mode: string; hq: boolean }>) => {
+      patch((p) => ({ ...p, up: { ...(p.up as { mode: string; hq: boolean }), ...partial } }));
+      send({ op: 'up', partial });
+    };
+    return (
+      <Stack gap={8}>
+        <GlassSegmented
+          value={u.mode}
+          onChange={(m) => setUp({ mode: m })}
+          data={[
+            { value: 'off', label: 'Off' },
+            { value: 'C', label: u.hq ? 'Very High' : 'Low' },
+            { value: 'B', label: u.hq ? 'Ultra' : 'Mid' },
+            { value: 'A', label: u.hq ? 'Max' : 'High' }
+          ]}
+        />
+        <Switch size="xs" label="Higher quality (slower)" checked={u.hq} onChange={(e) => setUp({ hq: e.currentTarget.checked })} />
+        <Text size="10px" c="dimmed">
+          For anime and cartoons. Low = light touch, High = strongest cleanup. Heavy on the GPU.
+        </Text>
+      </Stack>
+    );
+  };
+
   const resetLink = (onClick: () => void) => (
     <UnstyledButton onClick={onClick}>
       <Text size="xs" c="dimmed">
@@ -403,7 +429,8 @@ export function ContextMenuWindow() {
               })}
             </Stack>
           )
-        }
+        },
+        ...(s.up ? [{ id: 'upscale', label: 'Upscale', width: 290, content: upPanel(s.up) }] : [])
       ]
     });
   }

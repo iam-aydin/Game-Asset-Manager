@@ -77,6 +77,18 @@ const glassScrollStyles = {
   }
 } as const;
 
+// gam-glass-scroll: Mantine's scroll content box grows to the widest child, which
+// caused a horizontal bar. Keep it exactly as wide as the menu instead.
+const GLASS_SCROLL_FIX_ID = 'gam-glass-scroll-fix';
+if (typeof document !== 'undefined' && !document.getElementById(GLASS_SCROLL_FIX_ID)) {
+  const el = document.createElement('style');
+  el.id = GLASS_SCROLL_FIX_ID;
+  el.textContent =
+    '.gam-glass-scroll .mantine-ScrollArea-viewport > div { display: block !important; min-width: 0 !important; width: 100% !important; } ' +
+    '.gam-glass-scroll .mantine-ScrollArea-viewport { overflow-x: hidden !important; } ' +
+    '.gam-glass-scroll .mantine-ScrollArea-scrollbar[data-orientation="horizontal"] { display: none !important; }';
+  document.head.appendChild(el);
+}
 /** Scrolls its content only when taller than `maxHeight`. The scrollbar sits in
  *  the menu's own padding (`bleed` px), so nothing shifts when it appears. */
 export function GlassScroll({
@@ -92,6 +104,8 @@ export function GlassScroll({
     <ScrollArea.Autosize
       mah={Math.max(48, Math.floor(maxHeight))}
       type="auto"
+      scrollbars="y"
+      className="gam-glass-scroll"
       scrollbarSize={5}
       scrollHideDelay={600}
       styles={glassScrollStyles}
