@@ -70,6 +70,27 @@ const pickFormat = (ext: string, f: ImgFx): { mime: string; ext: string } => {
   return { mime: 'image/png', ext: 'png' };
 };
 
+/** createImageBitmap cannot read SVG, so an SVG is drawn through an <img> first. */
+async function decodeBlob(blob: Blob, ext: string): Promise<ImageBitmap> {
+  if (ext.toLowerCase() !== 'svg' && !/svg/i.test(blob.type)) return createImageBitmap(blob);
+  const url = URL.createObjectURL(new Blob([blob], { type: 'image/svg+xml' }));
+  try {
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    const w = img.naturalWidth || 1024;
+    const h = img.naturalHeight || 1024;
+    const c = document.createElement('canvas');
+    c.width = w;
+    c.height = h;
+    const ctx = c.getContext('2d');
+    if (!ctx) throw new Error('Canvas is not available');
+    ctx.drawImage(img, 0, 0, w, h);
+    return await createImageBitmap(c);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
 export const toBlob = (c: HTMLCanvasElement, mime: string, q?: number): Promise<Blob> =>
   new Promise((res, rej) =>
     c.toBlob((b) => (b ? res(b) : rej(new Error('Could not encode the image'))), mime, q)
@@ -224,7 +245,7 @@ const HANDLES: { id: string; x: number; y: number; cursor: string }[] = [
 
 // ---- Saving as JPG / PNG / BMP ---------------------------------------------------
 
-export type OutFmt = 'jpg' | 'png' | 'bmp' | 'ico';
+export type OutFmt = 'jpg' | 'png' | 'bmp' | 'ico' | 'svg';
 
 /** JPG and BMP have no transparency: put the picture on white so clear areas are not black. */
 function flatten(src: HTMLCanvasElement): HTMLCanvasElement {
@@ -346,8 +367,24 @@ async function encodeIco(src: HTMLCanvasElement): Promise<Blob> {
   return new Blob([buf], { type: 'image/x-icon' });
 }
 
+/** SVG that holds the picture as an embedded PNG (nothing is traced, the pixels stay identical). */
+async function encodeSvg(src: HTMLCanvasElement): Promise<Blob> {
+  const png = new Uint8Array(await (await toBlob(src, 'image/png')).arrayBuffer());
+  let bin = '';
+  for (let i = 0; i < png.length; i += 0x8000) {
+    bin += String.fromCharCode(...png.subarray(i, i + 0x8000));
+  }
+  const { width: w, height: h } = src;
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" ` +
+    `width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">\n` +
+    `  <image width="${w}" height="${h}" xlink:href="data:image/png;base64,${btoa(bin)}"/>\n` +
+    `</svg>\n`;
+  return new Blob([svg], { type: 'image/svg+xml' });
+}
 export async function encodeAs(canvas: HTMLCanvasElement, fmt: OutFmt): Promise<Blob> {
   if (fmt === 'png') return toBlob(canvas, 'image/png');
+  if (fmt === 'svg') return encodeSvg(canvas);
   if (fmt === 'ico') return encodeIco(canvas);
   if (fmt === 'jpg') return toBlob(flatten(canvas), 'image/jpeg', 0.95);
   return encodeBmp(canvas);
@@ -839,7 +876,7 @@ export function ImagePreview({
     if (bmpRef.current && bmpRef.current.id === file.id) return bmpRef.current.bmp;
     const res = await fetch(src);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const bmp = await createImageBitmap(await res.blob());
+    const bmp = await decodeBlob(await res.blob(), file.ext);
     bmpRef.current?.bmp.close();
     bmpRef.current = { id: file.id, bmp };
     return bmp;
@@ -1089,7 +1126,8 @@ export function ImagePreview({
         saveRow('save-jpg', 'JPG', () => void doConvert('jpg')),
         saveRow('save-png', 'PNG', () => void doConvert('png')),
         saveRow('save-bmp', 'BMP', () => void doConvert('bmp')),
-        saveRow('save-ico', 'ICO', () => void doConvert('ico'))
+        saveRow('save-ico', 'ICO', () => void doConvert('ico')),
+        saveRow('save-svg', 'SVG', () => void doConvert('svg'))
       ]
     },
     { id: 'copy', label: 'Copy to Clipboard', onSelect: () => { setMenu(null); void doCopy(); } },

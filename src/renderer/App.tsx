@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { installResizeBlur, installFullscreenChrome, fullscreenChromeCss } from '@shared/transition';
 import { Menu, useMantineColorScheme } from '@mantine/core';
 import { IconCheck } from '@tabler/icons-react';
@@ -28,7 +29,10 @@ import {
   IconPalette,
   IconRefresh,
   IconChevronDown,
+  IconEdit,
+  IconFolderPlus,
   IconSettings,
+  IconTrash,
   IconX
 } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
@@ -41,6 +45,7 @@ import {
 import type {
   CollectionWithCount,
   ColorLabel,
+  ContainerFolder,
   FileQueryRequest,
   FileRecord,
   FolderTreeNode,
@@ -380,6 +385,11 @@ export function App() {
   // Collection selection is mutually exclusive with folder selection. The
   // setters below enforce that mutex; never set them both.
   const [selectedCollectionId, setSelectedCollectionId] = useState<number | null>(null);
+  // Virtual folders inside the selected container (null = the container's top level).
+  const [selectedContainerFolderId, setSelectedContainerFolderId] = useState<number | null>(null);
+  const [containerFolders, setContainerFolders] = useState<ContainerFolder[]>([]);
+  // True while files are cut (Ctrl+X) and waiting to be pasted into a container folder.
+  const [canPaste, setCanPaste] = useState(false);
   const [collections, setCollections] = useState<CollectionWithCount[]>([]);
   const [files, setFiles] = useState<FileRecord[]>([]);
   // Multi-select: the full selection set + the "primary" (most-recently-clicked)
@@ -782,12 +792,45 @@ export function App() {
   const refreshCollections = useCallback(async (libraryId: string) => {
     const list = await ipc.listCollections(libraryId);
     setCollections(list);
+    // Keep the folders of the open container in step (folders added / renamed / files moved).
+    const cid = selectedCollectionIdRef.current;
+    if (cid != null) {
+      try {
+        setContainerFolders(await ipc.listContainerFolders(cid));
+      } catch {
+        setContainerFolders([]);
+      }
+    }
   }, []);
 
   // Read collections via ref so refreshFiles isn't re-created on every list
   // refresh — that would re-trigger every effect that depends on it.
   const collectionsRef = useRef<CollectionWithCount[]>(collections);
   collectionsRef.current = collections;
+  const containerFolderRef = useRef<number | null>(null);
+  containerFolderRef.current = selectedContainerFolderId;
+  const selectedCollectionIdRef = useRef<number | null>(null);
+  selectedCollectionIdRef.current = selectedCollectionId;
+
+  // Load the virtual folders when a container is opened.
+  useEffect(() => {
+    if (selectedCollectionId == null) {
+      setContainerFolders([]);
+      return;
+    }
+    let alive = true;
+    ipc
+      .listContainerFolders(selectedCollectionId)
+      .then((r) => {
+        if (alive) setContainerFolders(r);
+      })
+      .catch(() => {
+        if (alive) setContainerFolders([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [selectedCollectionId]);
 
   const refreshFiles = useCallback(
     async (
@@ -884,7 +927,11 @@ export function App() {
         // saved rules become regular filters. Manual collections still scope
         // by collectionId so position-ordering and membership rules apply.
         ...(collectionId != null && !isSmartView
-          ? { collectionId }
+          ? {
+              collectionId,
+              // Searching / filtering looks through the whole container; otherwise show one folder level.
+              containerFolderId: filtersOn ? undefined : containerFolderRef.current
+            }
           : { parentDir, recursive: filtersOn || isSmartView }),
         query: mergedSearch,
         extensions: mergedExtensions,
@@ -999,6 +1046,7 @@ export function App() {
     setFiles([]);
     setSelectedFolderPath('');
     setSelectedCollectionId(null);
+    setSelectedContainerFolderId(null);
     setCollections([]);
     clearSelection();
     setScanStatus(null);
@@ -1067,6 +1115,7 @@ export function App() {
     sort,
     viewScope,
     duplicatesOnly,
+    selectedContainerFolderId,
     refreshFiles,
     clearSelection
   ]);
@@ -1314,6 +1363,7 @@ export function App() {
 
   const selectCollection = useCallback((id: number | null) => {
     setSelectedCollectionId(id);
+    setSelectedContainerFolderId(null);
     if (id != null) {
       setSelectedFolderPath('');
       setViewScope('normal');
@@ -1509,8 +1559,13 @@ export function App() {
   // Every location change (folder / container / all-models) is recorded.
   // Alt+Left = back, Alt+Right = forward, Alt+Up = up, Backspace = back,
   // and the mouse back/forward buttons do the same.
-  type NavEntry = { folder: string; collectionId: number | null; scope: 'normal' | 'tree' };
-  const ROOT_ENTRY: NavEntry = { folder: '', collectionId: null, scope: 'normal' };
+  type NavEntry = {
+    folder: string;
+    collectionId: number | null;
+    scope: 'normal' | 'tree';
+    containerFolderId: number | null;
+  };
+  const ROOT_ENTRY: NavEntry = { folder: '', collectionId: null, scope: 'normal', containerFolderId: null };
   const [nav, setNav] = useState<{
     libraryId: string | null;
     stack: NavEntry[];
@@ -1523,7 +1578,8 @@ export function App() {
     const entry: NavEntry = {
       folder: selectedFolderPath,
       collectionId: selectedCollectionId,
-      scope: viewScope
+      scope: viewScope,
+      containerFolderId: selectedContainerFolderId
     };
     setNav((prev) => {
       if (prev.libraryId !== selectedLibraryId) {
@@ -1535,18 +1591,20 @@ export function App() {
         cur &&
         cur.folder === entry.folder &&
         cur.collectionId === entry.collectionId &&
-        cur.scope === entry.scope
+        cur.scope === entry.scope &&
+        cur.containerFolderId === entry.containerFolderId
       ) {
         return prev;
       }
       const stack = [...prev.stack.slice(0, prev.index + 1), entry].slice(-100);
       return { ...prev, stack, index: stack.length - 1 };
     });
-  }, [selectedLibraryId, selectedFolderPath, selectedCollectionId, viewScope]);
+  }, [selectedLibraryId, selectedFolderPath, selectedCollectionId, viewScope, selectedContainerFolderId]);
 
   const applyNavEntry = useCallback((e: NavEntry) => {
     setSelectedFolderPath(e.folder);
     setSelectedCollectionId(e.collectionId);
+    setSelectedContainerFolderId(e.containerFolderId ?? null);
     setViewScope(e.scope);
   }, []);
 
@@ -1567,6 +1625,12 @@ export function App() {
   }, [applyNavEntry]);
 
   const goUp = useCallback(() => {
+    if (selectedCollectionId != null && selectedContainerFolderId != null) {
+      // Inside a container folder: up goes to the folder above it.
+      const cur = containerFolders.find((f) => f.id === selectedContainerFolderId);
+      setSelectedContainerFolderId(cur?.parentId ?? null);
+      return;
+    }
     if (viewScope !== 'normal' || selectedCollectionId != null) {
       selectFolder('');
       return;
@@ -1574,7 +1638,7 @@ export function App() {
     if (selectedFolderPath === '') return;
     const i = selectedFolderPath.lastIndexOf('/');
     selectFolder(i < 0 ? '' : selectedFolderPath.slice(0, i));
-  }, [viewScope, selectedCollectionId, selectedFolderPath, selectFolder]);
+  }, [viewScope, selectedCollectionId, selectedContainerFolderId, containerFolders, selectedFolderPath, selectFolder]);
 
   useEffect(() => {
     const onMouseUp = (e: MouseEvent) => {
@@ -2045,6 +2109,21 @@ export function App() {
         return;
       }
       const { folderPath } = folderRenameModal;
+      if (folderPath.startsWith('vf:')) {
+        // Container folder: "vf:<containerId>:<folderId>"
+        const [, cid, fid] = folderPath.split(':');
+        setFolderRenameModal({ open: false, folderPath: '', currentName: '' });
+        void ipc
+          .renameContainerFolder(selectedLibraryId, Number(cid), Number(fid), newName)
+          .catch((err: unknown) => {
+            notifications.show({
+              color: 'red',
+              title: 'Rename failed',
+              message: (err as Error).message
+            });
+          });
+        return;
+      }
       setFolderRenameModal({ open: false, folderPath: '', currentName: '' });
       void ipc.renameFolder({ libraryId: selectedLibraryId, folderPath, newName }).then((r) => {
         if (!r.ok) {
@@ -2063,15 +2142,133 @@ export function App() {
   // Bulk handlers — wired into the metadata pane's bulk mode.
   const selectedIdsArray = useMemo(() => [...selectedFileIds], [selectedFileIds]);
 
+  // --- Virtual folders inside containers --------------------------------------
+  const selectContainerFolder = useCallback(
+    (containerId: number, folderId: number | null) => {
+      selectCollection(containerId);
+      setSelectedContainerFolderId(folderId);
+    },
+    [selectCollection]
+  );
+
+  const openVirtualFolderRename = useCallback(
+    (containerId: number, folderId: number, currentName: string) => {
+      setFolderRenameModal({ open: true, folderPath: `vf:${containerId}:${folderId}`, currentName });
+    },
+    []
+  );
+
+  // Rename from the grid (F2 / slow click): real folder or container folder.
+  const handleGridRenameFolder = useCallback(
+    (path: string) => {
+      if (selectedCollectionId == null) {
+        handleRenameFolder(path);
+        return;
+      }
+      const f = containerFolders.find((x) => String(x.id) === path);
+      if (f) openVirtualFolderRename(selectedCollectionId, f.id, f.name);
+    },
+    [selectedCollectionId, containerFolders, handleRenameFolder, openVirtualFolderRename]
+  );
+
+  const handleNewContainerFolder = useCallback(
+    async (containerId: number, parentFolderId: number | null) => {
+      if (!selectedLibraryId) return;
+      try {
+        const f = await ipc.createContainerFolder(selectedLibraryId, containerId, parentFolderId, 'New folder');
+        if (f) openVirtualFolderRename(containerId, f.id, f.name);
+      } catch (err) {
+        notifications.show({ color: 'red', title: 'New folder failed', message: (err as Error).message });
+      }
+    },
+    [selectedLibraryId, openVirtualFolderRename]
+  );
+
+  const handleDeleteContainerFolder = useCallback(
+    async (containerId: number, folderId: number) => {
+      if (!selectedLibraryId) return;
+      try {
+        await ipc.deleteContainerFolder(selectedLibraryId, containerId, folderId);
+        if (selectedCollectionId === containerId) setSelectedContainerFolderId(null);
+        notifications.show({
+          color: 'gray',
+          title: 'Folder deleted',
+          message: 'Files that were inside went back up one level.',
+          autoClose: 3000
+        });
+      } catch (err) {
+        notifications.show({ color: 'red', title: 'Delete failed', message: (err as Error).message });
+      }
+    },
+    [selectedLibraryId, selectedCollectionId]
+  );
+
+  // Cut / paste: select files in a container, Ctrl+X, open a folder, Ctrl+V.
+  const cutRef = useRef<{
+    containerId: number;
+    items: { libraryId: string; relPath: string }[];
+  } | null>(null);
+
+  const handleCutFiles = useCallback(() => {
+    if (selectedCollectionId == null) return;
+    const items = selectedFilesRef.current.map((f) => ({ libraryId: f.libraryId, relPath: f.relPath }));
+    if (items.length === 0) return;
+    cutRef.current = { containerId: selectedCollectionId, items };
+    setCanPaste(true);
+    notifications.show({
+      color: 'indigo',
+      title: 'Cut',
+      message: `${items.length} file${items.length === 1 ? '' : 's'}. Open a folder and press Ctrl+V (or right-click, Paste here).`,
+      autoClose: 3500
+    });
+  }, [selectedCollectionId]);
+
+  const handlePasteFiles = useCallback(async () => {
+    const cut = cutRef.current;
+    if (!cut || !selectedLibraryId || selectedCollectionId == null) return;
+    if (cut.containerId !== selectedCollectionId) {
+      notifications.show({
+        color: 'orange',
+        title: 'Paste',
+        message: 'The files were cut in another container. Open that container to paste them.'
+      });
+      return;
+    }
+    try {
+      const moved = await ipc.moveContainerItems(
+        selectedLibraryId,
+        cut.containerId,
+        cut.items,
+        selectedContainerFolderId
+      );
+      cutRef.current = null;
+      setCanPaste(false);
+      notifications.show({
+        color: 'green',
+        title: 'Moved',
+        message: `${moved} file${moved === 1 ? '' : 's'} moved here.`,
+        autoClose: 2500
+      });
+    } catch (err) {
+      notifications.show({ color: 'red', title: 'Paste failed', message: (err as Error).message });
+    }
+  }, [selectedLibraryId, selectedCollectionId, selectedContainerFolderId]);
+  // ----------------------------------------------------------------------------
+
   // New folder (Ctrl+Shift+N or right-click on empty grid space): creates a real folder on
   // disk inside the folder you are in, then opens the rename dialog right away (like Explorer).
   const handleNewFolder = useCallback(async () => {
     if (!selectedLibraryId) return;
-    if (selectedCollectionId != null || viewScope !== 'normal') {
+    if (selectedCollectionId != null) {
+      // Inside a container: make a virtual folder there.
+      void handleNewContainerFolder(selectedCollectionId, selectedContainerFolderId);
+      return;
+    }
+    if (viewScope !== 'normal') {
       notifications.show({
         color: 'orange',
         title: 'New folder',
-        message: 'Open a normal folder first. Containers and "Show all files" have no folder to create in.'
+        message: 'Open a normal folder first. "Show all files" has no folder to create in.'
       });
       return;
     }
@@ -2081,7 +2278,7 @@ export function App() {
       return;
     }
     handleRenameFolder(r.newFolderPath);
-  }, [selectedLibraryId, selectedCollectionId, viewScope, selectedFolderPath, handleRenameFolder]);
+  }, [selectedLibraryId, selectedCollectionId, selectedContainerFolderId, viewScope, selectedFolderPath, handleRenameFolder, handleNewContainerFolder]);
 
   const handleBulkAddTag = useCallback(
     async (tagName: string) => {
@@ -2203,6 +2400,18 @@ export function App() {
         void handleNewFolder();
         return;
       }
+      // Ctrl+X / Ctrl+V inside a container: move files between its folders.
+      if (selectedCollectionId != null && matchesAction(e, 'file.cut')) {
+        if (selectedFileIds.size === 0) return;
+        e.preventDefault();
+        handleCutFiles();
+        return;
+      }
+      if (selectedCollectionId != null && matchesAction(e, 'file.paste')) {
+        e.preventDefault();
+        void handlePasteFiles();
+        return;
+      }
       if (matchesAction(e, 'label.clear')) {
         e.preventDefault();
         void handleBulkSetColorLabel(null);
@@ -2289,6 +2498,9 @@ export function App() {
     requestDelete,
     performDuplicate,
     handleNewFolder,
+    selectedCollectionId,
+    handleCutFiles,
+    handlePasteFiles,
     goBack,
     goForward,
     goUp
@@ -2523,6 +2735,8 @@ export function App() {
 
   selectedFilesRef.current = selectedFiles;
 
+  // Right-click menu of a container (virtual) folder tile in the grid.
+  const [vfMenu, setVfMenu] = useState({ opened: false, x: 0, y: 0, id: 0, name: '' });
   const [folderMenu, setFolderMenu] = useState<FolderMenuState>({
     opened: false,
     x: 0,
@@ -2550,6 +2764,22 @@ export function App() {
       a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
     );
   }, [showFolders, currentFolderNode]);
+  // Virtual folders of the open container, shown as folder tiles in the grid.
+  const containerGridFolders = useMemo(() => {
+    if (selectedCollectionId == null) return undefined;
+    return containerFolders
+      .filter((f) => (f.parentId ?? null) === selectedContainerFolderId)
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }))
+      .map(
+        (f): FolderTreeNode => ({
+          path: String(f.id),
+          name: f.name,
+          immediateFileCount: f.fileCount,
+          recursiveFileCount: f.totalCount,
+          children: []
+        })
+      );
+  }, [selectedCollectionId, containerFolders, selectedContainerFolderId]);
   // Kept for a future drag-to-move onto folder tiles (the old tree used it).
   void requestMove;
   const leftSidebar = (
@@ -2623,6 +2853,11 @@ export function App() {
                 onExportZip={(id) => void handleExportCollectionZip(id)}
                 onExportContactSheet={(id) => void handleExportCollectionContactSheet(id)}
                 onPickItem={handlePickContainerItem}
+                selectedContainerFolderId={selectedContainerFolderId}
+                onSelectFolder={selectContainerFolder}
+                onNewFolder={(cid, parent) => void handleNewContainerFolder(cid, parent)}
+                onRenameFolder={openVirtualFolderRename}
+                onDeleteFolder={(cid, fid) => void handleDeleteContainerFolder(cid, fid)}
               />
             </CollapsibleSection>
             <CollapsibleSection title="Favorites">
@@ -2673,7 +2908,16 @@ export function App() {
   if (selectedLibrary) {
     navCrumbs.push({ label: selectedLibrary.name, path: '' });
     if (selectedCollection) {
-      navCrumbs.push({ label: selectedCollection.name, path: null });
+      // "vf:" paths are container folders: "vf:" = the container itself, "vf:12" = folder 12.
+      navCrumbs.push({ label: selectedCollection.name, path: 'vf:' });
+      const chain: ContainerFolder[] = [];
+      let cur = containerFolders.find((f) => f.id === selectedContainerFolderId);
+      while (cur) {
+        chain.unshift(cur);
+        const parentId: number | null = cur.parentId;
+        cur = parentId == null ? undefined : containerFolders.find((f) => f.id === parentId);
+      }
+      chain.forEach((f) => navCrumbs.push({ label: f.name, path: 'vf:' + f.id }));
     } else {
       if (selectedFolderPath) {
         const segs = selectedFolderPath.split('/');
@@ -2691,7 +2935,11 @@ export function App() {
       onForward={goForward}
       onUp={goUp}
       crumbs={navCrumbs}
-      onNavigate={selectFolder}
+      onNavigate={(p) =>
+        p.startsWith('vf:')
+          ? setSelectedContainerFolderId(p.length > 3 ? Number(p.slice(3)) : null)
+          : selectFolder(p)
+      }
     />
   );
 
@@ -2752,15 +3000,21 @@ export function App() {
       files={files}
       emptyTitle={hasSubfolders && showFolders ? 'No files directly in this folder.' : undefined}
       emptyHint={hasSubfolders && showFolders ? 'Open a subfolder above.' : undefined}
-      folders={gridFolders}
+      folders={selectedCollectionId != null ? containerGridFolders : gridFolders}
       headerNav={inlineNav}
       onSelectFiles={selectFileIds}
       onNewFolder={handleNewFolder}
-      onRenameFolder={handleRenameFolder}
+      onPaste={handlePasteFiles}
+      canPaste={canPaste && selectedCollectionId != null}
+      onRenameFolder={handleGridRenameFolder}
       onClearFileSelection={clearSelection}
-      onOpenFolder={selectFolder}
+      onOpenFolder={(path) =>
+        selectedCollectionId != null ? setSelectedContainerFolderId(Number(path)) : selectFolder(path)
+      }
       onFolderContextMenu={(node, x, y) =>
-        setFolderMenu({ opened: true, x, y, path: node.path, name: node.name })
+        selectedCollectionId != null
+          ? setVfMenu({ opened: true, x, y, id: Number(node.path), name: node.name })
+          : setFolderMenu({ opened: true, x, y, path: node.path, name: node.name })
       }
       selectedIds={selectedFileIds}
       primaryId={primaryFileId}
@@ -2788,6 +3042,66 @@ export function App() {
         onZip={handleZipFolder}
         onInfo={openFolderInfo}
       />
+      {createPortal(
+        <Menu
+          opened={vfMenu.opened}
+          onChange={(open) => {
+            if (!open) setVfMenu((m) => ({ ...m, opened: false }));
+          }}
+          position="bottom-start"
+          floatingStrategy="fixed"
+          offset={0}
+          withinPortal
+          shadow="md"
+          width={210}
+        >
+          <Menu.Target>
+            <div
+              style={{
+                position: 'fixed',
+                top: vfMenu.y,
+                left: vfMenu.x,
+                width: 1,
+                height: 1,
+                pointerEvents: 'none'
+              }}
+            />
+          </Menu.Target>
+          <Menu.Dropdown className={GLASS_POPOVER_CLASS}>
+            <Menu.Label>{vfMenu.name}</Menu.Label>
+            <Menu.Item
+              leftSection={<IconFolderPlus size={14} />}
+              onClick={() => {
+                setVfMenu((m) => ({ ...m, opened: false }));
+                if (selectedCollectionId != null) void handleNewContainerFolder(selectedCollectionId, vfMenu.id);
+              }}
+            >
+              New folder inside
+            </Menu.Item>
+            <Menu.Item
+              leftSection={<IconEdit size={14} />}
+              onClick={() => {
+                setVfMenu((m) => ({ ...m, opened: false }));
+                if (selectedCollectionId != null) openVirtualFolderRename(selectedCollectionId, vfMenu.id, vfMenu.name);
+              }}
+            >
+              Rename
+            </Menu.Item>
+            <Menu.Divider />
+            <Menu.Item
+              color="red"
+              leftSection={<IconTrash size={14} />}
+              onClick={() => {
+                setVfMenu((m) => ({ ...m, opened: false }));
+                if (selectedCollectionId != null) void handleDeleteContainerFolder(selectedCollectionId, vfMenu.id);
+              }}
+            >
+              Delete folder
+            </Menu.Item>
+          </Menu.Dropdown>
+        </Menu>,
+        document.body
+      )}
     </Stack>
   );
   const previewPane = (

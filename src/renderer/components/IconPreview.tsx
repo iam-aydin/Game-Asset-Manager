@@ -364,7 +364,8 @@ export function IconPreview({ libraryId, file }: Props) {
         { id: 'save-png', label: 'PNG (largest size)', onSelect: pick(() => void doConvert('png')) },
         { id: 'save-jpg', label: 'JPG (largest size)', onSelect: pick(() => void doConvert('jpg')) },
         { id: 'save-bmp', label: 'BMP (largest size)', onSelect: pick(() => void doConvert('bmp')) },
-        { id: 'save-ico', label: 'ICO (rebuilt from largest)', onSelect: pick(() => void doConvert('ico')) }
+        { id: 'save-ico', label: 'ICO (rebuilt from largest)', onSelect: pick(() => void doConvert('ico')) },
+        { id: 'save-svg', label: 'SVG (largest size)', onSelect: pick(() => void doConvert('svg')) }
       ]
     },
     { id: 'copy', label: 'Copy to Clipboard', onSelect: pick(() => void doCopy()) },

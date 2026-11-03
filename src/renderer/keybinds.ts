@@ -44,6 +44,8 @@ export const ACTIONS = {
   'file.delete': { label: 'Delete selection', scope: 'global', defaults: [k('Delete')] },
   'file.duplicate': { label: 'Duplicate selection', scope: 'global', defaults: [k('KeyD', { ctrl: true })] },
   'folder.new': { label: 'New folder', scope: 'global', defaults: [k('KeyN', { ctrl: true, shift: true })] },
+  'file.cut': { label: 'Cut (move into a container folder)', scope: 'global', defaults: [k('KeyX', { ctrl: true })] },
+  'file.paste': { label: 'Paste into this container folder', scope: 'global', defaults: [k('KeyV', { ctrl: true })] },
   'file.fullscreenPreview': { label: 'Fullscreen preview', scope: 'global', defaults: [k('Space')] },
   'rate.0': { label: 'Rating: none', scope: 'global', defaults: [k('Digit0'), k('Numpad0')] },
   'rate.1': { label: 'Rating: 1', scope: 'global', defaults: [k('Digit1'), k('Numpad1')] },

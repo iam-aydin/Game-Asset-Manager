@@ -27,6 +27,8 @@ export function queryContainerFiles(
   const needle = req.query?.trim().toLowerCase() ?? '';
   const out: FileRecord[] = [];
   for (const it of c.items) {
+    // Virtual folders: undefined = the whole container, null = top level only, number = that folder.
+    if (req.containerFolderId !== undefined && (it.folderId ?? null) !== req.containerFolderId) continue;
     const lib = manager.getOpenLibrary(it.libraryId);
     if (!lib) continue;
     const base = lib.files.getByRelPath(it.relPath);

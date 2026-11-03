@@ -13,7 +13,8 @@ export const IMAGE_EXTENSIONS = [
   'jpg',
   'jpeg',
   'bmp',
-  'ico'
+  'ico',
+  'svg'
 ] as const;
 
 export const AUDIO_EXTENSIONS = [

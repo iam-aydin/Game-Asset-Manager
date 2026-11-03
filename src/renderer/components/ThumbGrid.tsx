@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActionIcon, Center, Group, Menu, Stack, Text, Tooltip } from '@mantine/core';
-import { IconFolderPlus, IconMinus, IconPlus, IconStarFilled } from '@tabler/icons-react';
+import { IconClipboard, IconFolderPlus, IconMinus, IconPlus, IconStarFilled } from '@tabler/icons-react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { ExtractedMetadata, FileRecord } from '@shared/types';
 import type { PrintBed } from '@shared/preferences';
@@ -46,6 +46,10 @@ interface Props {
   onSelectFiles?: (ids: number[]) => void;
   /** Creates a new folder in the folder you are in (right-click on empty space). */
   onNewFolder?: () => void;
+  /** Container view: paste the cut files into the folder you are in. */
+  onPaste?: () => void;
+  /** True while files are waiting to be pasted. */
+  canPaste?: boolean;
   /** Navigation (back / forward / up / path) shown in the bar above the files. */
   headerNav?: React.ReactNode;
 }
@@ -156,6 +160,8 @@ export function ThumbGrid({
   onClearFileSelection,
   onSelectFiles,
   onNewFolder,
+  onPaste,
+  canPaste,
   headerNav
 }: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -774,6 +780,22 @@ export function ThumbGrid({
             >
               New folder
             </Menu.Item>
+            {canPaste && onPaste && (
+              <Menu.Item
+                leftSection={<IconClipboard size={14} />}
+                rightSection={
+                  <Text size="xs" c="dimmed">
+                    Ctrl+V
+                  </Text>
+                }
+                onClick={() => {
+                  setEmptyMenu((m) => ({ ...m, opened: false }));
+                  onPaste();
+                }}
+              >
+                Paste here
+              </Menu.Item>
+            )}
           </Menu.Dropdown>
         </Menu>,
         document.body

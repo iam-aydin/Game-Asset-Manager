@@ -1,10 +1,37 @@
 import { ipcMain } from 'electron';
 import { IPC } from '@shared/ipc-channels';
-import type { CollectionRecord, CollectionWithCount, ContainerItem } from '@shared/types';
+import type { CollectionRecord, CollectionWithCount, ContainerFolder, ContainerItem } from '@shared/types';
 import { getOpenLibrary, listLibraries } from '@main/libraries/manager';
 import { isSmartQuery } from '@shared/smart-query';
 import { broadcastLibraryEvent as broadcast } from '@main/events';
 import * as store from '@main/containers/store';
+
+/** Virtual folders of a container, with how many files are in each (directly and in total). */
+function folderDtos(containerId: number): ContainerFolder[] {
+  const c = store.get(containerId);
+  if (!c) return [];
+  const folders = store.listFolders(containerId);
+  const direct = new Map<number, number>();
+  for (const it of c.items) {
+    if (it.folderId != null) direct.set(it.folderId, (direct.get(it.folderId) ?? 0) + 1);
+  }
+  const total = new Map<number, number>();
+  const sum = (id: number): number => {
+    const hit = total.get(id);
+    if (hit !== undefined) return hit;
+    let n = direct.get(id) ?? 0;
+    for (const f of folders) if (f.parentId === id) n += sum(f.id);
+    total.set(id, n);
+    return n;
+  };
+  return folders.map((f) => ({
+    id: f.id,
+    name: f.name,
+    parentId: f.parentId ?? null,
+    fileCount: direct.get(f.id) ?? 0,
+    totalCount: sum(f.id)
+  }));
+}
 
 function toRecord(c: store.StoredContainer): CollectionWithCount {
   return {
@@ -130,6 +157,74 @@ export function registerCollectionsIpc(): void {
         });
       }
       return out;
+    }
+  );
+
+  // ---- Virtual folders inside containers ----
+  ipcMain.handle(
+    IPC.listContainerFolders,
+    async (_e, containerId: number): Promise<ContainerFolder[]> => folderDtos(containerId)
+  );
+
+  ipcMain.handle(
+    IPC.createContainerFolder,
+    async (
+      _e,
+      libraryId: string,
+      containerId: number,
+      parentId: number | null,
+      name: string
+    ): Promise<ContainerFolder | null> => {
+      const f = store.createFolder(containerId, parentId ?? null, String(name ?? ''));
+      if (!f) return null;
+      broadcast({ kind: 'collections-changed', libraryId, collectionId: containerId });
+      return folderDtos(containerId).find((x) => x.id === f.id) ?? null;
+    }
+  );
+
+  ipcMain.handle(
+    IPC.renameContainerFolder,
+    async (
+      _e,
+      libraryId: string,
+      containerId: number,
+      folderId: number,
+      name: string
+    ): Promise<ContainerFolder | null> => {
+      const f = store.renameFolder(containerId, folderId, String(name ?? ''));
+      if (!f) return null;
+      broadcast({ kind: 'collections-changed', libraryId, collectionId: containerId });
+      return folderDtos(containerId).find((x) => x.id === f.id) ?? null;
+    }
+  );
+
+  ipcMain.handle(
+    IPC.deleteContainerFolder,
+    async (_e, libraryId: string, containerId: number, folderId: number): Promise<void> => {
+      store.removeFolder(containerId, folderId);
+      broadcast({ kind: 'collections-changed', libraryId, collectionId: containerId });
+    }
+  );
+
+  ipcMain.handle(
+    IPC.moveContainerItems,
+    async (
+      _e,
+      libraryId: string,
+      containerId: number,
+      items: { libraryId: string; relPath: string }[],
+      folderId: number | null
+    ): Promise<number> => {
+      const moved = store.moveItems(
+        containerId,
+        (Array.isArray(items) ? items : []).map((i) => ({
+          libraryId: String(i.libraryId),
+          relPath: String(i.relPath)
+        })),
+        folderId ?? null
+      );
+      if (moved > 0) broadcast({ kind: 'collections-changed', libraryId, collectionId: containerId });
+      return moved;
     }
   );
 

@@ -12,6 +12,16 @@ export interface StoredItem {
   libraryId: string;
   relPath: string;
   addedAt: number;
+  /** Virtual folder inside the container. null / undefined = the container's top level. */
+  folderId?: number | null;
+}
+
+/** A virtual folder inside a container. It only exists in this file (nothing on disk). */
+export interface StoredFolder {
+  id: number;
+  name: string;
+  parentId: number | null;
+  createdAt: number;
 }
 
 export interface StoredContainer {
@@ -20,12 +30,14 @@ export interface StoredContainer {
   createdAt: number;
   updatedAt: number;
   items: StoredItem[];
+  folders?: StoredFolder[];
 }
 
 interface StoreFile {
   version: 1;
   nextId: number;
   migratedLibraries: string[];
+  nextFolderId: number;
   containers: StoredContainer[];
 }
 
@@ -48,8 +60,13 @@ function load(): StoreFile {
               ? parsed.nextId
               : Math.max(0, ...parsed.containers.map((c) => c.id)) + 1,
           migratedLibraries: Array.isArray(parsed.migratedLibraries) ? parsed.migratedLibraries : [],
+          nextFolderId:
+            typeof parsed.nextFolderId === 'number'
+              ? parsed.nextFolderId
+              : Math.max(0, ...parsed.containers.flatMap((c) => (c.folders ?? []).map((f) => f.id))) + 1,
           containers: parsed.containers
         };
+        for (const c of cache.containers) if (!Array.isArray(c.folders)) c.folders = [];
         return cache;
       }
     } catch {
@@ -60,7 +77,7 @@ function load(): StoreFile {
       }
     }
   }
-  cache = { version: 1, nextId: 1, migratedLibraries: [], containers: [] };
+  cache = { version: 1, nextId: 1, migratedLibraries: [], nextFolderId: 1, containers: [] };
   return cache;
 }
 
@@ -197,6 +214,126 @@ export function removePath(libraryId: string, relPath: string): void {
     if (c.items.length !== before) changed = true;
   }
   if (changed) save();
+}
+
+// ---- Virtual folders inside a container -----------------------------------------
+// A folder only exists in this file. Items point at a folder with folderId; no
+// folderId means the container's top level.
+
+function foldersOf(c: StoredContainer): StoredFolder[] {
+  if (!Array.isArray(c.folders)) c.folders = [];
+  return c.folders;
+}
+
+export function listFolders(containerId: number): StoredFolder[] {
+  const c = get(containerId);
+  return c ? [...foldersOf(c)] : [];
+}
+
+function uniqueFolderName(siblings: StoredFolder[], wanted: string): string {
+  const taken = new Set(siblings.map((f) => f.name.toLowerCase()));
+  if (!taken.has(wanted.toLowerCase())) return wanted;
+  for (let n = 2; n < 10000; n++) {
+    const candidate = `${wanted} (${n})`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+  return wanted;
+}
+
+export function createFolder(
+  containerId: number,
+  parentId: number | null,
+  name: string
+): StoredFolder | null {
+  const c = get(containerId);
+  if (!c) return null;
+  const folders = foldersOf(c);
+  if (parentId != null && !folders.some((f) => f.id === parentId)) return null;
+  const siblings = folders.filter((f) => (f.parentId ?? null) === parentId);
+  const now = Date.now();
+  const folder: StoredFolder = {
+    id: load().nextFolderId++,
+    name: uniqueFolderName(siblings, name.trim() || 'New folder'),
+    parentId,
+    createdAt: now
+  };
+  folders.push(folder);
+  c.updatedAt = now;
+  save();
+  return folder;
+}
+
+export function renameFolder(containerId: number, folderId: number, name: string): StoredFolder | null {
+  const trimmed = name.trim();
+  if (trimmed === '') throw new Error('Folder name cannot be empty');
+  const c = get(containerId);
+  if (!c) return null;
+  const folders = foldersOf(c);
+  const folder = folders.find((f) => f.id === folderId);
+  if (!folder) return null;
+  const clash = folders.some(
+    (f) =>
+      f.id !== folderId &&
+      (f.parentId ?? null) === (folder.parentId ?? null) &&
+      f.name.toLowerCase() === trimmed.toLowerCase()
+  );
+  if (clash) throw new Error(`A folder named "${trimmed}" already exists here`);
+  folder.name = trimmed;
+  c.updatedAt = Date.now();
+  save();
+  return folder;
+}
+
+/** Deletes a folder and the folders inside it. Files inside go back up to the deleted folder's parent. */
+export function removeFolder(containerId: number, folderId: number): number {
+  const c = get(containerId);
+  if (!c) return 0;
+  const folders = foldersOf(c);
+  const target = folders.find((f) => f.id === folderId);
+  if (!target) return 0;
+  const doomed = new Set<number>([folderId]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const f of folders) {
+      if (f.parentId != null && doomed.has(f.parentId) && !doomed.has(f.id)) {
+        doomed.add(f.id);
+        grew = true;
+      }
+    }
+  }
+  const up = target.parentId ?? null;
+  for (const it of c.items) {
+    if (it.folderId != null && doomed.has(it.folderId)) it.folderId = up;
+  }
+  c.folders = folders.filter((f) => !doomed.has(f.id));
+  c.updatedAt = Date.now();
+  save();
+  return doomed.size;
+}
+
+/** Moves items into a folder (null = the container's top level). */
+export function moveItems(
+  containerId: number,
+  items: { libraryId: string; relPath: string }[],
+  folderId: number | null
+): number {
+  const c = get(containerId);
+  if (!c) return 0;
+  if (folderId != null && !foldersOf(c).some((f) => f.id === folderId)) return 0;
+  const want = new Set(items.map((i) => itemKey(i.libraryId, i.relPath)));
+  let moved = 0;
+  for (const it of c.items) {
+    if (!want.has(itemKey(it.libraryId, it.relPath))) continue;
+    if ((it.folderId ?? null) === folderId) continue;
+    it.folderId = folderId;
+    moved++;
+  }
+  if (moved > 0) {
+    c.updatedAt = Date.now();
+    save();
+  }
+  return moved;
 }
 
 export function isMigrated(libraryId: string): boolean {

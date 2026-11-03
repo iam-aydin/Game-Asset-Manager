@@ -90,7 +90,14 @@ export class ThumbQueueRunner extends EventEmitter {
     // ffmpeg could read these videos (e.g. AV1) but not decode a frame. Videos
     // now fall back to Chromium, so retry the ones that were marked as failed
     // before the fallback existed.
-    library.thumbErrors.clearWithMessages(['ffmpeg produced no frame']);
+    library.thumbErrors.clearWithMessages(['ffmpeg produced no frame']);
+    // SVGs used to fail with a decode error before they had their own renderer.
+    // Forget those failures so they get one fresh try.
+    library.db
+      .prepare(
+        "DELETE FROM thumb_errors WHERE file_id IN (SELECT id FROM files WHERE ext = 'svg') AND error LIKE '%decode%'"
+      )
+      .run();
     this.enqueueScoped(library);
   }
 

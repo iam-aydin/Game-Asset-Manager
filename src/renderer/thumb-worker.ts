@@ -9,7 +9,7 @@ import { extractFormatMetadata } from './three/format-metadata';
 import { DEFAULT_LIGHTING_STYLE, LightingRig, type LightingStyle } from './three/lighting';
 import { THUMB_WORKER_CHANNEL, THUMB_WORKER_RENDER_SIZE } from '@shared/thumb-worker-protocol';
 import type { ThumbRenderRequest, ThumbRenderResult } from '@shared/thumb-worker-protocol';
-import type { ExtractedMetadata } from '@shared/types';
+import type { ExtractedMetadata, SvgMetadata } from '@shared/types';
 import { isAudioExtension, isImageExtension, isVideoExtension } from '@shared/formats';
 import { extColor } from '@shared/ext-colors';
 import type { IpcRenderer } from 'electron';
@@ -159,7 +159,126 @@ function icoBestBlob(buf: ArrayBuffer, ext: string): Blob | null {
   if (v.getUint32(off, false) !== 0x89504e47) return null; // not PNG-coded: let the browser decode it
   return new Blob([buf.slice(off, off + len)], { type: 'image/png' });
 }
+// --- SVG thumbnails + metadata ----------------------------------------------
+// createImageBitmap() cannot decode SVG, so SVGs are drawn through an <img>.
+// Scripts and external files inside an SVG never run when it is loaded as an image.
+function svgAttr(tag: string, name: string): string | null {
+  const m = new RegExp('\\s' + name + '\\s*=\\s*["\']([^"\']+)["\']', 'i').exec(tag);
+  return m ? m[1] : null;
+}
+
+function svgPx(v: string | null): number | null {
+  if (!v) return null;
+  const m = /^\s*([0-9]*\.?[0-9]+)\s*(px)?\s*$/i.exec(v);
+  return m ? parseFloat(m[1]) : null;
+}
+
+function parseSvgInfo(svg: string): SvgMetadata {
+  const root = /<svg\b[^>]*>/i.exec(svg)?.[0] ?? '';
+  const viewBox = svgAttr(root, 'viewBox');
+  let width = svgPx(svgAttr(root, 'width'));
+  let height = svgPx(svgAttr(root, 'height'));
+  if ((width == null || height == null) && viewBox) {
+    const p = viewBox.trim().split(/[\s,]+/).map(Number);
+    if (p.length === 4 && p.every(Number.isFinite) && p[2] > 0 && p[3] > 0) {
+      if (width == null && height == null) {
+        width = p[2];
+        height = p[3];
+      } else if (width == null) {
+        width = ((height as number) * p[2]) / p[3];
+      } else {
+        height = (width * p[3]) / p[2];
+      }
+    }
+  }
+  const count = (re: RegExp): number => (svg.match(re) ?? []).length;
+  return {
+    width,
+    height,
+    viewBox,
+    elementCount: count(/<[a-zA-Z][^\s>\/]*/g),
+    pathCount: count(/<path\b/gi),
+    hasText: /<text\b/i.test(svg),
+    hasScript: /<script\b/i.test(svg),
+    embeddedImages: count(/<image\b/gi),
+    hasGradients: /<(linear|radial)Gradient\b/i.test(svg)
+  };
+}
+
+function loadSvgImage(svg: string): Promise<{ img: HTMLImageElement; release: () => void }> {
+  const load = (url: string, release: () => void) =>
+    new Promise<{ img: HTMLImageElement; release: () => void }>((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve({ img, release });
+      img.onerror = () => {
+        release();
+        reject(new Error('SVG could not be rendered (invalid SVG or blocked image source)'));
+      };
+      img.src = url;
+    });
+  const blobUrl = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+  return load(blobUrl, () => URL.revokeObjectURL(blobUrl)).catch(() =>
+    load('data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg), () => undefined)
+  );
+}
+
+async function renderSvgThumbnail(req: ThumbRenderRequest): Promise<RenderOutput> {
+  const svg = (await fs.readFile(req.absPath, 'utf8')).replace(/^\uFEFF/, '');
+  const info = parseSvgInfo(svg);
+  const { img, release } = await loadSvgImage(svg);
+  try {
+    const size = THUMB_WORKER_RENDER_SIZE;
+    const w = info.width ?? (img.naturalWidth > 0 ? img.naturalWidth : size);
+    const h = info.height ?? (img.naturalHeight > 0 ? img.naturalHeight : size);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx2d = canvas.getContext('2d');
+    if (!ctx2d) throw new Error('2D context unavailable for SVG thumbnail');
+
+    // Gray checkerboard so both black and white vector art stays visible.
+    const cell = 16;
+    for (let y = 0; y < size; y += cell) {
+      for (let x = 0; x < size; x += cell) {
+        ctx2d.fillStyle = ((x + y) / cell) % 2 === 0 ? '#b8bcc4' : '#a6aab3';
+        ctx2d.fillRect(x, y, cell, cell);
+      }
+    }
+
+    const pad = 16;
+    const scale = Math.min((size - pad * 2) / w, (size - pad * 2) / h);
+    const drawW = w * scale;
+    const drawH = h * scale;
+    ctx2d.drawImage(img, (size - drawW) / 2, (size - drawH) / 2, drawW, drawH);
+
+    const outBlob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob(resolve, 'image/png')
+    );
+    if (!outBlob) throw new Error('canvas.toBlob returned null for SVG thumbnail');
+    const png = new Uint8Array(await outBlob.arrayBuffer());
+
+    const metadata: ExtractedMetadata = {
+      vertexCount: 0,
+      triangleCount: 0,
+      meshCount: 0,
+      materialCount: 0,
+      hasTextures: false,
+      boundingBox: { min: [0, 0, 0], max: [0, 0, 0], size: [0, 0, 0] },
+      thumbSource: 'image',
+      materialNames: [],
+      imageWidth: Math.round(w),
+      imageHeight: Math.round(h),
+      svg: info
+    };
+    return { png, metadata };
+  } finally {
+    release();
+  }
+}
+// -----------------------------------------------------------------------------
 async function renderImageThumbnail(req: ThumbRenderRequest): Promise<RenderOutput> {
+  if (req.ext.toLowerCase() === 'svg') return renderSvgThumbnail(req);
   const buffer = await fs.readFile(req.absPath);
   const arrayBuffer = buffer.buffer.slice(
     buffer.byteOffset,

@@ -81,6 +81,11 @@ const api: IpcApi & {
   setLibraryPath: (id: string) => ipcRenderer.invoke(IPC.setLibraryPath, id) as Promise<any>,
 
   createFolder: (libraryId: string, parentPath: string) => ipcRenderer.invoke('folders:create', libraryId, parentPath),
+  listContainerFolders: (containerId: number) => ipcRenderer.invoke('collections:listFolders', containerId),
+  createContainerFolder: (libraryId: string, containerId: number, parentId: number | null, name: string) => ipcRenderer.invoke('collections:createFolder', libraryId, containerId, parentId, name),
+  renameContainerFolder: (libraryId: string, containerId: number, folderId: number, name: string) => ipcRenderer.invoke('collections:renameFolder', libraryId, containerId, folderId, name),
+  deleteContainerFolder: (libraryId: string, containerId: number, folderId: number) => ipcRenderer.invoke('collections:deleteFolder', libraryId, containerId, folderId),
+  moveContainerItems: (libraryId: string, containerId: number, items: { libraryId: string; relPath: string }[], folderId: number | null) => ipcRenderer.invoke('collections:moveItems', libraryId, containerId, items, folderId),
   renameFolder: (req: RenameFolderRequest) =>
     ipcRenderer.invoke(IPC.renameFolder, req) as Promise<RenameFolderResult>,
   revealFolder: (libraryId: string, folderPath: string) =>

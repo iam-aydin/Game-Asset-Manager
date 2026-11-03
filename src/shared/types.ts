@@ -281,6 +281,11 @@ export interface FileQueryRequest {
    * in the UI; if both are supplied the collection wins.
    */
   collectionId?: number;
+  /**
+   * Container view only: undefined = the whole container, null = its top level,
+   * a number = the files directly inside that virtual folder.
+   */
+  containerFolderId?: number | null;
   /** Restrict to files with at least this rating. 0 = no rating filter. */
   minRating?: number;
   /** Restrict to files carrying one of these labels. Empty/undefined = no filter. */
@@ -362,6 +367,17 @@ export interface CollectionWithCount extends CollectionRecord {
   fileCount: number;
 }
 
+/** A virtual folder inside a container (exists only in the app, not on disk). */
+export interface ContainerFolder {
+  id: number;
+  name: string;
+  parentId: number | null;
+  /** Files directly in this folder. */
+  fileCount: number;
+  /** Files in this folder and every folder below it. */
+  totalCount: number;
+}
+
 /** One entry of a global container (may live in any library). */
 export interface ContainerItem {
   libraryId: string;
@@ -436,6 +452,18 @@ export interface FormatMetadata {
   solidName?: string;
 }
 
+export interface SvgMetadata {
+  /** Size in px from width/height, else from the viewBox. Null when unknown. */
+  width: number | null;
+  height: number | null;
+  viewBox: string | null;
+  elementCount: number;
+  pathCount: number;
+  hasText: boolean;
+  hasScript: boolean;
+  embeddedImages: number;
+  hasGradients: boolean;
+}
 export interface ImageMetadata {
   width: number;
   height: number;
@@ -507,6 +535,8 @@ thumbSource: 'gl' | 'model' | '3mf-embedded' | 'image' | 'audio' | 'video' | 'do
   /** Duration/sample-rate/channel block — set when thumbSource is 'audio'
    *  and the file was successfully decoded. */
   audio?: AudioMetadata;
+  /** SVG details (size, viewBox, element counts). Set for .svg files. */
+  svg?: SvgMetadata;
 }
 
 export interface IpcApi {
@@ -612,6 +642,29 @@ export interface IpcApi {
   listCollections(libraryId: string): Promise<CollectionWithCount[]>;
   /** Every file in a (global) container, across all libraries. */
   listContainerItems(collectionId: number): Promise<ContainerItem[]>;
+  /** Virtual folders of a container (with file counts). */
+  listContainerFolders(containerId: number): Promise<ContainerFolder[]>;
+  createContainerFolder(
+    libraryId: string,
+    containerId: number,
+    parentId: number | null,
+    name: string
+  ): Promise<ContainerFolder | null>;
+  renameContainerFolder(
+    libraryId: string,
+    containerId: number,
+    folderId: number,
+    name: string
+  ): Promise<ContainerFolder | null>;
+  /** Deletes a folder (and folders inside it); its files go back up one level. */
+  deleteContainerFolder(libraryId: string, containerId: number, folderId: number): Promise<void>;
+  /** Moves files into a folder (null = top level of the container). Returns how many moved. */
+  moveContainerItems(
+    libraryId: string,
+    containerId: number,
+    items: { libraryId: string; relPath: string }[],
+    folderId: number | null
+  ): Promise<number>;
   /** Zip every file of a container (any library) to <Desktop>/<name>.zip. */
   zipContainerToDesktop(
     collectionId: number
