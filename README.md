@@ -169,14 +169,12 @@ Game Asset Manager may experience temporary lag or become unresponsive while pro
 If the application appears temporarily stuck during initial processing, allow it some time to finish before assuming it has crashed.
 
 ---
-
 ## 🐛 Known Issues
 
-- **3D Camera Navigation:** Keyboard zooming may move the camera inside certain meshes.
-- **Audio Waveform Rendering:** Thumbnails may occasionally appear instead of waveforms when switching between asset types.
 - **HTML JavaScript Execution:** JavaScript does not currently work in the HTML preview.
 - **Large Library Initialization:** Processing a large library for the first time may cause temporary lag or hangs.
-
+- **Thumbnail Disk Usage:** Thumbnails are currently generated at 512x512 pixels by default, which can take up significant disk space for large libraries. (A fix is coming in Patch 4 to lower the default and let you customize it).
+  
 If you encounter an issue, please report it through the project's GitHub repository.
 
 ---
