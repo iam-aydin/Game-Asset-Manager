@@ -25,6 +25,8 @@ import {
   IconArrowsMinimize,
   IconPlayerPause,
   IconPlayerPlay,
+  IconPlayerSkipBack,
+  IconPlayerSkipForward,
   IconRepeat
 } from '@tabler/icons-react';
 import { MiniIcon, MiniOffIcon } from './PlayerIcons';
@@ -63,6 +65,17 @@ import {
   normalizeModular,
   rollModular
 } from './playerShared';
+
+/** Play queue ("Play as playlist"). App owns the queue; the player only calls these. */
+export interface AudioQueueControls {
+  /** 1-based position of this track, and the queue length. */
+  position: number;
+  total: number;
+  onNext: () => void;
+  onPrev: () => void;
+  /** The track played to its end. `repeat` = the loop button is on (= repeat the queue). */
+  onEnded: (repeat: boolean) => void;
+}
 
 interface AudioPlayerProps {
   libraryId: string;
@@ -104,6 +117,8 @@ interface AudioPlayerProps {
   /** Interface hidden (PreviewPane owns it). The right-click menu toggles it. */
   chromeHidden?: boolean;
   onToggleChrome?: () => void;
+  /** Set while a play queue is active: next / previous buttons, loop button = repeat queue. */
+  queue?: AudioQueueControls;
 }
 
 // CSS variables read by the collapse animation in transition.ts: the size the
@@ -497,9 +512,15 @@ export function AudioPlayer({
   compactStartSlot,
   compactEndSlot,
   chromeHidden,
-  onToggleChrome
+  onToggleChrome,
+  queue
 }: AudioPlayerProps) {
   const [isPlaying, setIsPlaying] = useState(false);
+  // Play queue (see AudioQueueControls). While one is active the single-track loop is
+  // off and the loop button means "repeat the whole queue".
+  const queueRef = useRef(queue);
+  queueRef.current = queue;
+  const hasQueue = !!queue;
   const toggleTrueFs = useTrueFullscreen(isFullscreen, onFullscreen);
   const toggleTrueFsRef = useRef(toggleTrueFs);
   toggleTrueFsRef.current = toggleTrueFs;
@@ -763,6 +784,9 @@ export function AudioPlayer({
     treble,
     isLooping
   };
+
+  // With a queue the sound itself never loops: the track ends and App starts the next one.
+  paramsRef.current.isLooping = isLooping && !hasQueue;
 
   const getPosition = () => {
     const ctx = audioCtxRef.current;
@@ -1043,6 +1067,7 @@ export function AudioPlayer({
       positionRef.current = 0;
       animFrameRef.current = null;
       setCurrentTime(total);
+      queueRef.current?.onEnded(audioEffectsStore.get().isLooping);
       setIsPlaying(false);
       return;
     }
@@ -1186,6 +1211,20 @@ export function AudioPlayer({
     source.loop = loop;
 
     source.connect(graph.preamp);
+    // Queue: also detect the end here, so the next track starts even when the window is
+    // minimized (animation frames pause there, the tick() check would not run).
+    if (!loop && queueRef.current) {
+      source.onended = () => {
+        if (sourceNodeRef.current !== source || !isPlayingRef.current) return;
+        cancelFrame();
+        sourceNodeRef.current = null;
+        isPlayingRef.current = false;
+        positionRef.current = 0;
+        setCurrentTime(buffer.duration);
+        setIsPlaying(false);
+        queueRef.current?.onEnded(audioEffectsStore.get().isLooping);
+      };
+    }
     sourceNodeRef.current = source;
 
     rateRef.current = effectiveRate(s, p);
@@ -1332,10 +1371,10 @@ export function AudioPlayer({
 
   useEffect(() => {
     if (sourceNodeRef.current && !modChainRef.current) {
-      sourceNodeRef.current.loop = isLooping;
+      sourceNodeRef.current.loop = isLooping && !hasQueue;
     }
     audioEffectsStore.set({ isLooping });
-  }, [isLooping]);
+  }, [isLooping, hasQueue]);
 
   useEffect(() => {
     applyParams();
@@ -1428,6 +1467,37 @@ export function AudioPlayer({
 
   const scopedKeysRef = useRef(scopedKeys);
   scopedKeysRef.current = scopedKeys;
+
+  // Previous track: restarts the current one when it is more than 3 s in.
+  const prevTrack = () => {
+    if (getPosition() > 3) {
+      handleSeek(0);
+      return;
+    }
+    queueRef.current?.onPrev();
+  };
+  const prevTrackRef = useRef(prevTrack);
+  prevTrackRef.current = prevTrack;
+
+  // OS media keys (next / previous) while a queue is active.
+  useEffect(() => {
+    if (!hasQueue || !('mediaSession' in navigator)) return undefined;
+    const ms = navigator.mediaSession;
+    try {
+      ms.setActionHandler('nexttrack', () => queueRef.current?.onNext());
+      ms.setActionHandler('previoustrack', () => prevTrackRef.current());
+    } catch {
+      /* unsupported: ignore */
+    }
+    return () => {
+      try {
+        ms.setActionHandler('nexttrack', null);
+        ms.setActionHandler('previoustrack', null);
+      } catch {
+        /* ignore */
+      }
+    };
+  }, [hasQueue]);
 
   const keyboardActionsRef = useRef({
     togglePlay,
@@ -1554,6 +1624,12 @@ export function AudioPlayer({
       } else if (key === 'k') {
         e.preventDefault();
         keyboardActionsRef.current.changeSpeedStep('reset');
+      } else if (key === 'n' && !e.ctrlKey && !e.metaKey && !e.altKey && queueRef.current) {
+        e.preventDefault();
+        queueRef.current.onNext();
+      } else if (key === 'b' && !e.ctrlKey && !e.metaKey && !e.altKey && queueRef.current) {
+        e.preventDefault();
+        prevTrackRef.current();
       } else if (key === 'r') {
         e.preventDefault();
         keyboardActionsRef.current.setConfirmResetOpen(true);
@@ -1956,11 +2032,48 @@ export function AudioPlayer({
           {/* Controls */}
           <div
             className={VIDEO_COMPACT_BAR.collapseClassName}
-            style={{ flexShrink: 0, ...collapseVars('340px', '0px', '16px') }}
+            style={{ flexShrink: 0, ...collapseVars('430px', '0px', '16px') }}
           >
           <Group gap="xs" wrap="nowrap" style={{ flexShrink: 0 }}>
             {/* Repeat / Loop Toggle — hover + scroll: up turns it on, down turns it off */}
-            <Tooltip label={isLooping ? 'Loop: On (scroll to toggle)' : 'Loop: Off (scroll to toggle)'} withinPortal>
+            {queue && (
+              <>
+                <Tooltip label="Previous track (B)" withinPortal>
+                  <ActionIcon
+                    variant="subtle"
+                    color="gray"
+                    size="md"
+                    onClick={() => prevTrack()}
+                    aria-label="Previous track"
+                  >
+                    <IconPlayerSkipBack size={16} />
+                  </ActionIcon>
+                </Tooltip>
+                <Tooltip label={`Next track (N) - ${queue.position} / ${queue.total}`} withinPortal>
+                  <ActionIcon
+                    variant="subtle"
+                    color="gray"
+                    size="md"
+                    onClick={() => queue.onNext()}
+                    aria-label="Next track"
+                  >
+                    <IconPlayerSkipForward size={16} />
+                  </ActionIcon>
+                </Tooltip>
+              </>
+            )}
+            <Tooltip
+              label={
+                queue
+                  ? isLooping
+                    ? 'Repeat queue: On (scroll to toggle)'
+                    : 'Repeat queue: Off (scroll to toggle)'
+                  : isLooping
+                    ? 'Loop: On (scroll to toggle)'
+                    : 'Loop: Off (scroll to toggle)'
+              }
+              withinPortal
+            >
               <ActionIcon
                 variant={isLooping ? 'filled' : 'subtle'}
                 color={isLooping ? 'indigo' : 'gray'}

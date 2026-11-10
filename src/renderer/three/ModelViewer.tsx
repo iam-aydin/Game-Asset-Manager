@@ -2,6 +2,18 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useSta
 import { ActionIcon, Button, Group, Center, Loader, Stack, Text } from '@mantine/core';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+
+import { SMAAPass } from 'three/examples/jsm/postprocessing/SMAAPass.js';
+
+import { FXAAShader } from 'three/examples/jsm/shaders/FXAAShader.js';
 import { disposeObject, loadModel, ThreeMFEmbeddedOnlyError } from './loaders';
 import { frameObject, objectCenter, objectRadius } from './framing';
 import { DEFAULT_LIGHTING_STYLE, LightingRig, type LightingStyle } from './lighting';
@@ -14,6 +26,7 @@ import { loadHdri } from './hdri-loader';
 import { createViewerGrid, type ViewerGrid } from './grid'; // GRID (1/4)
 import { AxisGizmo } from './axis-gizmo'; // GIZMO (1/3)
 import type { CameraState, FileRecord } from '@shared/types';
+import type { AntiAliasing } from '@shared/preferences';
 import { isImageExtension } from '@shared/formats';
 import {
   DEFAULT_RENDER_QUALITY,
@@ -114,23 +127,40 @@ const NAV_SPEED_HUD_MS = 1400;                   // how long the speed readout s
 // How long the camera swing takes after clicking an axis on the gizmo.
 const GIZMO_SNAP_MS = 280;
 
-// HDRI SWITCH: decode the other HDRIs in the background (one at a time, after the
-// first one is on screen), so switching later doesn't stall on loading a 4K file.
-let hdriPreloadStarted = false;
-function preloadOtherHdris(): void {
-  if (hdriPreloadStarted) return;
-  hdriPreloadStarted = true;
-  const list = HDRI_PRESETS.filter((p) => p.url);
-  let i = 0;
-  const next = () => {
-    if (i >= list.length) return;
-    const p = list[i++];
-    void loadHdri(p.id, p.url as string)
-      .catch(() => undefined)
-      .then(() => window.setTimeout(next, 600));
-  };
-  window.setTimeout(next, 2500);
-}
+// HDRI SWITCH: decode the other HDRIs in the background (one at a time, after the
+
+// first one is on screen), so switching later doesn't stall on loading a 4K file.
+
+let hdriPreloadStarted = false;
+
+function preloadOtherHdris(): void {
+
+  if (hdriPreloadStarted) return;
+
+  hdriPreloadStarted = true;
+
+  const list = HDRI_PRESETS.filter((p) => p.url);
+
+  let i = 0;
+
+  const next = () => {
+
+    if (i >= list.length) return;
+
+    const p = list[i++];
+
+    void loadHdri(p.id, p.url as string)
+
+      .catch(() => undefined)
+
+      .then(() => window.setTimeout(next, 600));
+
+  };
+
+  window.setTimeout(next, 2500);
+
+}
+
 interface Props {
   libraryId: string | null;
   file: FileRecord;
@@ -138,6 +168,7 @@ interface Props {
   hdri?: HdriId;
   showGrid?: boolean;
   renderQuality?: RenderQuality;
+  antiAliasing?: AntiAliasing;
   hdriAdjust?: HdriAdjust;
   fov?: number;
 }
@@ -191,6 +222,7 @@ interface ViewerCtx {
   currentObject: THREE.Object3D | null;
   rafId: number | null;
   resizeObserver: ResizeObserver | null;
+  post: { render(): void; resize(w: number, h: number, pr: number): void; dispose(): void } | null;
 }
 
 export interface ModelViewerHandle {
@@ -213,6 +245,7 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     hdri = DEFAULT_HDRI,
     showGrid = false,
     renderQuality = DEFAULT_RENDER_QUALITY,
+    antiAliasing = 'auto',
     hdriAdjust = DEFAULT_HDRI_ADJUST,
     fov = 38
   },
@@ -268,10 +301,14 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
   const hdriRef = useRef(hdri);
   hdriRef.current = hdri;
   const hdriAdjustRef = useRef(hdriAdjust);
-  hdriAdjustRef.current = hdriAdjust;
-  // HDRI SWITCH: the HDRI that is really on screen. The adjust values are only applied to
-  // it, never to the previous sky while the next one is still loading (that was the dimming).
-  const loadedHdriRef = useRef<HdriId | null>(null);
+  hdriAdjustRef.current = hdriAdjust;
+
+  // HDRI SWITCH: the HDRI that is really on screen. The adjust values are only applied to
+
+  // it, never to the previous sky while the next one is still loading (that was the dimming).
+
+  const loadedHdriRef = useRef<HdriId | null>(null);
+
   const prevHdriRef = useRef<HdriId | null>(null);
   // Applies the Adjust-popover values on top of the preset. Reads refs only, so it
   // is safe to call from async code.
@@ -392,7 +429,7 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
         // is preserved, so it is safe to show the grid again right after.
         const grid = gridRef.current;
         if (grid) grid.group.visible = false;
-        ctx.renderer.render(ctx.scene, ctx.camera);
+        if (ctx.post) ctx.post.render(); else ctx.renderer.render(ctx.scene, ctx.camera);
         if (grid) grid.group.visible = true;
 
         const src = ctx.renderer.domElement;
@@ -436,10 +473,11 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
           // Re-render only the crop region at the target size (no grid, no axis gizmo).
           renderer.setPixelRatio(1);
           renderer.setSize(outW, outH, false);
+          ctx.post?.resize(outW, outH, 1);
           const fw = outW / crop.w;
           const fh = outH / crop.h;
           camera.setViewOffset(fw, fh, crop.x * fw, crop.y * fh, outW, outH);
-          renderer.render(scene, camera);
+          if (ctx.post) ctx.post.render(); else renderer.render(scene, camera);
           blob = await new Promise<Blob | null>((resolve) =>
             renderer.domElement.toBlob(resolve, 'image/png')
           );
@@ -447,6 +485,7 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
           camera.clearViewOffset();
           renderer.setPixelRatio(prevPR);
           renderer.setSize(size.x, size.y, false);
+          ctx.post?.resize(size.x, size.y, prevPR);
           if (grid) grid.group.visible = true;
         }
         return blob;
@@ -492,7 +531,7 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     const h = Math.max(height, 1);
 
     const renderer = new THREE.WebGLRenderer({
-      antialias: QUALITY_CAPS[renderQuality].antialias,
+      antialias: antiAliasing === 'msaa' || (antiAliasing === 'auto' && QUALITY_CAPS[renderQuality].antialias),
       alpha: true,
       preserveDrawingBuffer: true
     });
@@ -525,6 +564,52 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
       for (const cb of cameraListenersRef.current) cb();
     });
 
+    // ANTI-ALIASING: FXAA / SMAA run as a post-process after the normal render.
+
+    let post: ViewerCtx['post'] = null;
+
+    if (antiAliasing === 'fxaa' || antiAliasing === 'smaa') {
+
+      const pr0 = renderer.getPixelRatio();
+
+      const composer = new EffectComposer(renderer);
+
+      composer.addPass(new RenderPass(scene, camera));
+
+      composer.addPass(new OutputPass());
+
+      let fxaa: ShaderPass | null = null;
+
+      if (antiAliasing === 'fxaa') {
+
+        fxaa = new ShaderPass(FXAAShader);
+
+        composer.addPass(fxaa);
+
+      } else {
+
+        composer.addPass(new (SMAAPass as any)(w * pr0, h * pr0));
+
+      }
+
+      const fit = (pw: number, ph: number, ppr: number) => {
+
+        composer.setPixelRatio(ppr);
+
+        composer.setSize(pw, ph);
+
+        if (fxaa) fxaa.material.uniforms['resolution'].value.set(1 / (pw * ppr), 1 / (ph * ppr));
+
+      };
+
+      fit(w, h, pr0);
+
+      post = { render: () => composer.render(), resize: fit, dispose: () => composer.dispose() };
+
+    }
+
+
+
     const ctx: ViewerCtx = {
       renderer,
       scene,
@@ -533,6 +618,7 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
       lighting,
       currentObject: null,
       rafId: null,
+      post,
       resizeObserver: null
     };
     ctxRef.current = ctx;
@@ -639,7 +725,7 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     const tick = () => {
       controls.update();
       updateClipPlanes();
-      renderer.render(scene, camera);
+      if (ctx.post) ctx.post.render(); else renderer.render(scene, camera);
       if (ctx.currentObject) gizmo.render(renderer, camera);
       ctx.rafId = requestAnimationFrame(tick);
     };
@@ -649,6 +735,7 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
       const rect = container.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) return;
       renderer.setSize(rect.width, rect.height);
+      ctx.post?.resize(rect.width, rect.height, renderer.getPixelRatio());
       camera.aspect = rect.width / rect.height;
       camera.updateProjectionMatrix();
     });
@@ -675,6 +762,7 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
         gridRef.current.dispose();
         gridRef.current = null;
       }
+      ctx.post?.dispose();
       ctx.lighting.dispose();
       scene.clear();
       if (renderer.domElement.parentNode) {
@@ -710,83 +798,160 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
     syncGrid();
   }, [showGrid, renderQuality]);
 
-  // HDRI (2/3): background + image-based lighting. The rig keeps the setup, so
-  // later view-mode changes re-apply it (lights the model in Lit only, the
-  // background shows in every mode). `renderQuality` is a dep because that
-  // change rebuilds the renderer and the rig with it.
-  //
-  // HDRI SWITCH: when the environment changes, the view blurs (CSS) while the new HDRI
-  // loads and is applied, then un-blurs smoothly. The old sky stays untouched until the
-  // new one is ready (loadedHdriRef blocks the adjust values in the meantime).
-  useEffect(() => {
-    const ctx = ctxRef.current;
-    if (!ctx) return;
-    const canvas = ctx.renderer.domElement;
-    const preset = getHdriPreset(hdri);
-    const animate = prevHdriRef.current !== null && prevHdriRef.current !== hdri;
-    prevHdriRef.current = hdri;
-    loadedHdriRef.current = null;
-    let canceled = false;
-
-    const BLUR_PX = 14;
-    const BLUR_IN_MS = 160;
-    const BLUR_OUT_MS = 450;
-    const setBlur = (px: number, ms: number) => {
-      canvas.style.transition = `filter ${ms}ms ease`;
-      canvas.style.filter = px > 0 ? `blur(${px}px)` : '';
-    };
-    const unblur = () => {
-      // two frames later, so the heavy first render of the new HDRI is already done
-      requestAnimationFrame(() =>
-        requestAnimationFrame(() => {
-          if (!canceled) setBlur(0, BLUR_OUT_MS);
-        })
-      );
-    };
-    const wait = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
-
-    if (!preset.url) {
-      if (animate) {
-        setBlur(BLUR_PX, BLUR_IN_MS);
-        void wait(BLUR_IN_MS + 10).then(() => {
-          if (canceled || ctxRef.current !== ctx) return;
-          ctx.lighting.setHdri(null);
-          unblur();
-        });
-      } else {
-        ctx.lighting.setHdri(null);
-      }
-      return () => {
-        canceled = true;
-      };
-    }
-
-    if (animate) setBlur(BLUR_PX, BLUR_IN_MS);
-    Promise.all([loadHdri(preset.id, preset.url), animate ? wait(BLUR_IN_MS + 10) : Promise.resolve()])
-      .then(([texture]) => {
-        if (canceled || ctxRef.current !== ctx) return;
-        loadedHdriRef.current = preset.id;
-        ctx.lighting.setHdri({
-          texture,
-          environmentIntensity: preset.environmentIntensity,
-          backgroundIntensity: preset.backgroundIntensity,
-          backgroundBlurriness: preset.backgroundBlurriness,
-          exposure: preset.exposure,
-          lightScale: preset.lightScale
-        });
-        applyHdriAdjust();
-        if (animate) unblur();
-        preloadOtherHdris();
-      })
-      .catch((err) => {
-        if (canceled) return;
-        console.error(`HDRI "${preset.id}" failed to load`, err);
-        ctx.lighting.setHdri(null);
-        if (animate) unblur();
-      });
-    return () => {
-      canceled = true;
-    };
+  // HDRI (2/3): background + image-based lighting. The rig keeps the setup, so
+
+  // later view-mode changes re-apply it (lights the model in Lit only, the
+
+  // background shows in every mode). `renderQuality` is a dep because that
+
+  // change rebuilds the renderer and the rig with it.
+
+  //
+
+  // HDRI SWITCH: when the environment changes, the view blurs (CSS) while the new HDRI
+
+  // loads and is applied, then un-blurs smoothly. The old sky stays untouched until the
+
+  // new one is ready (loadedHdriRef blocks the adjust values in the meantime).
+
+  useEffect(() => {
+
+    const ctx = ctxRef.current;
+
+    if (!ctx) return;
+
+    const canvas = ctx.renderer.domElement;
+
+    const preset = getHdriPreset(hdri);
+
+    const animate = prevHdriRef.current !== null && prevHdriRef.current !== hdri;
+
+    prevHdriRef.current = hdri;
+
+    loadedHdriRef.current = null;
+
+    let canceled = false;
+
+
+
+    const BLUR_PX = 14;
+
+    const BLUR_IN_MS = 160;
+
+    const BLUR_OUT_MS = 450;
+
+    const setBlur = (px: number, ms: number) => {
+
+      canvas.style.transition = `filter ${ms}ms ease`;
+
+      canvas.style.filter = px > 0 ? `blur(${px}px)` : '';
+
+    };
+
+    const unblur = () => {
+
+      // two frames later, so the heavy first render of the new HDRI is already done
+
+      requestAnimationFrame(() =>
+
+        requestAnimationFrame(() => {
+
+          if (!canceled) setBlur(0, BLUR_OUT_MS);
+
+        })
+
+      );
+
+    };
+
+    const wait = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+
+
+
+    if (!preset.url) {
+
+      if (animate) {
+
+        setBlur(BLUR_PX, BLUR_IN_MS);
+
+        void wait(BLUR_IN_MS + 10).then(() => {
+
+          if (canceled || ctxRef.current !== ctx) return;
+
+          ctx.lighting.setHdri(null);
+
+          unblur();
+
+        });
+
+      } else {
+
+        ctx.lighting.setHdri(null);
+
+      }
+
+      return () => {
+
+        canceled = true;
+
+      };
+
+    }
+
+
+
+    if (animate) setBlur(BLUR_PX, BLUR_IN_MS);
+
+    Promise.all([loadHdri(preset.id, preset.url), animate ? wait(BLUR_IN_MS + 10) : Promise.resolve()])
+
+      .then(([texture]) => {
+
+        if (canceled || ctxRef.current !== ctx) return;
+
+        loadedHdriRef.current = preset.id;
+
+        ctx.lighting.setHdri({
+
+          texture,
+
+          environmentIntensity: preset.environmentIntensity,
+
+          backgroundIntensity: preset.backgroundIntensity,
+
+          backgroundBlurriness: preset.backgroundBlurriness,
+
+          exposure: preset.exposure,
+
+          lightScale: preset.lightScale
+
+        });
+
+        applyHdriAdjust();
+
+        if (animate) unblur();
+
+        preloadOtherHdris();
+
+      })
+
+      .catch((err) => {
+
+        if (canceled) return;
+
+        console.error(`HDRI "${preset.id}" failed to load`, err);
+
+        ctx.lighting.setHdri(null);
+
+        if (animate) unblur();
+
+      });
+
+    return () => {
+
+      canceled = true;
+
+    };
+
   }, [hdri, renderQuality]);
 
   // FOV slider (also re-applied when the renderer is rebuilt).
@@ -1333,8 +1498,8 @@ export const ModelViewer = forwardRef<ModelViewerHandle, Props>(function ModelVi
       if (e.ctrlKey || e.metaKey || e.altKey || isTyping(e)) return;
       const k = e.key.toLowerCase();
 
-      // F: frame the model (Unreal's "focus")
-      if (k === 'f' && !e.repeat && ctx.currentObject) {
+      // Home: frame the model (F is fullscreen)
+      if (k === 'home' && !e.repeat && ctx.currentObject) {
         e.preventDefault();
         focusModel();
         return;

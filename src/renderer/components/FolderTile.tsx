@@ -66,11 +66,13 @@ export function FolderTile({
         borderRadius: 6,
         border: focus
           ? `${TILE_BORDER}px solid var(--mantine-color-indigo-5)`
+          : hover
+          ? `${TILE_BORDER}px solid color-mix(in srgb, var(--mantine-color-indigo-4) 40%, transparent)`
           : `${TILE_BORDER}px solid transparent`,
         background: focus
           ? 'var(--mantine-color-dark-5)'
           : hover
-            ? 'var(--mantine-color-dark-6)'
+            ? 'color-mix(in srgb, var(--mantine-color-indigo-4) 10%, transparent)'
             : 'transparent',
         boxSizing: 'border-box',
         overflow: 'hidden'

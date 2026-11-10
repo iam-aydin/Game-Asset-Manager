@@ -835,6 +835,7 @@ function Tile({
   onDragStart?: (e: React.DragEvent) => void;
 }) {
   const color = extColor(file.ext);
+  const [hover, setHover] = useState(false);
   const showThumb = file.hasThumb || thumbVersion > 0;
   const thumbUrl = showThumb
     ? `wh3d-thumb://${file.libraryId}/${file.id}?v=${thumbVersion}`
@@ -848,6 +849,8 @@ function Tile({
       onContextMenu={onContextMenu}
       draggable
       onDragStart={onDragStart}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       style={{
         all: 'unset',
         cursor: 'pointer',
@@ -860,8 +863,14 @@ function Tile({
           ? `${TILE_BORDER}px solid var(--mantine-color-indigo-3)`
           : selected
             ? `${TILE_BORDER}px solid var(--mantine-color-indigo-5)`
-            : `${TILE_BORDER}px solid transparent`,
-        background: selected ? 'var(--mantine-color-dark-5)' : 'var(--mantine-color-dark-6)',
+            : hover
+              ? `${TILE_BORDER}px solid color-mix(in srgb, var(--mantine-color-indigo-4) 40%, transparent)`
+              : `${TILE_BORDER}px solid transparent`,
+        background: selected
+          ? 'color-mix(in srgb, var(--mantine-color-indigo-4) 16%, var(--mantine-color-dark-6))'
+          : hover
+            ? 'color-mix(in srgb, var(--mantine-color-indigo-4) 10%, var(--mantine-color-dark-6))'
+            : 'var(--mantine-color-dark-6)',
         boxSizing: 'border-box',
         overflow: 'hidden'
       }}

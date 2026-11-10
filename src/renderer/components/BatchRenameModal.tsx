@@ -196,19 +196,26 @@ export function BatchRenameModal({ opened, libraryId, files, onClose }: Props) {
     if (!libraryId || !canSubmit) return;
     setSubmitting(true);
     try {
-      const plan: BatchRenameItem[] = rows
-        .filter((r) => r.changed)
-        .map((r) => ({
-          fileId: r.file.id,
-          fromRelPath: r.file.relPath,
-          toRelPath: r.newRelPath
-        }));
-      const result = await ipc.batchRename(libraryId, plan);
+      // Container files can come from several libraries: rename each group in its own library.
+      const byLib = new Map<string, BatchRenameItem[]>();
+      for (const r of rows) {
+        if (!r.changed) continue;
+        const arr = byLib.get(r.file.libraryId) ?? [];
+        arr.push({ fileId: r.file.id, fromRelPath: r.file.relPath, toRelPath: r.newRelPath });
+        byLib.set(r.file.libraryId, arr);
+      }
+      let renamedTotal = 0;
+      let result!: Awaited<ReturnType<typeof ipc.batchRename>>;
+      for (const [lid, plan] of byLib) {
+        result = await ipc.batchRename(lid, plan);
+        if (!result.ok) break;
+        renamedTotal += result.renamed;
+      }
       if (result.ok) {
         notifications.show({
           color: 'green',
           title: 'Batch rename',
-          message: `Renamed ${result.renamed} file${result.renamed === 1 ? '' : 's'}.`
+          message: `Renamed ${renamedTotal} file${renamedTotal === 1 ? '' : 's'}.`
         });
         close();
       } else if (result.collisions && result.collisions.length > 0) {

@@ -107,7 +107,32 @@ const LIGHTING_STORAGE_KEY = 'wh3d:lightingStyle';
 const SORT_STORAGE_KEY = 'wh3d:sort';
 const VIEW_STORAGE_KEY = 'wh3d:viewMode';
 const WORKSPACE_STORAGE_KEY = 'wh3d:workspace';
-const THEME_STORAGE_KEY = 'wh3d:theme';
+const THEME_STORAGE_KEY = 'wh3d:theme';
+const LAST_PLACE_KEY = 'gam:lastPlace';
+
+type SavedPlace = {
+  libraryId: string;
+  path: string;
+  collectionId: number | null;
+  containerFolderId: number | null;
+};
+
+function readLastPlace(): SavedPlace | null {
+  try {
+    const raw = localStorage.getItem(LAST_PLACE_KEY);
+    if (!raw) return null;
+    const p = JSON.parse(raw);
+    if (!p || typeof p.libraryId !== 'string') return null;
+    return {
+      libraryId: p.libraryId,
+      path: typeof p.path === 'string' ? p.path : '',
+      collectionId: typeof p.collectionId === 'number' ? p.collectionId : null,
+      containerFolderId: typeof p.containerFolderId === 'number' ? p.containerFolderId : null
+    };
+  } catch {
+    return null;
+  }
+}
 // GLASS TOGGLE: const GLASS_STORAGE_KEY = 'wh3d:glassUi';
 
 const WINDOW_OPACITY_STORAGE_KEY = 'gam:windowOpacity';
@@ -399,8 +424,14 @@ export function App() {
   const [activeAudio, setActiveAudio] = useState<{ fileId: number; autoPlay: boolean } | null>(null);
   const [primaryFileId, setPrimaryFileId] = useState<number | null>(null);
   const selectionAnchorRef = useRef<number | null>(null);
+  // Play queue ("Play as playlist"): ids of the queued audio files in play order.
+  const [playQueue, setPlayQueue] = useState<{ ids: number[]; index: number } | null>(null);
+  const playQueueRef = useRef(playQueue);
+  playQueueRef.current = playQueue;
   // Set when jumping to a folder/container in ANOTHER library: the library-change
   // reset effect applies it after it has cleared the per-library state.
+  const restoreRef = useRef<SavedPlace | null | undefined>(undefined);
+  if (restoreRef.current === undefined) restoreRef.current = readLastPlace();
   const pendingNavRef = useRef<{
     libraryId: string;
     path: string;
@@ -751,7 +782,11 @@ export function App() {
     const list = await ipc.listLibraries();
     setLibraries(list);
     setSelectedLibraryId((prev) => {
-      if (prev && list.some((l) => l.id === prev && l.online)) return prev;
+      if (prev && list.some((l) => l.id === prev && l.online)) return prev;
+      const saved = restoreRef.current;
+      if (!prev && saved && list.some((l) => l.id === saved.libraryId && l.online)) {
+        return saved.libraryId;
+      }
       return list.find((l) => l.online)?.id ?? list[0]?.id ?? null;
     });
   }, []);
@@ -1060,11 +1095,23 @@ export function App() {
     setDuplicatesOnly(false);
     setAllTags([]);
     // Jumped here from another library's favorite/recent/container item.
+    let restoredFolderId: number | null = null;
+    if (
+      !pendingNavRef.current &&
+      restoreRef.current &&
+      restoreRef.current.libraryId === selectedLibraryId
+    ) {
+      const r = restoreRef.current;
+      restoreRef.current = null;
+      pendingNavRef.current = { libraryId: r.libraryId, path: r.path, collectionId: r.collectionId };
+      restoredFolderId = r.containerFolderId;
+    }
     const pending = pendingNavRef.current;
     if (pending && pending.libraryId === selectedLibraryId) {
       pendingNavRef.current = null;
       setSelectedFolderPath(pending.path);
-      setSelectedCollectionId(pending.collectionId);
+      setSelectedCollectionId(pending.collectionId);
+      setSelectedContainerFolderId(restoredFolderId);
     }
     if (!selectedLibraryId) return;
     void refreshTree(selectedLibraryId);
@@ -1100,6 +1147,8 @@ export function App() {
     );
     clearSelection();
     autoSelectFirstRef.current = true;
+    // Browsing somewhere else ends the queue (the player is tied to the current list).
+    setPlayQueue(null);
     // Stop thumbnail work right away; the new list sets the scope again when it arrives.
     void ipc.bumpVisibleThumbs(selectedLibraryId, []);
     setThumbLoad(null);
@@ -1120,6 +1169,24 @@ export function App() {
     clearSelection
   ]);
 
+  // Remember the last place so it can be restored on launch.
+  useEffect(() => {
+    if (!selectedLibraryId) return;
+    try {
+      localStorage.setItem(
+        LAST_PLACE_KEY,
+        JSON.stringify({
+          libraryId: selectedLibraryId,
+          path: selectedFolderPath,
+          collectionId: selectedCollectionId,
+          containerFolderId: selectedContainerFolderId
+        })
+      );
+    } catch {
+      // ignore
+    }
+  }, [selectedLibraryId, selectedFolderPath, selectedCollectionId, selectedContainerFolderId]);
+
   // When a nav-triggered file list arrives, auto-promote the first file to
   // primary so the preview pane updates without an explicit click. The flag
   // ensures this only happens once per navigation — subsequent IPC reloads
@@ -1724,6 +1791,12 @@ export function App() {
       }
 
       // 3. Normal Left Click: Select file; audio/video autoplay
+      // Queue running: clicking a queued track jumps to it, any other file ends the queue.
+      setPlayQueue((q) => {
+        if (!q) return q;
+        const i = q.ids.indexOf(fileId);
+        return i < 0 ? null : { ...q, index: i };
+      });
       setSelectedFileIds(new Set([fileId]));
       setPrimaryFileId(fileId);
       selectionAnchorRef.current = fileId;
@@ -1758,6 +1831,69 @@ export function App() {
     );
     selectionAnchorRef.current = ids.length > 0 ? ids[0] : null;
   }, []);
+
+  // --- Play queue ("Play as playlist") ---------------------------------------
+  const startQueueAt = useCallback((ids: number[], index: number) => {
+    const id = ids[index];
+    if (id === undefined) return;
+    setPlayQueue({ ids, index });
+    setPrimaryFileId(id);
+    setActiveAudio({ fileId: id % LIB_ID_SPAN, autoPlay: true });
+  }, []);
+
+  const playSelectionAsPlaylist = useCallback(() => {
+    const ids = files
+      .filter(
+        (f) => selectedFileIds.has(f.id) && isAudioExtension(f.ext.replace(/^\./, '').toLowerCase())
+      )
+      .map((f) => f.id);
+    if (ids.length < 2) {
+      notifications.show({
+        color: 'orange',
+        title: 'Play as playlist',
+        message: 'Select at least 2 audio files.',
+        autoClose: 3000
+      });
+      return;
+    }
+    startQueueAt(ids, 0);
+  }, [files, selectedFileIds, startQueueAt]);
+
+  const playQueueStep = useCallback(
+    (dir: 1 | -1) => {
+      const q = playQueueRef.current;
+      if (!q || q.ids.length === 0) return;
+      startQueueAt(q.ids, (q.index + dir + q.ids.length) % q.ids.length);
+    },
+    [startQueueAt]
+  );
+
+  // A track played to its end. Last track: wrap around only when repeat is on.
+  const handleQueueEnded = useCallback(
+    (repeat: boolean) => {
+      const q = playQueueRef.current;
+      if (!q) return;
+      if (q.index + 1 >= q.ids.length && !repeat) return;
+      playQueueStep(1);
+    },
+    [playQueueStep]
+  );
+
+  // Only handed to the player while the previewed file really is the queue's current track.
+  const audioQueue = useMemo(
+    () =>
+      playQueue && playQueue.ids[playQueue.index] === primaryFileId
+        ? {
+            position: playQueue.index + 1,
+            total: playQueue.ids.length,
+            onNext: () => playQueueStep(1),
+            onPrev: () => playQueueStep(-1),
+            onEnded: handleQueueEnded
+          }
+        : undefined,
+    [playQueue, primaryFileId, playQueueStep, handleQueueEnded]
+  );
+  // ----------------------------------------------------------------------------
 
   const closeContextMenu = useCallback(() => {
     setContextMenu((prev) => ({ ...prev, open: false }));
@@ -2465,6 +2601,18 @@ export function App() {
         return;
       }
 
+      // Enter = play the selected audio files as a playlist (2+ audio files selected).
+      if (e.key === 'Enter' && !mod && !e.shiftKey && !e.altKey) {
+        const audioPicked = files.filter(
+          (f) => selectedFileIds.has(f.id) && isAudioExtension(f.ext.replace(/^\./, '').toLowerCase())
+        );
+        if (audioPicked.length >= 2) {
+          e.preventDefault();
+          playSelectionAsPlaylist();
+          return;
+        }
+      }
+
       // Arrow nav (left/right linearly through the visible files array)
       if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
         if (files.length === 0) return;
@@ -2503,7 +2651,8 @@ export function App() {
     handlePasteFiles,
     goBack,
     goForward,
-    goUp
+    goUp,
+    playSelectionAsPlaylist
   ]);
 
   const handleAddToCollection = useCallback(
@@ -3115,6 +3264,7 @@ export function App() {
       onRerenderThumb={handleRerenderThumb}
       onMaximize={() => setFullscreenOpen(true)}
       activeAudio={activeAudio}
+      audioQueue={audioQueue}
       onMiniModeChange={(mini) => {
       miniModeRef.current = mini;
       }}
@@ -3139,6 +3289,11 @@ export function App() {
         onBulkRerender={handleBulkRerender}
         onBatchRename={() => setBatchRenameOpen(true)}
         onCompare={() => setCompareOpen(true)}
+        onPlayAsPlaylist={playSelectionAsPlaylist}
+        queueStatus={
+          playQueue ? { position: playQueue.index + 1, total: playQueue.ids.length } : null
+        }
+        onStopPlaylist={() => setPlayQueue(null)}
         onAddToCollection={handleAddToCollection}
         onRemoveFromCollection={handleRemoveFromCollection}
         onCreateCollection={handleCreateCollection}
@@ -3525,7 +3680,7 @@ export function App() {
       <BatchRenameModal
         opened={batchRenameOpen}
         libraryId={selectedLibraryId}
-        files={selectedFiles.filter((f) => f.libraryId === selectedLibraryId)}
+        files={selectedFiles}
         onClose={() => setBatchRenameOpen(false)}
       />
 

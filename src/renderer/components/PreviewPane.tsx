@@ -6,7 +6,7 @@ import {
   type CSSProperties,
   type ReactNode
 } from 'react';
-import { AudioPlayer } from './AudioPlayer';
+import { AudioPlayer, type AudioQueueControls } from './AudioPlayer';
 import { TextPreview } from './TextPreview';
 import { ImagePreview } from './ImagePreview';
 import { IconPreview } from './IconPreview';
@@ -160,6 +160,8 @@ interface Props {
   /** The same theme button/dropdown the main toolbar uses. Rendered in the
    *  mini player header, just left of the back button. */
   themeButton?: ReactNode;
+  /** Audio play queue (set by App while "Play as playlist" is running). */
+  audioQueue?: AudioQueueControls;
 }
 
 export function PreviewPane({
@@ -172,7 +174,8 @@ export function PreviewPane({
   onRerenderThumb,
   activeAudio,
   onMiniModeChange,
-  themeButton
+  themeButton,
+  audioQueue
 }: Props) {
   const viewerRef = useRef<ModelViewerHandle>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -470,11 +473,11 @@ export function PreviewPane({
   // Keep the old frame bits referenced (the ring now drives the aspect crop instead).
   void [showFrame, setShowFrame, setFrameSticky, cropSize, CropOverlay];
 
-  // P: take a screenshot (3D models only).
+  // Ctrl+P: take a screenshot (3D models only).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key.toLowerCase() !== 'p') return;
-      if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || e.repeat) return;
+      if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'p') return;
+      if (e.altKey || e.shiftKey || e.repeat) return;
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
       if (!isModelFile) return;
@@ -888,7 +891,7 @@ export function PreviewPane({
                       }}
                     >
                       <Tooltip
-                        label="Camera: screenshot (P) - Shift+click: set thumbnail - Ring: aspect ratio"
+                        label="Camera: screenshot (Ctrl+P) - Shift+click: set thumbnail - Ring: aspect ratio"
                         withinPortal
                       >
                         <ActionIcon
@@ -1154,6 +1157,7 @@ export function PreviewPane({
               libraryId={libraryId}
               file={file}
               activeAudio={activeAudio}
+              audioQueue={audioQueue}
               onMini={() => {
                 setLayout('normal');
                 toggleMini();
@@ -1201,6 +1205,8 @@ export function PreviewPane({
           ) : (
             <ModelViewer
               ref={viewerRef}
+              key={prefs?.antiAliasing ?? 'auto'}
+              antiAliasing={prefs?.antiAliasing ?? 'auto'}
               libraryId={libraryId}
               file={file}
               lightingStyle={lightingStyle}
@@ -1343,8 +1349,10 @@ function AudioPreview({
   isFullscreen,
   compact,
   chromeHidden,
-  onToggleChrome
+  onToggleChrome,
+  audioQueue
 }: {
+  audioQueue?: AudioQueueControls;
   chromeHidden?: boolean;
   onToggleChrome?: () => void;
   libraryId: string;
@@ -1397,6 +1405,7 @@ function AudioPreview({
         onFullscreen={onFullscreen}
         isFullscreen={isFullscreen}
         compact={compact}
+        queue={audioQueue}
         chromeHidden={chromeHidden}
         onToggleChrome={onToggleChrome}
       />

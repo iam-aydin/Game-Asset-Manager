@@ -46,6 +46,9 @@ interface Props {
   onAddToCollection: (collectionId: number, fileIds: number[]) => Promise<void> | void;
   onRemoveFromCollection: (collectionId: number, fileIds: number[]) => Promise<void> | void;
   onCreateCollection: (name: string) => Promise<CollectionRecord | null>;
+  onPlayAsPlaylist?: () => void;
+  queueStatus?: { position: number; total: number } | null;
+  onStopPlaylist?: () => void;
 }
 
 export function MetadataPanel(props: Props) {
@@ -92,6 +95,9 @@ export function MetadataPanel(props: Props) {
         onBulkRerender={props.onBulkRerender}
         onBatchRename={props.onBatchRename}
         onCompare={props.onCompare}
+        onPlayAsPlaylist={props.onPlayAsPlaylist}
+        queueStatus={props.queueStatus}
+        onStopPlaylist={props.onStopPlaylist}
         onAddToCollection={props.onAddToCollection}
         onRemoveFromCollection={props.onRemoveFromCollection}
         onCreateCollection={props.onCreateCollection}

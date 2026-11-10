@@ -13,6 +13,8 @@ import {
   IconArrowsLeftRight,
   IconCircleMinus,
   IconEdit,
+  IconPlayerPlay,
+  IconPlayerStop,
   IconRefresh,
   IconRotateClockwise
 } from '@tabler/icons-react';
@@ -29,6 +31,7 @@ import { AddToCollectionMenu } from './AddToCollectionMenu';
 import { RatingWidget } from './RatingWidget';
 import { ColorLabelWidget } from './ColorLabelWidget';
 import { canCompare } from './compare-kind';
+import { isAudioExtension } from '@shared/formats';
 
 /**
  * Triage, Tags and Orientation are hidden while several files are selected.
@@ -55,6 +58,11 @@ interface Props {
   onAddToCollection: (collectionId: number, fileIds: number[]) => Promise<void> | void;
   onRemoveFromCollection: (collectionId: number, fileIds: number[]) => Promise<void> | void;
   onCreateCollection: (name: string) => Promise<CollectionRecord | null>;
+  /** Start the selected audio files as a play queue. */
+  onPlayAsPlaylist?: () => void;
+  /** Set while a queue is running (position is 1-based). */
+  queueStatus?: { position: number; total: number } | null;
+  onStopPlaylist?: () => void;
 }
 
 /**
@@ -84,9 +92,16 @@ export function BulkMetadataPanel({
   onCompare,
   onAddToCollection,
   onRemoveFromCollection,
-  onCreateCollection
+  onCreateCollection,
+  onPlayAsPlaylist,
+  queueStatus,
+  onStopPlaylist
 }: Props) {
   const fileIds = useMemo(() => selectedFiles.map((f) => f.id), [selectedFiles]);
+  const audioCount = useMemo(
+    () => selectedFiles.filter((f) => isAudioExtension(f.ext.replace(/^\./, '').toLowerCase())).length,
+    [selectedFiles]
+  );
   const extCounts = useMemo(() => {
     const m = new Map<string, number>();
     for (const f of selectedFiles) m.set(f.ext, (m.get(f.ext) ?? 0) + 1);
@@ -247,6 +262,37 @@ export function BulkMetadataPanel({
           >
             Batch rename…
           </Button>
+          {onPlayAsPlaylist && audioCount >= 2 && (
+            <Tooltip label="Play the selected audio files one after another (Enter)">
+              <Button
+                size="xs"
+                variant="light"
+                color="green"
+                leftSection={<IconPlayerPlay size={14} />}
+                onClick={onPlayAsPlaylist}
+              >
+                Play as playlist ({audioCount})
+              </Button>
+            </Tooltip>
+          )}
+          {queueStatus && (
+            <Group gap={4} wrap="nowrap">
+              <Badge size="sm" variant="light" color="green">
+                Playing {queueStatus.position} / {queueStatus.total}
+              </Badge>
+              <Tooltip label="Stop the playlist (the current track keeps playing)">
+                <Button
+                  size="compact-xs"
+                  variant="subtle"
+                  color="gray"
+                  leftSection={<IconPlayerStop size={12} />}
+                  onClick={onStopPlaylist}
+                >
+                  Stop
+                </Button>
+              </Tooltip>
+            </Group>
+          )}
           {canCompare(selectedFiles) && (
             <Button
               size="xs"

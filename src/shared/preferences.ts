@@ -40,6 +40,9 @@ export interface ExternalAppRegistration {
 
 export type Unit = 'mm' | 'in';
 
+/** Anti-aliasing for the 3D preview. 'auto' = old behavior (MSAA from the quality tier). */
+export type AntiAliasing = 'auto' | 'off' | 'fxaa' | 'smaa' | 'msaa';
+
 // Duplicated rather than imported from src/main/logger.ts so this shared
 // module stays pure — main-only imports would break renderer typecheck and
 // vitest (no Electron `app` in system Node).
@@ -86,6 +89,8 @@ export interface PreferencesFile {
   showGrid?: boolean;
   /** Field of view (degrees) of the 3D preview camera. Default 38. */
   fov?: number;
+  /** Anti-aliasing mode of the 3D preview. Default 'auto'. */
+  antiAliasing?: AntiAliasing;
 }
 
 export function emptyPreferences(): PreferencesFile {
