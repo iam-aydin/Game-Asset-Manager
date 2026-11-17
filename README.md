@@ -110,8 +110,7 @@ For supported 3D models the metadata panel shows:
 
 ### 🏷️ Asset organization
 - **Hierarchical tags**, for example `characters/heroes/hero_01`, with a tags sidebar, bulk tag editing and bulk metadata.
-- **Ratings** 1–5.
-- **Smart Collections:** save search text, extensions, tags and minimum rating as a rule set.
+- **Smart Collections:** save search text, extensions and tags as a rule set.
 - **Collections**, **Favorites** and **Recent assets**.
 - **Folder context menus** for common file and folder operations.
 - **Compare** two files side by side.
@@ -170,14 +169,14 @@ For supported 3D models the metadata panel shows:
 
 1. Start the app and **open a folder as a library**.
 2. Browse while thumbnails generate. Click a file to preview it.
-3. `Space` for fullscreen preview, `1`–`5` to rate.
+3. `Space` for fullscreen preview.
 4. Right-click for tags, move, rename, open with, export and more.
 
 ### Your data
 - Each library has a SQLite database at the root of its folder and a unique UUID.
 - Machine-specific paths live in the app's user-data folder:
-  - **macOS:** `~/Library/Application Support/<app folder>/`
-  - **Windows:** `%APPDATA%/<app folder>/`
+  - **macOS:** `~/Library/Application Support/gam/`
+  - **Windows:** `%APPDATA%/gam/`
 - `libraries.json` maps library UUIDs to local paths. Moving a library to another machine may need a reconnect.
 - `preferences.json` holds global settings: external app routes, NAS polling interval and render quality.
 - Your asset files change only when you move, rename or delete them from inside the app.
@@ -191,7 +190,6 @@ For supported 3D models the metadata panel shows:
 | Back / Forward / Up | `Alt+←` or `Backspace` / `Alt+→` / `Alt+↑` |
 | Previous / Next file | `←` / `→` |
 | Fullscreen preview | `Space` |
-| Rating | `0`–`5` |
 | Copy / Cut / Paste | `Ctrl/Cmd + C` / `X` / `V` |
 | Duplicate | `Ctrl/Cmd + D` |
 | New folder | `Ctrl/Cmd + Shift + N` |
