@@ -53,6 +53,7 @@ import { CropOverlay } from './CropOverlay';
 import { AspectCropOverlay, AspectMenu, isAspectId, type AspectId, type CropRect } from './AspectCropOverlay';
 import { MiniIcon } from './PlayerIcons';
 import { PreviewFullscreenButton } from './PreviewFullscreenButton';
+import { stackScale } from './ZoomControl';
 import {
   GLASS_BUTTON_CLASS,
   GLASS_POPOVER_CLASS,
@@ -614,6 +615,7 @@ export function PreviewPane({
   const stripInside = isModel;
   // Viewers that use the round glass mini + fullscreen buttons in the bottom right corner.
   const roundBtns = isImage || isModel;
+  const btnScale = isImage ? stackScale(boxPx.h) : 1;
 
   // Interface hidden in the mini player (3D models only).
   const hideChrome = miniChromeHidden;
@@ -1250,7 +1252,15 @@ export function PreviewPane({
                     ? // 3D: top right (the XYZ gizmo lives in the bottom right)
                       { position: 'absolute', top: isFull ? 56 : 12, right: 12, zIndex: 6 }
                     : roundBtns
-                      ? { position: 'absolute', bottom: 62, right: 12, zIndex: 6 }
+                      ? {
+                          position: 'absolute',
+                          bottom: 62 * btnScale,
+                          right: 12 * btnScale,
+                          zIndex: 6,
+                          transform: `scale(${btnScale})`,
+                          transformOrigin: '100% 100%',
+                          transition: 'transform 0.25s ease, bottom 0.25s ease, right 0.25s ease'
+                        }
                       : { position: 'absolute', top: 8, right: 8, zIndex: 5 }
                 }
               >
@@ -1261,12 +1271,35 @@ export function PreviewPane({
 
           {/* Fullscreen button (images, icons, 3D models): runs the same toggle as the F key */}
           {roundBtns && !mini && (
-            <PreviewFullscreenButton
-              onClick={toggleFullscreen}
-              isFullscreen={isFull}
-              placement={isModel ? 'top' : 'bottom'}
-              offset={isFull ? 44 : 0}
-            />
+            isModel ? (
+              <PreviewFullscreenButton
+                onClick={toggleFullscreen}
+                isFullscreen={isFull}
+                placement="top"
+                offset={isFull ? 44 : 0}
+              />
+            ) : (
+              <div
+                style={{
+                  position: 'absolute',
+                  right: 0,
+                  bottom: 0,
+                  width: 0,
+                  height: 0,
+                  zIndex: 6,
+                  transform: `scale(${btnScale})`,
+                  transformOrigin: '100% 100%',
+                  transition: 'transform 0.25s ease'
+                }}
+              >
+                <PreviewFullscreenButton
+                  onClick={toggleFullscreen}
+                  isFullscreen={isFull}
+                  placement="bottom"
+                  offset={isFull ? 44 : 0}
+                />
+              </div>
+            )
           )}
 
           {selectionCount > 1 && !mini && (

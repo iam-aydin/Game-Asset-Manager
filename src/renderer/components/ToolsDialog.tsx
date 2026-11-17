@@ -534,7 +534,7 @@ export function ToolsDialog({ tool, libraryId, fileId, filename, upscalerOn, get
             {done && done.ok && done.path && (
               <Stack gap={4}>
                 <Text size="sm" c="green">
-                  Saved {baseName(done.path)} ({mb(done.sizeBytes ?? 0)}) next to the original.
+                  Saved {baseName(done.path)} ({mb(done.sizeBytes ?? 0)}).
                 </Text>
                 {done.targetBytes != null && (
                   <Text size="xs" c={done.sizeBytes! > done.targetBytes ? 'yellow' : 'dimmed'}>
@@ -592,7 +592,7 @@ export function ToolsDialog({ tool, libraryId, fileId, filename, upscalerOn, get
                     disabled={!plan?.ok}
                     onClick={() => void start(false)}
                   >
-                    Run
+                    Run (Desktop)
                   </UnstyledButton>
                 </>
               )}

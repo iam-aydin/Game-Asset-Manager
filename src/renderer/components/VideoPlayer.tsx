@@ -247,7 +247,7 @@ const DEFAULT_AUDIO_FX: AudioFx = {
 };
 
 // ---- Persisted prefs (same pattern as the audio player's effects store) ----
-// Mute is intentionally NOT persisted: nobody wants a video to silently open muted.
+// Mute is persisted too (muted: boolean), so it survives switching videos and restarts.
 // Scale/zoom/pan is intentionally NOT persisted either: every video opens at "Fit".
 
 type PersistedVideoPrefs = {
@@ -255,6 +255,7 @@ type PersistedVideoPrefs = {
   volume: number; // 0..2 (anything above 1 uses the Web Audio boost gain)
   modular: ModularSettings;
   isLooping: boolean;
+  muted: boolean;
   loopTouched: boolean; // GAM-LOOP: true once the user toggled loop themselves
 } & VideoFx &
   AudioFx;
@@ -262,6 +263,7 @@ type PersistedVideoPrefs = {
 const DEFAULT_VIDEO_PREFS: PersistedVideoPrefs = {
   speed: 1,
   volume: 1,
+  muted: false,
   isLooping: true, // GAM-LOOP: on by default
   loopTouched: false,
   modular: { ...DEFAULT_MODULAR },
@@ -592,7 +594,7 @@ export function VideoPlayer({
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [volume, setVolume] = useState(() => videoPrefsStore.get().volume);
-  const [isMuted, setIsMuted] = useState(false);
+  const [isMuted, setIsMuted] = useState(() => videoPrefsStore.get().muted);
   const [speed, setSpeed] = useState(() => videoPrefsStore.get().speed);
   const [isLooping, setIsLooping] = useState(() => videoPrefsStore.get().isLooping);
   // Modular pitch / speed: a new random roll each time the video starts or loops.
@@ -1068,7 +1070,7 @@ export function VideoPlayer({
     if (!v) return;
     v.volume = Math.max(0, Math.min(1, volEff));
     v.muted = isMuted;
-    videoPrefsStore.set({ volume });
+    videoPrefsStore.set({ volume, muted: isMuted });
   }, [volume, isMuted, volEff]);
 
   useEffect(() => {

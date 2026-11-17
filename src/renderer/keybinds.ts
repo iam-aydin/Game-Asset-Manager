@@ -46,6 +46,7 @@ export const ACTIONS = {
   'folder.new': { label: 'New folder', scope: 'global', defaults: [k('KeyN', { ctrl: true, shift: true })] },
   'file.cut': { label: 'Cut (move into a container folder)', scope: 'global', defaults: [k('KeyX', { ctrl: true })] },
   'file.paste': { label: 'Paste into this container folder', scope: 'global', defaults: [k('KeyV', { ctrl: true })] },
+  'file.copy': { label: 'Copy (models, paste with Ctrl+V)', scope: 'global', defaults: [k('KeyC', { ctrl: true })] },
   'file.fullscreenPreview': { label: 'Fullscreen preview', scope: 'global', defaults: [k('Space')] },
   'rate.0': { label: 'Rating: none', scope: 'global', defaults: [k('Digit0'), k('Numpad0')] },
   'rate.1': { label: 'Rating: 1', scope: 'global', defaults: [k('Digit1'), k('Numpad1')] },

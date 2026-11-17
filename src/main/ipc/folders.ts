@@ -1,4 +1,5 @@
 import { ipcMain } from 'electron';
+import { registerRealContainersIpc } from './real-containers';
 import { lstat, mkdir, readdir, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { IPC } from '@shared/ipc-channels';
@@ -52,6 +53,7 @@ async function measureFolder(
 }
 
 export function registerFoldersIpc(): void {
+  registerRealContainersIpc();
   // A finished rescan means the disk may have changed: recount on the next tree load.
   scanner.on('scan-complete', (libraryId: string) => markCountsStale(libraryId));
 

@@ -907,7 +907,7 @@ async function runJob(
   mkdirSync(tmpDir, { recursive: true });
   const tmpOut = join(tmpDir, `${safe}.${plan.ext}`);
   const tag = `p_${safe}`;
-  const outDir = dirname(src);
+  const outDir = o.saveAs ? dirname(src) : app.getPath('desktop');
   const stem = basename(src, extname(src));
 
   let lastEmit = 0;
@@ -933,24 +933,28 @@ async function runJob(
       emit(lo + (hi - lo) * Math.min(1, frac), stage, speed, eta);
     });
   };
+  // Save As: ask for the location BEFORE any encoding starts. No location = nothing runs.
+  let chosen: string | null = null;
+  if (o.saveAs) {
+    emit(0, 'Choose where to save...', null, null);
+    const win = BrowserWindow.fromWebContents(sender);
+    const saveOpts = {
+      title: 'Save as',
+      defaultPath: uniqueOut(dirname(src), stem, plan.suffix, plan.ext),
+      filters: [{ name: plan.ext.toUpperCase(), extensions: [plan.ext] }]
+    };
+    const pick = win
+      ? await dialog.showSaveDialog(win, saveOpts)
+      : await dialog.showSaveDialog(saveOpts);
+    if (pick.canceled || !pick.filePath) return { ok: false, canceled: true };
+    chosen = pick.filePath;
+  }
+
   const failed = (err: string): RunResult =>
     job.canceled ? { ok: false, canceled: true } : { ok: false, error: lastLine(err) };
   const done = async (suffix: string, targetBytes?: number, note?: string): Promise<RunResult> => {
-    let wanted = uniqueOut(outDir, stem, suffix, plan.ext);
-    if (o.saveAs) {
-      const win = BrowserWindow.fromWebContents(sender);
-      const saveOpts = {
-        title: 'Save as',
-        defaultPath: wanted,
-        filters: [{ name: plan.ext.toUpperCase(), extensions: [plan.ext] }]
-      };
-      const pick = win
-        ? await dialog.showSaveDialog(win, saveOpts)
-        : await dialog.showSaveDialog(saveOpts);
-      if (pick.canceled || !pick.filePath) return { ok: false, canceled: true };
-      wanted = pick.filePath;
-      if (existsSync(wanted)) rmSync(wanted, { force: true }); // the dialog already asked about overwriting
-    }
+    let wanted = chosen ?? uniqueOut(outDir, stem, suffix, plan.ext);
+    if (chosen && existsSync(wanted)) rmSync(wanted, { force: true }); // the dialog already asked about overwriting
     const finalPath = moveInto(tmpOut, wanted);
     produced.add(finalPath);
     emit(100, 'Done', null, 0);

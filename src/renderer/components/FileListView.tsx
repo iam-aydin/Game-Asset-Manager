@@ -7,6 +7,8 @@ import { COLOR_LABEL_HEX } from '@shared/ratings';
 import { formatBytes, formatDateTime } from '../util/format';
 import type { TileClickModifiers } from './ThumbGrid';
 import { GlassFolderMini } from './FolderGlyphs';
+import { startPointerDrag, type DragPayload, type DropTarget } from '../util/pointer-drag';
+import { ipc } from '../ipc-client';
 
 interface Props {
   /** Active library id, or null in "All Libraries" mode. Tile thumbs use
@@ -22,6 +24,8 @@ interface Props {
   folders?: FolderTreeNode[];
   onOpenFolder?: (path: string) => void;
   onFolderContextMenu?: (node: FolderTreeNode, x: number, y: number) => void;
+  /** Files / folders dropped on a folder row or tree row. */
+  onDropOnFolder?: (target: DropTarget, payload: DragPayload) => void;
 }
 
 const ROW_HEIGHT = 36;
@@ -207,7 +211,8 @@ export function FileListView({
   onTileContextMenu,
   folders,
   onOpenFolder,
-  onFolderContextMenu
+  onFolderContextMenu,
+  onDropOnFolder
 }: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [cols, setColsState] = useState<ColId[]>(() => readCols());
@@ -235,6 +240,33 @@ export function FileListView({
     estimateSize: () => ROW_HEIGHT,
     overscan: 12
   });
+
+  const beginDrag = (
+    e: React.MouseEvent,
+    pressed: FileRecord | null,
+    pressedFolder: string | null
+  ) => {
+    if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    if (!pressed && !onDropOnFolder) return;
+    let payload: DragPayload;
+    if (pressed) {
+      const inSel = selectedIds.has(pressed.id);
+      payload = {
+        files: inSel ? files.filter((x) => selectedIds.has(x.id)) : [pressed],
+        folders: []
+      };
+    } else {
+      payload = { files: [], folders: pressedFolder !== null ? [pressedFolder] : [] };
+    }
+    startPointerDrag(e.nativeEvent, payload, {
+      onDrop: onDropOnFolder ? (t) => onDropOnFolder(t, payload) : undefined,
+      onLeaveWindow: pressed
+        ? () => {
+            ipc.startFileDrag(pressed.libraryId, pressed.id % 1000000000);
+          }
+        : undefined
+    });
+  };
 
   if (files.length + folderCount === 0) {
     return (
@@ -293,6 +325,7 @@ export function FileListView({
                 template={template}
                 style={{ transform: `translateY(${vRow.start}px)` }}
                 onOpen={() => onOpenFolder?.(f.path)}
+                onMouseDown={(e) => beginDrag(e, null, f.path)}
                 onContextMenu={(e) => {
                   e.preventDefault();
                   onFolderContextMenu?.(f, e.clientX, e.clientY);
@@ -310,6 +343,7 @@ export function FileListView({
               thumbVersion={thumbVersions.get(file.id) ?? 0}
               selected={selectedIds.has(file.id)}
               isPrimary={primaryId === file.id}
+              onMouseDown={(e) => beginDrag(e, file, null)}
               style={{ transform: `translateY(${vRow.start}px)` }}
               onClick={(e) =>
                 onTileClick(file.id, {
@@ -448,7 +482,8 @@ function Row({
   isPrimary,
   style,
   onClick,
-  onContextMenu
+  onContextMenu,
+  onMouseDown
 }: {
   file: FileRecord;
   cols: ColId[];
@@ -459,6 +494,7 @@ function Row({
   style?: React.CSSProperties;
   onClick: (e: React.MouseEvent) => void;
   onContextMenu: (e: React.MouseEvent) => void;
+  onMouseDown?: (e: React.MouseEvent) => void;
 }) {
   const meta = useMemo(() => parseMeta(file.metadataJson), [file.metadataJson]);
   const showThumb = file.hasThumb || thumbVersion > 0;
@@ -469,6 +505,7 @@ function Row({
       type="button"
       onClick={onClick}
       onContextMenu={onContextMenu}
+      onMouseDown={onMouseDown}
       title={file.relPath}
       style={{
         all: 'unset',
@@ -510,6 +547,7 @@ function Thumb({ url, ext }: { url: string | null; ext: string }) {
         src={url}
         alt=""
         loading="lazy"
+        draggable={false}
         style={{
           width: 24,
           height: 24,
@@ -545,7 +583,8 @@ function FolderRow({
   template,
   style,
   onOpen,
-  onContextMenu
+  onContextMenu,
+  onMouseDown
 }: {
   node: FolderTreeNode;
   cols: ColId[];
@@ -553,6 +592,7 @@ function FolderRow({
   style?: React.CSSProperties;
   onOpen: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
+  onMouseDown?: (e: React.MouseEvent) => void;
 }) {
   const [focus, setFocus] = useState(false);
   const count = node.recursiveFileCount;
@@ -560,6 +600,8 @@ function FolderRow({
     <button
       type="button"
       title={node.path}
+      data-drop-path={node.path}
+      onMouseDown={onMouseDown}
       onDoubleClick={onOpen}
       onKeyDown={(e) => {
         if (e.key === 'Enter') {

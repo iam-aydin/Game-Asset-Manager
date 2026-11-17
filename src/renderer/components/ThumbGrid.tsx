@@ -10,6 +10,7 @@ import { modelFitsAnyBed } from '@shared/print-bed';
 import { formatBytes } from '../util/format';
 import { extColor } from '@shared/ext-colors';
 import { ipc } from '../ipc-client';
+import { startPointerDrag, type DragPayload, type DropTarget } from '../util/pointer-drag';
 import { FolderTile } from './FolderTile';
 import { createPortal } from 'react-dom';
 import { GLASS_POPOVER_CLASS } from './Glasseffect';
@@ -46,10 +47,14 @@ interface Props {
   onSelectFiles?: (ids: number[]) => void;
   /** Creates a new folder in the folder you are in (right-click on empty space). */
   onNewFolder?: () => void;
+  /** Highlights this folder tile (used right after a folder was created). */
+  selectFolderRequest?: { path: string; n: number } | null;
   /** Container view: paste the cut files into the folder you are in. */
   onPaste?: () => void;
   /** True while files are waiting to be pasted. */
   canPaste?: boolean;
+  /** Files / folders dropped on a folder tile or tree row. Undefined = no internal drop targets. */
+  onDropOnFolder?: (target: DropTarget, payload: DragPayload) => void;
   /** Navigation (back / forward / up / path) shown in the bar above the files. */
   headerNav?: React.ReactNode;
 }
@@ -160,8 +165,10 @@ export function ThumbGrid({
   onClearFileSelection,
   onSelectFiles,
   onNewFolder,
+  selectFolderRequest,
   onPaste,
   canPaste,
+  onDropOnFolder,
   headerNav
 }: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -248,6 +255,11 @@ export function ThumbGrid({
       renameTimerRef.current = null;
     }
   }, []);
+
+  // A folder was just created: highlight it so F2 / a slow click renames it.
+  useEffect(() => {
+    if (selectFolderRequest) setSelFolderPath(selectFolderRequest.path);
+  }, [selectFolderRequest, setSelFolderPath]);
 
   // A file got selected: the folder highlight goes away.
   useEffect(() => {
@@ -497,6 +509,37 @@ export function ThumbGrid({
   );
   // --------------------------------------------------------------------------
 
+  // Starts an internal pointer drag. Drop on a folder = move; leave the window = native drag to Explorer.
+  const beginDrag = (
+    e: React.MouseEvent,
+    pressedFile: FileRecord | null,
+    pressedFolder: string | null
+  ) => {
+    if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    if (!pressedFile && !onDropOnFolder) return;
+    const selFiles = files.filter((x) => selectedIds.has(x.id));
+    const selFolders = [...selFolderSet];
+    let payload: DragPayload;
+    if (pressedFile) {
+      const inSel = selectedIds.has(pressedFile.id);
+      payload = { files: inSel ? selFiles : [pressedFile], folders: inSel ? selFolders : [] };
+    } else {
+      const inSel = pressedFolder !== null && selFolderSet.has(pressedFolder);
+      payload = {
+        files: inSel ? selFiles : [],
+        folders: inSel ? selFolders : pressedFolder !== null ? [pressedFolder] : []
+      };
+    }
+    startPointerDrag(e.nativeEvent, payload, {
+      onDrop: onDropOnFolder ? (t) => onDropOnFolder(t, payload) : undefined,
+      onLeaveWindow: pressedFile
+        ? () => {
+            ipc.startFileDrag(pressedFile.libraryId, pressedFile.id % 1000000000);
+          }
+        : undefined
+    });
+  };
+
   const canDecrease = thumbSize > THUMB_SIZE_MIN;
   const canIncrease = thumbSize < THUMB_SIZE_MAX;
 
@@ -646,6 +689,8 @@ export function ThumbGrid({
                       <div
                         key={'folder:' + f.path}
                         style={{ position: 'relative', height: tileHeight }}
+                        data-drop-path={f.path}
+                        onMouseDown={(e) => beginDrag(e, null, f.path)}
                         onClick={() => handleFolderClick(f.path)}
                         onDoubleClick={() => handleFolderDoubleClick(f.path)}
                       >
@@ -714,10 +759,7 @@ export function ThumbGrid({
                           }
                           onTileContextMenu(file.id, e.clientX, e.clientY);
                         }}
-                        onDragStart={(e) => {
-                          e.preventDefault();
-                          ipc.startFileDrag(file.libraryId, file.id % 1000000000);
-                        }}
+                        onMouseDown={(e) => beginDrag(e, file, null)}
                       />
                     );
                   })}
@@ -822,7 +864,7 @@ function Tile({
   bedFitProblem,
   onClick,
   onContextMenu,
-  onDragStart
+  onMouseDown
 }: {
   file: FileRecord;
   thumbVersion: number;
@@ -832,7 +874,7 @@ function Tile({
   bedFitProblem: boolean;
   onClick: (e: React.MouseEvent) => void;
   onContextMenu?: (e: React.MouseEvent) => void;
-  onDragStart?: (e: React.DragEvent) => void;
+  onMouseDown?: (e: React.MouseEvent) => void;
 }) {
   const color = extColor(file.ext);
   const [hover, setHover] = useState(false);
@@ -847,8 +889,8 @@ function Tile({
       type="button"
       onClick={onClick}
       onContextMenu={onContextMenu}
-      draggable
-      onDragStart={onDragStart}
+      onMouseDown={onMouseDown}
+      onDragStart={(e) => e.preventDefault()}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{
@@ -907,6 +949,7 @@ function Tile({
             src={thumbUrl}
             alt={file.filename}
             loading="lazy"
+            draggable={false}
             style={{ width: '100%', height: '100%', objectFit: 'cover' }}
           />
         ) : hasError ? (

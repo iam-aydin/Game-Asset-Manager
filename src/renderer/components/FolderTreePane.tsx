@@ -10,6 +10,7 @@ import {
 import type { FolderTreeNode } from '@shared/types';
 import { FolderContextMenu, type FolderMenuState } from './FolderTile';
 import { GlassFolderMini } from './FolderGlyphs';
+import { startPointerDrag, type DragPayload, type DropTarget } from '../util/pointer-drag';
 
 
 interface Props {
@@ -25,6 +26,8 @@ interface Props {
   onRescan: (path: string) => void;
   onZip?: (path: string) => void;
   onInfo?: (path: string, name: string) => void;
+  /** Folders dragged from this tree and dropped on a folder. */
+  onDropOnFolder?: (target: DropTarget, payload: DragPayload) => void;
 }
 
 /** Windows Explorer style navigation pane: the library's folders as a tree. */
@@ -39,7 +42,8 @@ export function FolderTreePane({
   onReveal,
   onRescan,
   onZip,
-  onInfo
+  onInfo,
+  onDropOnFolder
 }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(['']));
   const [menu, setMenu] = useState<FolderMenuState>({
@@ -106,6 +110,7 @@ export function FolderTreePane({
         onSelect={onSelect}
         isFavorite={isFavorite}
         onToggleFavorite={onToggleFavorite}
+        onDropOnFolder={onDropOnFolder}
         onContext={(x, y, node) =>
           setMenu({ opened: true, x, y, path: node.path, name: node.name })
         }
@@ -141,7 +146,8 @@ function TreeRow({
   onSelect,
   isFavorite,
   onToggleFavorite,
-  onContext
+  onContext,
+  onDropOnFolder
 }: {
   node: FolderTreeNode;
   label?: string;
@@ -154,6 +160,7 @@ function TreeRow({
   isFavorite: (path: string) => boolean;
   onToggleFavorite: (path: string) => void;
   onContext: (x: number, y: number, node: FolderTreeNode) => void;
+  onDropOnFolder?: (target: DropTarget, payload: DragPayload) => void;
 }) {
   const [hover, setHover] = useState(false);
   const rowRef = useRef<HTMLDivElement | null>(null);
@@ -178,7 +185,15 @@ function TreeRow({
       <div
         ref={rowRef}
         role="treeitem"
+        data-drop-path={node.path}
         aria-selected={selected}
+        onMouseDown={(e) => {
+          if (isRoot || e.button !== 0 || !onDropOnFolder) return;
+          const payload: DragPayload = { files: [], folders: [node.path] };
+          startPointerDrag(e.nativeEvent, payload, {
+            onDrop: (t) => onDropOnFolder(t, payload)
+          });
+        }}
         onClick={() => onSelect(node.path)}
         onDoubleClick={() => hasChildren && toggle(node.path)}
         onContextMenu={(e) => {
@@ -290,6 +305,7 @@ function TreeRow({
           onSelect={onSelect}
           isFavorite={isFavorite}
           onToggleFavorite={onToggleFavorite}
+          onDropOnFolder={onDropOnFolder}
           onContext={onContext}
         />
       ))}

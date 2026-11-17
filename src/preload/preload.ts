@@ -66,6 +66,11 @@ const api: IpcApi & {
   onToolsProgress: (handler: (p: any) => void) => () => void;
   reloadLibrary: (id: string) => Promise<any>;
   setLibraryPath: (id: string) => Promise<any>;
+  rcCreate: (name: string) => Promise<any>;
+  rcList: () => Promise<any>;
+  rcPlace: (req: unknown) => Promise<any>;
+  rcMoveFolders: (req: unknown) => Promise<any>;
+  rcReveal: () => Promise<void>;
 } = {
   pickFolder: () => ipcRenderer.invoke(IPC.pickFolder) as Promise<PickFolderResult>,
   listLibraries: () => ipcRenderer.invoke(IPC.listLibraries) as Promise<LibrarySummary[]>,
@@ -79,6 +84,11 @@ const api: IpcApi & {
     ipcRenderer.invoke(IPC.revealLibrary, id) as Promise<RevealLibraryResult>,
   reloadLibrary: (id: string) => ipcRenderer.invoke(IPC.reloadLibrary, id) as Promise<any>,
   setLibraryPath: (id: string) => ipcRenderer.invoke(IPC.setLibraryPath, id) as Promise<any>,
+  rcCreate: (name: string) => ipcRenderer.invoke('rc:create', name) as Promise<any>,
+  rcList: () => ipcRenderer.invoke('rc:list') as Promise<any>,
+  rcPlace: (req: unknown) => ipcRenderer.invoke('rc:place', req) as Promise<any>,
+  rcMoveFolders: (req: unknown) => ipcRenderer.invoke('rc:moveFolders', req) as Promise<any>,
+  rcReveal: () => ipcRenderer.invoke('rc:reveal') as Promise<void>,
 
   createFolder: (libraryId: string, parentPath: string) => ipcRenderer.invoke('folders:create', libraryId, parentPath),
   listContainerFolders: (containerId: number) => ipcRenderer.invoke('collections:listFolders', containerId),

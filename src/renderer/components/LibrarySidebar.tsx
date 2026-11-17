@@ -23,6 +23,7 @@ import {
   IconTrashX
 } from '@tabler/icons-react';
 import type { LibrarySummary } from '@shared/types';
+import { GLASS_POPOVER_CLASS } from './Glasseffect';
 
 interface Props {
   libraries: LibrarySummary[];
@@ -196,7 +197,7 @@ function LibraryRow({
             <IconDotsVertical size={14} />
           </ActionIcon>
         </Menu.Target>
-        <Menu.Dropdown>
+        <Menu.Dropdown className={GLASS_POPOVER_CLASS}>
           <Menu.Item leftSection={<IconPencil size={14} />} onClick={onRename}>
             Rename…
           </Menu.Item>
@@ -208,7 +209,7 @@ function LibraryRow({
             Show in Folder
           </Menu.Item>
           <Menu.Item leftSection={<IconRefresh size={14} />} onClick={onReload}>
-${1}Refresh
+Refresh
           </Menu.Item>
           <Menu.Item leftSection={<IconFolderSearch size={14} />} onClick={onSetPath}>
             Change Directory
@@ -251,7 +252,16 @@ function RenameModal({
   const canSubmit = trimmed.length > 0 && trimmed !== library?.name;
 
   return (
-    <Modal opened={opened} onClose={onCancel} title="Rename library" centered size="sm">
+    <Modal
+      opened={opened}
+      onClose={onCancel}
+      title="Rename library"
+      centered
+      size="sm"
+      radius="lg"
+      overlayProps={{ backgroundOpacity: 0.45, blur: 6 }}
+      classNames={{ content: GLASS_POPOVER_CLASS, header: 'gam-modal-header' }}
+    >
       <Stack gap="md">
         <TextInput
           label="Name"
@@ -287,18 +297,20 @@ function DeleteCacheModal({
   onConfirm: () => void;
 }) {
   return (
-    <Modal opened={opened} onClose={onCancel} title="Remove and delete cache?" centered size="md">
+    <Modal
+      opened={opened}
+      onClose={onCancel}
+      title="Remove and delete cache?"
+      centered
+      size="md"
+      radius="lg"
+      overlayProps={{ backgroundOpacity: 0.45, blur: 6 }}
+      classNames={{ content: GLASS_POPOVER_CLASS, header: 'gam-modal-header' }}
+    >
       <Stack gap="md">
         <Text size="sm">
-          This removes <b>{library?.name}</b> from the app and deletes its{' '}
-          <Text span ff="monospace" size="sm">
-            .meshFlask.db
-          </Text>{' '}
-          and{' '}
-          <Text span ff="monospace" size="sm">
-            .meshFlask/
-          </Text>{' '}
-          thumbnail cache on disk.
+          This removes <b>{library?.name}</b> from GAM and deletes its database and thumbnail cache
+          on disk.
         </Text>
         <Text size="sm" c="dimmed">
           Your 3D files are not touched. Re-adding the library will trigger a fresh scan and

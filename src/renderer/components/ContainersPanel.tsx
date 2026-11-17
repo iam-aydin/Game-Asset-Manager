@@ -44,6 +44,10 @@ interface Props {
   onNewFolder: (containerId: number, parentFolderId: number | null) => void;
   onRenameFolder: (containerId: number, folderId: number, currentName: string) => void;
   onDeleteFolder: (containerId: number, folderId: number) => void;
+  /** Real containers (real folders on disk). They are libraries, shown first with a folder icon. */
+  realContainers?: { id: string; name: string }[];
+  selectedRealId?: string | null;
+  onOpenReal?: (libraryId: string) => void;
 }
 
 const LINE = 'color-mix(in srgb, var(--mantine-color-indigo-4) 38%, transparent)';
@@ -84,7 +88,10 @@ export function ContainersPanel({
   onSelectFolder,
   onNewFolder,
   onRenameFolder,
-  onDeleteFolder
+  onDeleteFolder,
+  realContainers = [],
+  selectedRealId = null,
+  onOpenReal
 }: Props) {
   const [expanded, setExpanded] = useState<Set<number>>(() => new Set());
   const [creating, setCreating] = useState(false);
@@ -195,7 +202,39 @@ export function ContainersPanel({
         </UnstyledButton>
       )}
 
-      {collections.length === 0 && !creating && (
+      {realContainers.map((rc) => {
+        const active = rc.id === selectedRealId;
+        return (
+          <UnstyledButton
+            key={'real:' + rc.id}
+            data-drop-path=""
+            data-drop-library={rc.id}
+            onClick={() => onOpenReal?.(rc.id)}
+            title="Real folder on disk"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              width: '100%',
+              padding: '4px 6px',
+              borderRadius: 6,
+              background: active
+                ? 'color-mix(in srgb, var(--mantine-color-indigo-4) 22%, transparent)'
+                : undefined,
+              borderLeft: active
+                ? '2px solid var(--mantine-color-indigo-4)'
+                : '2px solid transparent'
+            }}
+          >
+            <IconFolder size={14} color="var(--mantine-color-indigo-3)" />
+            <Text size="sm" truncate style={{ flex: 1, minWidth: 0 }}>
+              {rc.name}
+            </Text>
+          </UnstyledButton>
+        );
+      })}
+
+      {collections.length === 0 && realContainers.length === 0 && !creating && (
         <Text size="xs" c="dimmed">
           Group assets by game or project, so you know what you added where. Click + to create one.
         </Text>
