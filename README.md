@@ -87,8 +87,7 @@ Preview 3D assets inside your library without opening another app.
 - **Render quality:** four tiers (Low, Medium, High, Ultra) for shadows and texture sharpness. Anti-aliasing: Auto, Off, FXAA, SMAA, MSAA.
 - **Custom thumbnails:** capture your preferred camera angle as the asset thumbnail.
 - **Orientation overrides:** per-file rotation fix for models that import the wrong way up.
-- Supports glTF spec-gloss, multipart 3MF, and checks archives for unsafe zip content.
-- **Print helpers:** mm or inch units, a **fits-my-bed** check against your printer sizes (rotation allowed) and a **print-cost estimate** from your material costs.
+- Supports glTF spec-gloss and multipart 3MF, and checks archives for unsafe zip content.
 
 ### 📊 Detailed asset metadata
 For supported 3D models the metadata panel shows:
@@ -111,8 +110,8 @@ For supported 3D models the metadata panel shows:
 
 ### 🏷️ Asset organization
 - **Hierarchical tags**, for example `characters/heroes/hero_01`, with a tags sidebar, bulk tag editing and bulk metadata.
-- **Ratings** 1–5 and **color labels** (`Ctrl/Cmd + 1–5`).
-- **Smart Collections:** save search text, extensions, tags, minimum rating and color labels as a rule set.
+- **Ratings** 1–5.
+- **Smart Collections:** save search text, extensions, tags and minimum rating as a rule set.
 - **Collections**, **Favorites** and **Recent assets**.
 - **Folder context menus** for common file and folder operations.
 - **Compare** two files side by side.
@@ -153,7 +152,7 @@ For supported 3D models the metadata panel shows:
 - **Containers:** finds everything a model needs (textures, buffers, materials) and plans a move or copy first, so nothing is left behind.
 - **ZIP archives** and **collection exports**, to a destination you choose, with related textures, buffers, materials and license files included when available.
 - **Contact sheets** for visual browsing and sharing.
-- **Open with…** menu for Blender, Unreal Engine, Photoshop, slicers and others. Set a default per extension, pass args with `{file}` and `{profile}`, and keep named slicer profiles.
+- **Open with…** menu for Blender, Unreal Engine, Photoshop and other apps. Set a default per extension and pass custom arguments with `{file}`.
 
 ### 📚 Library management
 - Open any **folder as a library**. Changes on disk are picked up by a file watcher. Network drives are polled, with an adjustable interval.
@@ -171,16 +170,16 @@ For supported 3D models the metadata panel shows:
 
 1. Start the app and **open a folder as a library**.
 2. Browse while thumbnails generate. Click a file to preview it.
-3. `Space` for fullscreen preview, `1`–`5` to rate, `Ctrl/Cmd + 1–5` for color labels.
+3. `Space` for fullscreen preview, `1`–`5` to rate.
 4. Right-click for tags, move, rename, open with, export and more.
 
 ### Your data
-- Each library has a **`.Gam.db`** SQLite database at the root of its folder and a unique UUID.
+- Each library has a SQLite database at the root of its folder and a unique UUID.
 - Machine-specific paths live in the app's user-data folder:
-  - **macOS:** `~/Library/Application Support/gam/`
-  - **Windows:** `%APPDATA%/gam/`
+  - **macOS:** `~/Library/Application Support/<app folder>/`
+  - **Windows:** `%APPDATA%/<app folder>/`
 - `libraries.json` maps library UUIDs to local paths. Moving a library to another machine may need a reconnect.
-- `preferences.json` holds global settings: units, external app routes, NAS polling interval, render quality, print beds and costs.
+- `preferences.json` holds global settings: external app routes, NAS polling interval and render quality.
 - Your asset files change only when you move, rename or delete them from inside the app.
 
 <br>
@@ -193,7 +192,6 @@ For supported 3D models the metadata panel shows:
 | Previous / Next file | `←` / `→` |
 | Fullscreen preview | `Space` |
 | Rating | `0`–`5` |
-| Color label | `Ctrl/Cmd + 0–5` |
 | Copy / Cut / Paste | `Ctrl/Cmd + C` / `X` / `V` |
 | Duplicate | `Ctrl/Cmd + D` |
 | New folder | `Ctrl/Cmd + Shift + N` |
