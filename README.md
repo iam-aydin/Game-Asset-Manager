@@ -175,10 +175,10 @@ For supported 3D models the metadata panel shows:
 4. Right-click for tags, move, rename, open with, export and more.
 
 ### Your data
-- Each library has a **`.meshFlask.db`** SQLite database at the root of its folder and a unique UUID.
+- Each library has a **`.Gam.db`** SQLite database at the root of its folder and a unique UUID.
 - Machine-specific paths live in the app's user-data folder:
-  - **macOS:** `~/Library/Application Support/meshFlask/`
-  - **Windows:** `%APPDATA%/meshFlask/`
+  - **macOS:** `~/Library/Application Support/gam/`
+  - **Windows:** `%APPDATA%/gam/`
 - `libraries.json` maps library UUIDs to local paths. Moving a library to another machine may need a reconnect.
 - `preferences.json` holds global settings: units, external app routes, NAS polling interval, render quality, print beds and costs.
 - Your asset files change only when you move, rename or delete them from inside the app.
