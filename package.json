@@ -1,6 +1,6 @@
 {
   "name": "GAM",
-  "version": "1.4.5",
+  "version": "1.4.6",
   "description": "Organize your files and assets in one place without needing to switch to other apps: 3D models, images, audio, video and text.",
   "main": "out/main/index.js",
   "author": "iam-aydin",

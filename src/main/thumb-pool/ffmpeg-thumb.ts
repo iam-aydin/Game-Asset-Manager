@@ -216,7 +216,10 @@ function parseProbe(stderr: string): ProbeInfo | null {
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47];
 
 function looksLikePng(buf: Buffer): boolean {
-  return buf.length > 8 && PNG_SIGNATURE.every((b, i) => buf[i] === b);
+  if (buf.length <= 8) return false;
+  // PNG, or the JPEG that extractFrame now asks ffmpeg for (smaller on disk).
+  const isJpeg = buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+  return isJpeg || PNG_SIGNATURE.every((b, i) => buf[i] === b);
 }
 
 async function extractFrame(absPath: string, seekSec: number): Promise<Buffer | null> {
@@ -224,7 +227,7 @@ async function extractFrame(absPath: string, seekSec: number): Promise<Buffer | 
   // Same look as the other tiles: fit inside a square, letterboxed on #101113.
   const filter =
     `scale=${size}:${size}:force_original_aspect_ratio=decrease:flags=fast_bilinear,` +
-    `pad=${size}:${size}:(ow-iw)/2:(oh-ih)/2:color=0x101113`;
+    `pad=${size}:${size}:(ow-iw)/2:(oh-ih)/2:color=0x101113,format=yuvj420p`;
 
   const args = [
     '-hide_banner',
@@ -250,9 +253,9 @@ async function extractFrame(absPath: string, seekSec: number): Promise<Buffer | 
     '-f',
     'image2pipe',
     '-c:v',
-    'png',
-    '-compression_level',
-    '1',
+    'mjpeg',
+    '-q:v',
+    '4',
     'pipe:1'
   ];
 

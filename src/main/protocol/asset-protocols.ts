@@ -4,7 +4,7 @@ import { existsSync, statSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { readFile } from 'node:fs/promises';
 import { getOpenLibrary } from '@main/libraries/manager';
-import { thumbFilePath } from '@main/thumb-pool/storage';
+import { legacyThumbFilePath, thumbFilePath, thumbMimeType } from '@main/thumb-pool/storage';
 import { libraryThumbsDir } from '@main/appdata';
 import { isCoverCapableExt, readAudioCover, readAudioCoverThumb } from '@main/audio-cover';
 import type { AudioCover } from '@main/audio-cover';
@@ -177,9 +177,16 @@ export function registerAssetProtocols(): void {
       if (cover) return coverResponse(cover);
     }
 
-    const abs = thumbFilePath(libraryThumbsDir(lib.entry.id), parsed.fileId);
+    const thumbsDir = libraryThumbsDir(lib.entry.id);
+    let abs = thumbFilePath(thumbsDir, parsed.fileId);
+    // Not re-rendered yet: fall back to the old PNG until it is.
+    if (!existsSync(abs)) abs = legacyThumbFilePath(thumbsDir, parsed.fileId);
     if (!existsSync(abs)) return notFound('Thumbnail not yet rendered');
-    return net.fetch(pathToFileURL(abs).toString());
+    const data = await readFile(abs);
+    return new Response(new Uint8Array(data), {
+      status: 200,
+      headers: { 'content-type': thumbMimeType(data) }
+    });
   });
 
   // Full-size embedded cover art for the audio player. 404 when the file has

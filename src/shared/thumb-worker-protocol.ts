@@ -13,7 +13,7 @@ export const THUMB_WORKER_CHANNEL = {
   result: 'thumb-worker:result'
 } as const;
 
-export const THUMB_WORKER_RENDER_SIZE = 512;
+export const THUMB_WORKER_RENDER_SIZE = 256;
 
 export interface ThumbRenderRequest {
   jobId: number;

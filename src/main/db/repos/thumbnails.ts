@@ -12,8 +12,10 @@ import type Database from 'better-sqlite3';
  *       are re-rendered on first launch after this bump.
  *   3 — video thumbnails via ffmpeg only; re-render cached video placeholder
  *       tiles and previously failed videos.
+ *   4 â€” thumbnails stored as small WebP/JPEG (.thumb) instead of 512px PNGs;
+ *       every old thumbnail is re-rendered in the background and its PNG deleted.
  */
-export const RENDERER_VERSION = 3;
+export const RENDERER_VERSION = 4;
 
 export interface ThumbnailRow {
   fileId: number;

@@ -253,7 +253,7 @@ async function renderSvgThumbnail(req: ThumbRenderRequest): Promise<RenderOutput
     ctx2d.drawImage(img, (size - drawW) / 2, (size - drawH) / 2, drawW, drawH);
 
     const outBlob = await new Promise<Blob | null>((resolve) =>
-      canvas.toBlob(resolve, 'image/png')
+      canvas.toBlob(resolve, 'image/webp', 0.82)
     );
     if (!outBlob) throw new Error('canvas.toBlob returned null for SVG thumbnail');
     const png = new Uint8Array(await outBlob.arrayBuffer());
@@ -310,7 +310,7 @@ async function renderImageThumbnail(req: ThumbRenderRequest): Promise<RenderOutp
   bitmap.close();
 
   const outBlob = await new Promise<Blob | null>((resolve) =>
-    canvas.toBlob(resolve, 'image/png')
+    canvas.toBlob(resolve, 'image/webp', 0.82)
   );
   if (!outBlob) throw new Error('canvas.toBlob returned null for image thumbnail');
   const png = new Uint8Array(await outBlob.arrayBuffer());
@@ -409,7 +409,7 @@ async function renderAudioThumbnail(req: ThumbRenderRequest): Promise<RenderOutp
   }
 
   const outBlob = await new Promise<Blob | null>((resolve) =>
-    canvas.toBlob(resolve, 'image/png')
+    canvas.toBlob(resolve, 'image/webp', 0.82)
   );
   if (!outBlob) throw new Error('canvas.toBlob returned null for audio thumbnail');
   const png = new Uint8Array(await outBlob.arrayBuffer());
@@ -523,7 +523,7 @@ async function renderVideoThumbnail(req: ThumbRenderRequest): Promise<RenderOutp
   }
 
   const outBlob = await new Promise<Blob | null>((resolve) =>
-    canvas.toBlob(resolve, 'image/png')
+    canvas.toBlob(resolve, 'image/webp', 0.82)
   );
   if (!outBlob) throw new Error('canvas.toBlob returned null for video thumbnail');
   const png = new Uint8Array(await outBlob.arrayBuffer());
@@ -628,7 +628,7 @@ async function renderDocumentThumbnail(req: ThumbRenderRequest): Promise<RenderO
   }
 
   const outBlob = await new Promise<Blob | null>((resolve) =>
-    canvas.toBlob(resolve, 'image/png')
+    canvas.toBlob(resolve, 'image/webp', 0.82)
   );
   if (!outBlob) throw new Error('canvas.toBlob returned null for document thumbnail');
   const png = new Uint8Array(await outBlob.arrayBuffer());
@@ -697,7 +697,7 @@ async function renderToPng(req: ThumbRenderRequest): Promise<RenderOutput> {
   r.render(scene, camera);
 
   const blob = await new Promise<Blob | null>((resolve) =>
-    r.domElement.toBlob(resolve, 'image/png')
+    r.domElement.toBlob(resolve, 'image/webp', 0.82)
   );
   if (!blob) throw new Error('canvas.toBlob returned null');
   const png = new Uint8Array(await blob.arrayBuffer());
